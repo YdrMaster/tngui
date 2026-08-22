@@ -1,7 +1,8 @@
 # Rust 构建产物
 /target
-src-tauri/target
-src-tauri/gen
+
+# Tauri 生成的 schema（可再生；若做移动端，gen/android、gen/apple 需入库）
+/gen/schemas
 
 # 本地草稿（设计稿按其自身约定为 local-only，不入库）
 tng-gui-design.md

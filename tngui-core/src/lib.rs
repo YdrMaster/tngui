@@ -12,7 +12,7 @@ pub mod log;
 pub mod process;
 pub mod status;
 
-pub use config::{control_port, prepare_config, write_runtime_config, PrepareError};
+pub use config::{PrepareError, control_port, prepare_config, write_runtime_config};
 pub use log::BoundedLog;
-pub use process::{spawn_managed, kill_group, ManagedChild, TngSupervisor};
-pub use status::{fetch_status, StatusReport};
+pub use process::{ManagedChild, TngSupervisor, kill_group, spawn_managed};
+pub use status::{StatusReport, fetch_status};

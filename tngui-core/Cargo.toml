@@ -1,9 +1,8 @@
 [package]
 name = "tngui-core"
-description = "TNG GUI 包装器的核心逻辑：配置注入、进程生命周期、只读控制面状态。不依赖任何 TNG crate。"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+description = "TNG-GUI-core"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -17,8 +16,6 @@ tokio = { version = "1", features = [
     "net",
     "sync",
 ] }
-libc = "0.2"
 
-[lib]
-name = "tngui_core"
-path = "src/lib.rs"
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

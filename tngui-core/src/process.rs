@@ -1,7 +1,8 @@
 //! 进程契约（A）与捕获契约（C）。
 //!
 //! - `spawn_managed`：在新进程组里拉起子进程，stdout/stderr 按行捕获进 `BoundedLog`。
-//! - `kill_group`：给整个进程组发 SIGTERM（重启时先杀旧进程，避免泄漏孙进程）。
+//! - `kill_group`：终止整个进程组/进程树（重启时先杀旧进程，避免泄漏孙进程）。
+//!   Unix 用组信号 SIGTERM；Windows 用 `taskkill /T /F` 按进程树强杀。
 //! - `TngSupervisor`：组合上面两者，封装 `tng launch -c … --log-file …` 的启停。
 
 use std::io;
@@ -22,12 +23,19 @@ pub struct ManagedChild {
 
 /// 在新进程组里拉起 `command`，stdout/stderr 管道捕获进共享 `log`。
 ///
-/// 进程组设为 0 ⇒ 子进程自成一组（pgid == pid），便于整组终止。
+/// 子进程自成一组（pgid == pid），便于整组终止：
+/// Unix 设 process_group(0)；Windows 设 CREATE_NEW_PROCESS_GROUP（组长 pid 即组 id）。
 pub async fn spawn_managed(
     mut command: Command,
     log: Arc<Mutex<BoundedLog>>,
 ) -> io::Result<ManagedChild> {
+    #[cfg(unix)]
     command.process_group(0);
+    #[cfg(windows)]
+    {
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
     command.stdin(std::process::Stdio::null());
@@ -35,7 +43,7 @@ pub async fn spawn_managed(
     let mut child = command.spawn()?;
     let pid = child
         .id()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "子进程无 pid"))?;
+        .ok_or_else(|| io::Error::other("子进程无 pid"))?;
 
     if let Some(stdout) = child.stdout.take() {
         let log = log.clone();
@@ -57,20 +65,40 @@ pub async fn spawn_managed(
     })
 }
 
-/// 给进程组 `pgid` 发 SIGTERM。负 pid 表示整组。
+/// 终止 `pgid` 对应的整组（Unix）/整棵进程树（Windows，pgid == 组长 pid）。
 pub fn kill_group(pgid: i32) -> io::Result<()> {
     if pgid <= 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "pgid 必须为正",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "pgid 必须为正"));
     }
-    // SAFETY: libc::kill 是线程安全的 C 接口；负 pid 对应进程组信号。
-    let r = unsafe { libc::kill(-pgid, libc::SIGTERM) };
-    if r == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
+
+    #[cfg(unix)]
+    {
+        // SAFETY: libc::kill 是线程安全的 C 接口；负 pid 对应进程组信号。
+        let r = unsafe { libc::kill(-pgid, libc::SIGTERM) };
+        if r == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW：GUI 子系统下不闪出控制台窗口。
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let out = std::process::Command::new("taskkill")
+            .args(["/PID", &pgid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "taskkill: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )))
+        }
     }
 }
 
@@ -106,10 +134,7 @@ impl TngSupervisor {
 
     /// 共享日志的快照（前端只读输出区）。
     pub fn log_snapshot(&self) -> Vec<String> {
-        self.log
-            .lock()
-            .map(|g| g.snapshot())
-            .unwrap_or_default()
+        self.log.lock().map(|g| g.snapshot()).unwrap_or_default()
     }
 
     /// 清空日志（每次启动前清一遍，便于看本次输出）。
@@ -132,11 +157,7 @@ impl TngSupervisor {
     }
 
     /// 先杀旧进程（若有），再拉起新进程。返回新子进程 pid。
-    pub async fn launch(
-        &mut self,
-        config_file: &Path,
-        log_file: &Path,
-    ) -> io::Result<u32> {
+    pub async fn launch(&mut self, config_file: &Path, log_file: &Path) -> io::Result<u32> {
         self.kill_current().await;
         self.clear_log();
         let cmd = self.build_command(config_file, log_file);
@@ -151,7 +172,7 @@ impl TngSupervisor {
         let Some(m) = self.managed.take() else {
             return false;
         };
-        // 先整组 SIGTERM，再对 leader SIGKILL 兜底
+        // 先整组/整树终止，再对 leader 强杀兜底
         let _ = kill_group(m.pgid);
         let mut child = m.child;
         let _ = child.start_kill();
@@ -162,10 +183,7 @@ impl TngSupervisor {
     /// 子进程是否仍在运行。
     pub fn is_running(&mut self) -> bool {
         match &mut self.managed {
-            Some(m) => match m.child.try_wait() {
-                Ok(None) => true,
-                _ => false,
-            },
+            Some(m) => matches!(m.child.try_wait(), Ok(None)),
             None => false,
         }
     }
@@ -179,19 +197,42 @@ mod tests {
     /// 用一个能输出到 stdout/stderr 并持续运行的 shell 命令做替身。
     fn dummy_listen() -> Command {
         // 即便不是 tng，这里验证的是"新进程组 + 捕获 + 整组杀"这层机制。
-        let mut c = Command::new("sh");
-        c.arg("-c").arg(
-            "echo start; echo bad-field-on-stderr: >&2; echo to-stdout; exec sleep 30",
-        );
-        c
+        #[cfg(unix)]
+        {
+            let mut c = Command::new("sh");
+            c.arg("-c")
+                .arg("echo start; echo bad-field-on-stderr: >&2; echo to-stdout; exec sleep 30");
+            c
+        }
+        #[cfg(windows)]
+        {
+            let mut c = Command::new("powershell");
+            c.arg("-NoProfile").arg("-Command").arg(concat!(
+                "'start'; ",
+                "\"bad-field-on-stderr:\" | Write-Host; ",
+                "'to-stdout' | Write-Host; ",
+                "Start-Sleep -Seconds 30",
+            ));
+            c
+        }
     }
 
     #[tokio::test]
     async fn capture_stdout_and_stderr() {
         let log = Arc::new(Mutex::new(BoundedLog::new(128)));
         // 这个替身立刻退出
-        let mut c = Command::new("sh");
-        c.arg("-c").arg("echo out-line; echo err-line >&2; exit 0");
+        #[cfg(unix)]
+        let c = {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg("echo out-line; echo err-line >&2; exit 0");
+            c
+        };
+        #[cfg(windows)]
+        let c = {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg("echo out-line& echo err-line 1>&2");
+            c
+        };
         let mut m = spawn_managed(c, log.clone()).await.unwrap();
         // 等它退出 + 读任务读完
         let _ = m.child.wait().await;
@@ -206,18 +247,24 @@ mod tests {
     async fn kill_group_terminates_process() {
         let log = Arc::new(Mutex::new(BoundedLog::new(128)));
         let mut m = spawn_managed(dummy_listen(), log.clone()).await.unwrap();
-        let pid = m.pid as i32;
-        // 进程应活着
-        assert!(unsafe { libc::kill(pid, 0) } == 0, "子进程应存活");
+        // 进程应活着：try_wait 返回 None 表示尚未退出
+        assert!(matches!(m.child.try_wait(), Ok(None)), "子进程应存活");
 
         kill_group(m.pgid).unwrap();
-        // 整组 SIGTERM 后再 reap，避免僵尸让 kill(pid,0) 误判存活
+        // 整组终止后再 reap，避免僵尸让存活检查误判
         let _ = m.child.start_kill();
         let _ = m.child.wait().await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         // reap 之后 kill(pid,0) 应当 ESRCH
-        let still_alive = unsafe { libc::kill(pid, 0) } == 0;
-        assert!(!still_alive, "进程组杀后子进程仍存活 pid={pid}");
+        #[cfg(unix)]
+        {
+            let pid = m.pid as i32;
+            let still_alive = unsafe { libc::kill(pid, 0) } == 0;
+            assert!(!still_alive, "进程组杀后子进程仍存活 pid={pid}");
+        }
+        // Windows 无僵尸概念：wait 返回即已退出
+        #[cfg(windows)]
+        assert!(m.child.try_wait().unwrap().is_some());
     }
 
     #[test]

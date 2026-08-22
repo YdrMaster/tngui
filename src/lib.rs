@@ -12,7 +12,9 @@ use tauri::{AppHandle, Manager, State};
 use tauri::{Builder, generate_context, generate_handler};
 use tokio::sync::Mutex;
 
-use tngui_core::{fetch_status, prepare_config, control_port, write_runtime_config, StatusReport, TngSupervisor};
+use tngui_core::{
+    StatusReport, TngSupervisor, control_port, fetch_status, prepare_config, write_runtime_config,
+};
 
 /// 进程分享的控制端口；启动后写入，状态轮询读取。
 type PortCell = Arc<StdMutex<Option<u16>>>;
@@ -33,9 +35,8 @@ async fn launch_tng(
 ) -> Result<u32, String> {
     // 1. 解析 + 安全收口（强制 127.0.0.1、缺 port 报错）
     let prepared = prepare_config(&config_json).map_err(|e| e.to_string())?;
-    let port = control_port(&prepared).ok_or_else(|| {
-        "无法读取 control_interface.restful.port".to_string()
-    })?;
+    let port = control_port(&prepared)
+        .ok_or_else(|| "无法读取 control_interface.restful.port".to_string())?;
 
     // 2. 写盘到应用数据目录
     let dir = app
@@ -43,8 +44,8 @@ async fn launch_tng(
         .app_data_dir()
         .map_err(|e| format!("取 app_data_dir 失败: {e}"))?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建数据目录失败: {e}"))?;
-    let runtime = write_runtime_config(&dir, &prepared)
-        .map_err(|e| format!("写 runtime 配置失败: {e}"))?;
+    let runtime =
+        write_runtime_config(&dir, &prepared).map_err(|e| format!("写 runtime 配置失败: {e}"))?;
     let log_file = dir.join("tng.log");
 
     // 3. （重启）spawn
@@ -61,7 +62,7 @@ async fn launch_tng(
 /// 轮询状态。尚未启动 tng 时返回不可达报告（前端显示红灯）。
 #[tauri::command]
 async fn get_status(state: State<'_, AppState>) -> Result<Value, String> {
-    let port = state.port.lock().unwrap().clone();
+    let port = *state.port.lock().unwrap();
     let report = match port {
         Some(p) => fetch_status(p).await,
         None => StatusReport {

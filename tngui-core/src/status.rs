@@ -74,9 +74,7 @@ async fn http_get(port: u16, path: &str) -> io::Result<RawResp> {
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "连接超时"))??;
 
-    let req = format!(
-        "GET {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
-    );
+    let req = format!("GET {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
     let (mut read, mut write) = stream.into_split();
     write.write_all(req.as_bytes()).await?;
     write.shutdown().await.ok();
@@ -118,11 +116,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     /// 起一个回固定响应的桩 HTTP 服务，返回实际监听端口。
-    async fn stub_server(
-        livez: u16,
-        readyz: u16,
-        status_body: &'static str,
-    ) -> u16 {
+    async fn stub_server(livez: u16, readyz: u16, status_body: &'static str) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -136,11 +130,7 @@ mod tests {
                 let _ = sock.read(&mut buf).await;
                 // 取路径
                 let req = String::from_utf8_lossy(&buf);
-                let path = req
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("/")
-                    .to_string();
+                let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
                 let (code, body) = match path.as_str() {
                     "/livez" => (livez, "ok"),
                     "/readyz" => (readyz, "ok"),

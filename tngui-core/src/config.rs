@@ -26,10 +26,9 @@ impl fmt::Display for PrepareError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PrepareError::InvalidJson(e) => write!(f, "JSON 解析失败: {e}"),
-            PrepareError::InvalidRestful => write!(
-                f,
-                "control_interface.restful 必须是含 host/port 的对象"
-            ),
+            PrepareError::InvalidRestful => {
+                write!(f, "control_interface.restful 必须是含 host/port 的对象")
+            }
             PrepareError::NoRestfulPort => write!(
                 f,
                 "配置缺少 control_interface.restful.port，状态客户端无法轮询控制面"
@@ -44,8 +43,7 @@ impl std::error::Error for PrepareError {}
 ///
 /// 返回修改后的 `Value`（调用方负责序列化/写盘）。用户其余字段原样保留。
 pub fn prepare_config(user_json: &str) -> Result<Value, PrepareError> {
-    let mut v: Value =
-        serde_json::from_str(user_json).map_err(PrepareError::InvalidJson)?;
+    let mut v: Value = serde_json::from_str(user_json).map_err(PrepareError::InvalidJson)?;
 
     let restful = v
         .get_mut("control_interface")
@@ -79,10 +77,9 @@ pub fn control_port(config: &Value) -> Option<u16> {
         .get("port")?;
     let n = if let Some(n) = port.as_u64() {
         n
-    } else if let Some(s) = port.as_str() {
-        s.parse::<u64>().ok()?
     } else {
-        return None;
+        let s = port.as_str()?;
+        s.parse::<u64>().ok()?
     };
     if n > u16::MAX as u64 {
         return None;
@@ -93,8 +90,7 @@ pub fn control_port(config: &Value) -> Option<u16> {
 /// 把收口后的配置以 pretty JSON 写入 `<dir>/tng-runtime.json`，返回写出路径。
 pub fn write_runtime_config(dir: &Path, config: &Value) -> io::Result<PathBuf> {
     let path = dir.join("tng-runtime.json");
-    let pretty = serde_json::to_string_pretty(config)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let pretty = serde_json::to_string_pretty(config).map_err(io::Error::other)?;
     std::fs::write(&path, pretty)?;
     Ok(path)
 }
@@ -135,9 +131,7 @@ mod tests {
         ];
         for src in cases {
             let v = prepare_config(src).expect("ok");
-            let host = v["control_interface"]["restful"]["host"]
-                .as_str()
-                .unwrap();
+            let host = v["control_interface"]["restful"]["host"].as_str().unwrap();
             assert_eq!(host, "127.0.0.1", "host 未被强制为 127.0.0.1，源={src}");
         }
     }
@@ -166,15 +160,10 @@ mod tests {
 
     #[test]
     fn write_runtime_config_creates_file_with_localhost() {
-        let dir = std::env::temp_dir().join(format!(
-            "tngui-cfg-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("tngui-cfg-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let v = prepare_config(
-            r#"{"control_interface":{"restful":{"host":"0.0.0.0","port":7}}}"#,
-        )
-        .unwrap();
+        let v = prepare_config(r#"{"control_interface":{"restful":{"host":"0.0.0.0","port":7}}}"#)
+            .unwrap();
         let path = write_runtime_config(&dir, &v).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("\"127.0.0.1\""), "写盘内容: {body}");

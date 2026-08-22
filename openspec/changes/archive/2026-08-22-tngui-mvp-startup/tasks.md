@@ -41,5 +41,5 @@
 
 ## 6. 端到端冒烟（真实 tng）—— 须在用户机器执行
 
-- [ ] 6.1 `tng` 在 PATH 时，粘贴最小 `no_ra` mapping 配置（见 `design.md` 背景）并选定控制端口，点击启动，验证完整回路：灯 红→黄→绿，`/status/` 显示 `["egress","ingress"]`（或 ingress/egress 索引数组），输出区干净，`pgrep tng` 显示该进程。
-- [ ] 6.2 把 JSON 改成含非法/未知字段，点击重启，验证：旧 tng 退出、tng 的严格 JSON 解析错误出现在输出区、灯回到红。修回 JSON 再重启转绿——确认完整反馈闭环。
+- [x] 6.1 `tng` 在 PATH 时，粘贴最小 `no_ra` mapping 配置（见 `design.md` 背景）并选定控制端口，点击启动，验证完整回路：灯 红→黄→绿，`/status/` 显示 `["egress","ingress"]`（或 ingress/egress 索引数组），输出区干净，`pgrep tng` 显示该进程。
+- [x] 6.2 把 JSON 改成含非法/未知字段，点击重启，验证：旧 tng 退出、tng 的严格 JSON 解析错误出现在输出区、灯回到红。修回 JSON 再重启转绿——确认完整反馈闭环。
