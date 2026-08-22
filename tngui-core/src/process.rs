@@ -41,9 +41,7 @@ pub async fn spawn_managed(
     command.stdin(std::process::Stdio::null());
 
     let mut child = command.spawn()?;
-    let pid = child
-        .id()
-        .ok_or_else(|| io::Error::other("子进程无 pid"))?;
+    let pid = child.id().ok_or_else(|| io::Error::other("子进程无 pid"))?;
 
     if let Some(stdout) = child.stdout.take() {
         let log = log.clone();

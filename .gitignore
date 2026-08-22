@@ -9,3 +9,15 @@ tng-gui-design.md
 
 # 本地工具配置（Claude Code skill/command，环境级，不入库）
 /.claude
+
+# 前端依赖（npm）—— 不入库，各机器自行 npm install
+node_modules/
+
+# 前端构建产物（vite build 产出，可再生）
+frontend/dist/
+
+# unplugin 残留（已改全局注册，无需按需自动声明；若日后启用再处理）
+frontend/components.d.ts
+
+# TS 增量构建信息
+*.tsbuildinfo

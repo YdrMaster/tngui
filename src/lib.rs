@@ -83,14 +83,33 @@ async fn get_output(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     Ok(sup.log_snapshot())
 }
 
+/// 导入配置：读用户所选文件路径，返回 JSON 字符串。
+#[tauri::command]
+fn import_config(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| format!("读取失败 {path}: {e}"))
+}
+
+/// 导出配置：把 JSON 写入用户所选 save 路径。
+#[tauri::command]
+fn export_config(path: String, json: String) -> Result<(), String> {
+    std::fs::write(&path, json).map_err(|e| format!("写入失败 {path}: {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             supervisor: Arc::new(Mutex::new(TngSupervisor::new("tng", 4000))),
             port: Arc::new(StdMutex::new(None)),
         })
-        .invoke_handler(generate_handler![launch_tng, get_status, get_output])
+        .invoke_handler(generate_handler![
+            launch_tng,
+            get_status,
+            get_output,
+            import_config,
+            export_config
+        ])
         .run(generate_context!())
         .expect("启动 Tauri 失败");
 }

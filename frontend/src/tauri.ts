@@ -1,0 +1,50 @@
+// 与 Tauri 后端的 invoke 封装 + 原生对话框（导入/导出取路径）。
+import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+
+export interface StatusReport {
+  reachable: boolean;
+  livez_ok: boolean;
+  ready: boolean;
+  status_json: unknown;
+  error?: string | null;
+}
+
+export async function getStatus(): Promise<StatusReport> {
+  return invoke<StatusReport>("get_status");
+}
+
+export async function getOutput(): Promise<string[]> {
+  return invoke<string[]>("get_output");
+}
+
+export async function launchTng(configJson: string): Promise<number> {
+  return invoke<number>("launch_tng", { configJson });
+}
+
+/** 原生"打开文件"对话框，返回所选路径或 null（取消）。 */
+export async function pickImportPath(): Promise<string | null> {
+  const p = await openDialog({
+    multiple: false,
+    filters: [{ name: "JSON", extensions: ["json"] }],
+  });
+  return p ? (p as string) : null;
+}
+
+/** 原生"另存为"对话框，返回所选路径或 null（取消）。 */
+export async function pickExportPath(): Promise<string | null> {
+  const p = await saveDialog({
+    filters: [{ name: "JSON", extensions: ["json"] }],
+  });
+  return p ?? null;
+}
+
+/** 读文件路径，返回 JSON 字符串。 */
+export async function importConfig(path: string): Promise<string> {
+  return invoke<string>("import_config", { path });
+}
+
+/** 把 JSON 字符串写入路径。 */
+export async function exportConfig(path: string, json: string): Promise<void> {
+  return invoke<void>("export_config", { path, json });
+}
