@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TNG GUI</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans CJK SC", sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        height: 100vh;
+        box-sizing: border-box;
+      }
+      h1 {
+        font-size: 16px;
+        margin: 0;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      #config {
+        width: 100%;
+        flex: 1 1 auto;
+        min-height: 200px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        box-sizing: border-box;
+      }
+      button {
+        font-size: 14px;
+        padding: 8px 18px;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .light {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        border: 1px solid #888;
+        background: #999;
+        display: inline-block;
+        vertical-align: middle;
+      }
+      .light.red { background: #e53935; }
+      .light.yellow { background: #fdd835; }
+      .light.green { background: #43a047; }
+      #status-label { font-weight: 600; }
+      .panel {
+        border: 1px solid #555;
+        border-radius: 6px;
+        padding: 8px;
+        overflow: auto;
+        background: rgba(127, 127, 127, 0.08);
+      }
+      #status-panel { flex: 0 0 auto; max-height: 160px; }
+      #output-panel { flex: 1 1 auto; }
+      .panel h2 {
+        font-size: 13px;
+        margin: 0 0 6px 0;
+        color: #aaa;
+        font-weight: 600;
+      }
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-all;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+      }
+      #output-panel pre { color: #8fd18f; }
+      .hint { font-size: 12px; color: #999; }
+    </style>
+  </head>
+  <body>
+    <h1>TNG GUI — 最小启动器</h1>
+
+    <div class="row">
+      <span>填写完整 TNG JSON 配置（含 control_interface.restful）：</span>
+    </div>
+    <textarea id="config" spellcheck="false">{
+  "control_interface": {
+    "restful": { "host": "127.0.0.1", "port": 50000 }
+  },
+  "add_ingress": [
+    {
+      "mapping": {
+        "in": { "port": 10001 },
+        "out": { "host": "127.0.0.1", "port": 30001 }
+      },
+      "no_ra": true
+    }
+  ]
+}</textarea>
+
+    <div class="row">
+      <button id="launch">启动 / 重启 tng</button>
+      <span>状态：</span>
+      <span id="status-light" class="light"></span>
+      <span id="status-label">未知</span>
+      <span class="hint">（每 ~1.5s 自动轮询控制面）</span>
+    </div>
+
+    <div id="status-panel" class="panel">
+      <h2>GET /status/</h2>
+      <pre id="status-json">—</pre>
+    </div>
+
+    <div id="output-panel" class="panel">
+      <h2>tng 进程输出（stdout / stderr，只读）</h2>
+      <pre id="output">—</pre>
+    </div>
+
+    <script>
+      // Tauri 2（withGlobalTauri）把 API 挂到 window.__TAURI__；invoke 路径可能是
+      // window.__TAURI__.core.invoke 或 window.__TAURI__.invoke，做兼容探测。
+      const invoke =
+        window.__TAURI__?.core?.invoke ||
+        window.__TAURI__?.invoke ||
+        (async () => {
+          throw new Error(
+            "Tauri 桥接未注入：请确认 tauri.conf.json 的 app.withGlobalTauri=true 且由 Tauri 窗口加载本页"
+          );
+        });
+
+      const cfgEl = document.getElementById("config");
+      const launchBtn = document.getElementById("launch");
+      const lightEl = document.getElementById("status-light");
+      const labelEl = document.getElementById("status-label");
+      const statusJsonEl = document.getElementById("status-json");
+      const outputEl = document.getElementById("output");
+
+      function setLight(state, text) {
+        lightEl.className = "light " + state; // "" | "red" | "yellow" | "green"
+        labelEl.textContent = text;
+      }
+
+      async function poll() {
+        // 状态
+        try {
+          const r = await invoke("get_status");
+          if (!r.reachable) {
+            setLight("red", "不可达 / 未运行");
+          } else if (r.ready) {
+            setLight("green", "就绪");
+          } else {
+            setLight("yellow", "启动中…");
+          }
+          statusJsonEl.textContent = r.status_json
+            ? JSON.stringify(r.status_json, null, 2)
+            : "（空）";
+          if (r.error) {
+            statusJsonEl.textContent += "\n// " + r.error;
+          }
+        } catch (e) {
+          setLight("red", "查询失败");
+          statusJsonEl.textContent = String(e);
+        }
+
+        // 输出
+        try {
+          const lines = await invoke("get_output");
+          outputEl.textContent =
+            lines && lines.length ? lines.join("\n") : "（暂无输出）";
+        } catch (e) {
+          outputEl.textContent = String(e);
+        }
+      }
+
+      launchBtn.addEventListener("click", async () => {
+        launchBtn.disabled = true;
+        const old = outputEl.textContent;
+        outputEl.textContent = "（启动中…）";
+        try {
+          const pid = await invoke("launch_tng", { configJson: cfgEl.value });
+          setLight("", "已拉起 pid=" + pid);
+        } catch (e) {
+          setLight("red", "启动失败");
+          outputEl.textContent = "启动失败: " + String(e) + (old ? "\n\n" + old : "");
+        } finally {
+          launchBtn.disabled = false;
+        }
+      });
+
+      // 启动轮询
+      setLight("", "未知");
+      poll();
+      setInterval(poll, 1500);
+    </script>
+  </body>
+</html>

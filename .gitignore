@@ -1,0 +1,10 @@
+# Rust 构建产物
+/target
+src-tauri/target
+src-tauri/gen
+
+# 本地草稿（设计稿按其自身约定为 local-only，不入库）
+tng-gui-design.md
+
+# 本地工具配置（Claude Code skill/command，环境级，不入库）
+/.claude

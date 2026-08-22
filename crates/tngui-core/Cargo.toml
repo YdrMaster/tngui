@@ -1,0 +1,24 @@
+[package]
+name = "tngui-core"
+description = "TNG GUI 包装器的核心逻辑：配置注入、进程生命周期、只读控制面状态。不依赖任何 TNG crate。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "io-util",
+    "process",
+    "net",
+    "sync",
+] }
+libc = "0.2"
+
+[lib]
+name = "tngui_core"
+path = "src/lib.rs"

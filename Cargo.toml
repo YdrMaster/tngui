@@ -1,0 +1,18 @@
+[workspace]
+members = ["crates/tngui-core"]
+resolver = "2"
+# 注：src-tauri 故意不作为本 workspace 成员——它在 headless 无 WebKitGTK 的环境里
+# 无法编译。它自带 [workspace] 表作为独立 crate，在带 WebKitGTK 的机器上单独构建。
+# 它通过 path 依赖 ../crates/tngui-core 复用核心逻辑。
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+# 全局 release profile：体积小一点
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
