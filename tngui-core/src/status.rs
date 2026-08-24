@@ -77,7 +77,8 @@ async fn http_get(port: u16, path: &str) -> io::Result<RawResp> {
     let req = format!("GET {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
     let (mut read, mut write) = stream.into_split();
     write.write_all(req.as_bytes()).await?;
-    write.shutdown().await.ok();
+    // 不半关闭写端：实测对 tng/hyper 半关闭(FIN)会导致服务端不回响应（空包）。
+    // 服务端按 Connection: close 在响应后自行关闭，read 收到 EOF 即停。
 
     let mut all = Vec::new();
     let mut buf = [0u8; 4096];
