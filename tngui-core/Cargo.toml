@@ -19,3 +19,12 @@ tokio = { version = "1", features = [
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Job Object（KILL_ON_JOB_CLOSE）：GUI 进程一死内核自动杀 tng 整组，含崩溃场景。
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

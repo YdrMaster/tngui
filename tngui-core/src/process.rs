@@ -14,11 +14,33 @@ use tokio::process::{Child, Command};
 
 use crate::log::BoundedLog;
 
+#[cfg(windows)]
+use {
+    std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle},
+    windows_sys::Win32::{
+        Foundation::HANDLE,
+        System::{
+            JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                SetInformationJobObject,
+            },
+            Threading::{
+                OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+            },
+        },
+    },
+};
+
 /// 一次被托管拉起的子进程：句柄 + pid + 进程组 id。
 pub struct ManagedChild {
     pub child: Child,
     pub pid: u32,
     pub pgid: i32,
+    /// Windows: tng 所在的 Job Object 句柄（KILL_ON_JOB_CLOSE）。句柄随 ManagedChild 存活，
+    /// drop（重启替换 / 进程退出 / 崩溃）时关闭句柄 → 内核自动杀整组 tng。建失败则 None。
+    #[cfg(windows)]
+    pub job: Option<OwnedHandle>,
 }
 
 /// 在新进程组里拉起 `command`，stdout/stderr 管道捕获进共享 `log`。
@@ -57,11 +79,62 @@ pub async fn spawn_managed(
         });
     }
 
+    // Windows: 把 tng 指派进 Job Object（KILL_ON_JOB_CLOSE），使其随 tngui 同步退出（含崩溃）。
+    #[cfg(windows)]
+    let job = create_and_assign_job(pid).ok();
+
     Ok(ManagedChild {
         child,
         pid,
         pgid: pid as i32,
+        #[cfg(windows)]
+        job,
     })
+}
+
+/// Windows：创建带 `KILL_ON_JOB_CLOSE` 的 Job Object 并把 `pid` 指派进去。
+/// 返回的句柄存活期间进程在 job 内；句柄一关（drop / 进程退出）内核即杀整组。
+#[cfg(windows)]
+fn create_and_assign_job(pid: u32) -> io::Result<OwnedHandle> {
+    unsafe {
+        let raw_job: HANDLE = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if raw_job.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let job = OwnedHandle::from_raw_handle(raw_job);
+
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let set_ok = SetInformationJobObject(
+            job.as_raw_handle() as HANDLE,
+            JobObjectExtendedLimitInformation,
+            &mut info as *mut _ as *mut _,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if set_ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let raw_proc = OpenProcess(
+            PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION,
+            0,
+            pid,
+        );
+        if raw_proc.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let proc = OwnedHandle::from_raw_handle(raw_proc);
+
+        let assign_ok =
+            AssignProcessToJobObject(job.as_raw_handle() as HANDLE, proc.as_raw_handle());
+        if assign_ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // 进程已指派，proc 句柄不再需要；关闭之。job 句柄随返回值存活。
+        drop(proc);
+        Ok(job)
+    }
 }
 
 /// 终止 `pgid` 对应的整组（Unix）/整棵进程树（Windows，pgid == 组长 pid）。
