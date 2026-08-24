@@ -46,12 +46,11 @@ async fn launch_tng(
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建数据目录失败: {e}"))?;
     let runtime =
         write_runtime_config(&dir, &prepared).map_err(|e| format!("写 runtime 配置失败: {e}"))?;
-    let log_file = dir.join("tng.log");
 
-    // 3. （重启）spawn
+    // 3. （重启）spawn（不传 --log-file，tng 日志走 stdout 由 GUI 捕获展示）
     let mut sup = state.supervisor.lock().await;
     let pid = sup
-        .launch(&runtime, &log_file)
+        .launch(&runtime)
         .await
         .map_err(|e| format!("启动 tng 失败: {e}"))?;
 
@@ -95,13 +94,25 @@ fn export_config(path: String, json: String) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| format!("写入失败 {path}: {e}"))
 }
 
-/// 解析随包分发的 tng：优先 `resource_dir` 下的 `tng`/`tng.exe`；找不到回退 `PATH` 上的 `tng`（开发态）。
+/// 解析随包分发的 tng：在 `resource_dir` 下找 `tng`/`tng.exe`（兼容平铺与 `resources/` 子目录两种打包落点）；
+/// 找不到回退 `PATH` 上的 `tng`（开发态）。
 fn resolve_tng_path(app: &tauri::App) -> String {
+    use std::fs;
     let name = if cfg!(windows) { "tng.exe" } else { "tng" };
     if let Ok(rd) = app.path().resource_dir() {
-        let cand = rd.join(name);
-        if cand.exists() {
-            return cand.to_string_lossy().into_owned();
+        // 1) 平铺：resource_dir/<name>
+        let direct = rd.join(name);
+        if direct.exists() {
+            return direct.to_string_lossy().into_owned();
+        }
+        // 2) 一层子目录：Tauri 会保留源路径前缀（resources/tng* → resource_dir/resources/<name>）
+        if let Ok(entries) = fs::read_dir(&rd) {
+            for e in entries.flatten() {
+                let p = e.path().join(name);
+                if p.exists() {
+                    return p.to_string_lossy().into_owned();
+                }
+            }
         }
     }
     "tng".to_string()

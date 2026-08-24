@@ -92,7 +92,7 @@ export interface FieldSpec {
 
 export const INGRESS_FIELDS: Record<IngressMode, FieldSpec[]> = {
   mapping: [
-    { key: "rules", label: "端口映射规则", type: "ruleList", required: true, default: [{ in: { port: 0 }, out: { host: LOCALHOST, port: 0 } }] },
+    { key: "rules", label: "端口映射规则", type: "ruleList", required: true, default: [{ in: { port: 10001 }, out: { host: LOCALHOST, port: 30001 } }] },
   ],
   http_proxy: [
     { key: "proxy_listen", label: "监听地址", type: "endpoint", required: true, default: { host: LOCALHOST, port: 0 } },
@@ -119,7 +119,7 @@ export const INGRESS_FIELDS: Record<IngressMode, FieldSpec[]> = {
 
 export const EGRESS_FIELDS: Record<EgressMode, FieldSpec[]> = {
   mapping: [
-    { key: "rules", label: "端口映射规则", type: "ruleList", required: true, default: [{ in: { port: 0 }, out: { host: LOCALHOST, port: 0 } }] },
+    { key: "rules", label: "端口映射规则", type: "ruleList", required: true, default: [{ in: { port: 10001 }, out: { host: LOCALHOST, port: 30001 } }] },
   ],
   netfilter: [
     { key: "capture_dst", label: "捕获目标", type: "captureList", required: true, default: [] },

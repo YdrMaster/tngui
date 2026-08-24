@@ -34,7 +34,8 @@ pub async fn spawn_managed(
     #[cfg(windows)]
     {
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000; // 不给子进程弹控制台黑窗
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
@@ -164,24 +165,23 @@ impl TngSupervisor {
     #[cfg(not(unix))]
     fn ensure_executable(&self) {}
 
-    /// 构造 `tng launch -c <config_file> --log-file <log_file>` 命令（可单测）。
-    fn build_command(&self, config_file: &Path, log_file: &Path) -> Command {
+    /// 构造 `tng launch -c <config_file>` 命令（不传 --log-file，使 tng 日志走 stdout →
+    /// 被 get_output 捕获 → UI 可见；可单测）。
+    fn build_command(&self, config_file: &Path) -> Command {
         let mut c = Command::new(&self.bin);
         c.arg("launch")
             .arg("-c")
             .arg(config_file)
-            .arg("--log-file")
-            .arg(log_file)
             .env("RUST_LOG", &self.rust_log);
         c
     }
 
     /// 先杀旧进程（若有），再拉起新进程。返回新子进程 pid。
-    pub async fn launch(&mut self, config_file: &Path, log_file: &Path) -> io::Result<u32> {
+    pub async fn launch(&mut self, config_file: &Path) -> io::Result<u32> {
         self.kill_current().await;
         self.clear_log();
         self.ensure_executable();
-        let cmd = self.build_command(config_file, log_file);
+        let cmd = self.build_command(config_file);
         let m = spawn_managed(cmd, self.log.clone()).await?;
         let pid = m.pid;
         self.managed = Some(m);
@@ -291,10 +291,7 @@ mod tests {
     #[test]
     fn build_command_args_are_correct() {
         let sup = TngSupervisor::new("tng", 64);
-        let cmd = sup.build_command(
-            Path::new("/tmp/tng-runtime.json"),
-            Path::new("/tmp/tng.log"),
-        );
+        let cmd = sup.build_command(Path::new("/tmp/tng-runtime.json"));
         // tokio::process::Command 没有直接取 argv 的 API，断言 bin 即可；
         // 真实 argv 由端到端（用户机器）覆盖。
         let _ = cmd; // 编译期保证该函数可用
