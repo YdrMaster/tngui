@@ -95,13 +95,29 @@ fn export_config(path: String, json: String) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| format!("写入失败 {path}: {e}"))
 }
 
+/// 解析随包分发的 tng：优先 `resource_dir` 下的 `tng`/`tng.exe`；找不到回退 `PATH` 上的 `tng`（开发态）。
+fn resolve_tng_path(app: &tauri::App) -> String {
+    let name = if cfg!(windows) { "tng.exe" } else { "tng" };
+    if let Ok(rd) = app.path().resource_dir() {
+        let cand = rd.join(name);
+        if cand.exists() {
+            return cand.to_string_lossy().into_owned();
+        }
+    }
+    "tng".to_string()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState {
-            supervisor: Arc::new(Mutex::new(TngSupervisor::new("tng", 4000))),
-            port: Arc::new(StdMutex::new(None)),
+        .setup(|app| {
+            let tng = resolve_tng_path(app);
+            app.manage(AppState {
+                supervisor: Arc::new(Mutex::new(TngSupervisor::new(tng, 4000))),
+                port: Arc::new(StdMutex::new(None)),
+            });
+            Ok(())
         })
         .invoke_handler(generate_handler![
             launch_tng,

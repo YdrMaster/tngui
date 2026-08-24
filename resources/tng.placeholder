@@ -1,0 +1,6 @@
+占位文件：满足 tauri-build 对 bundle.resources glob（resources/tng*）"至少匹配一个"的校验，
+使 dev / ci 的 cargo build|test|run 不依赖真实 tng。
+
+- 运行时解析器找的是精确 resources/tng（Unix）或 resources/tng.exe（Windows），不会取本文件；
+  故 dev 期仍走 PATH 上的 tng 兜底。
+- release 由 CI 下载真实 tng 到 resources/ 后删除本文件，安装包里只含真实 tng。

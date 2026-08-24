@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "tngui",
-  "version": "0.1.0",
   "identifier": "com.tngui.app",
   "build": {
     "frontendDist": "./frontend/dist",
@@ -24,6 +23,9 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.ico", "icons/icon.icns", "icons/icon.png"],
+    "resources": ["resources/tng*"]
   }
 }

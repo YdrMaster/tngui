@@ -1,0 +1,214 @@
+name: CI
+
+# 触发：
+#   - PR / 分支推送（非 md/LICENSE）：跑质量门禁（ci）
+#   - v* tag 推送：ci 之外叠加 check_version + 5 目标出包（release）
+# 之所以把 build(CI) 与 release 合一：同一套触发点上先验质量、再出包，互不脱节。
+on:
+  pull_request:
+  push:
+    branches: ['**']
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # —— 质量门禁：每次 PR/推送/tag 都跑 ——
+  ci:
+    name: lint / test / check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri deps (ubuntu)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libxslt1.1 libssl-dev
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Frontend install
+        run: npm ci
+        working-directory: frontend
+
+      - name: Frontend build (vue-tsc + vite)
+        run: npm run build
+        working-directory: frontend
+
+      - name: Frontend test (vitest)
+        run: npm test
+        working-directory: frontend
+
+      - name: cargo test（全 workspace；webkit 已装）
+        run: cargo test
+
+      - name: Install clippy sarif tools
+        run: cargo install clippy-sarif sarif-fmt
+
+      - name: cargo clippy (sarif, 非阻塞)
+        continue-on-error: true
+        run: |
+          cargo clippy --all-targets --message-format=json |
+            clippy-sarif | tee rust-clippy-results.sarif | sarif-fmt
+
+      - name: Upload clippy sarif
+        # 仓库未启用 Code scanning 时此步会失败；置 continue-on-error 不阻断 CI，
+        # 启用 Code scanning（Repo Settings → Security → Code scanning）后即正常上传。
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: rust-clippy-results.sarif
+          wait-for-processing: true
+
+  # —— tag 对齐校验：仅 v* tag ——
+  check_version:
+    name: Check tag vs Cargo.toml version
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag vs Cargo.toml (tngui-app) version
+        # tag(去 v) 须与 Cargo.toml 的 tngui-app 版本一致；tauri.conf.json 不写 version，回落到 Cargo。
+        shell: bash
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME#v}"
+          CONF="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="tngui-app") | .version')"
+          echo "tag(去 v)=$TAG  Cargo.toml(tngui-app).version=$CONF"
+          if [ "$TAG" != "$CONF" ]; then
+            echo "::error::版本不一致：tag=v$TAG 与 Cargo.toml tngui-app 版本 ($CONF) 不符。请先把 Cargo.toml 的 [workspace.package] version 改成 \"$TAG\" 再打 tag。"
+            exit 1
+          fi
+          echo "✓ 版本一致"
+
+  # —— 出包：仅 v* tag，依赖 ci 与 check_version 通过 ——
+  release:
+    name: Build ${{ matrix.target }}
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [ci, check_version]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GUI 目标 → TNG 官方产物 target（Windows 用 gnu 版 tng.exe，自包含可在 Win 上跑）
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,    tng_target: x86_64-pc-windows-gnu,    tng_ext: zip,    tng_bin: tng.exe }
+          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu,  tng_target: x86_64-unknown-linux-gnu,  tng_ext: tar.gz, tng_bin: tng }
+          - { os: ubuntu-22.04,   target: aarch64-unknown-linux-gnu, tng_target: aarch64-unknown-linux-gnu, tng_ext: tar.gz, tng_bin: tng, cross: true, bundles: "deb,rpm" }
+          - { os: macos-latest,   target: x86_64-apple-darwin,       tng_target: x86_64-apple-darwin,       tng_ext: tar.gz, tng_bin: tng }
+          - { os: macos-latest,   target: aarch64-apple-darwin,      tng_target: aarch64-apple-darwin,      tng_ext: tar.gz, tng_bin: tng }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read TNG version
+        id: tng
+        shell: bash
+        run: echo "version=$(tr -d '[:space:]' < TNG_VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Rust toolchain + target
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-${{ matrix.target }}
+
+      - name: Install Tauri deps (ubuntu x64)
+        if: matrix.os == 'ubuntu-22.04' && matrix.cross != true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libxslt1.1 libssl-dev
+
+      - name: Install cross toolchain + arm64 deps (ubuntu arm64)
+        if: matrix.cross == true
+        run: |
+          # 仿 clash-verge：配置 arm64 ports 源(jammy)后装多架构 webkit/rsvg + aarch64 gcc；基座须 ubuntu-22.04(jammy) 对齐
+          sudo install -m 0644 /dev/stdin /etc/apt/sources.list.d/ports-arm64.list <<'EOF'
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main universe
+          EOF
+          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list || true
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            libwebkit2gtk-4.1-dev:arm64 librsvg2-dev:arm64 patchelf:arm64 || true
+
+      - name: Cross env (linux arm64)
+        if: matrix.cross == true
+        run: |
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+
+      - name: Download & place bundled tng
+        shell: bash
+        run: |
+          set -eux
+          TNG_VER="${{ steps.tng.outputs.version }}"
+          ASSET="tng-${TNG_VER}.${{ matrix.tng_target }}.${{ matrix.tng_ext }}"
+          URL="https://github.com/inclavare-containers/TNG/releases/download/v${TNG_VER}/${ASSET}"
+          mkdir -p resources
+          curl -L --fail -o tng-asset "$URL"
+          if [ "${{ matrix.tng_ext }}" = "zip" ]; then
+            # Windows zip 内含裸 tng.exe
+            unzip -o tng-asset -d tng-unzipped
+            cp tng-unzipped/tng.exe resources/tng.exe
+          else
+            # Linux/macOS tar.gz 内含 usr/.../tng
+            tar xzf tng-asset
+            TNG_SRC="$(find usr -type f -name tng | head -n1)"
+            cp "$TNG_SRC" resources/tng
+          fi
+          chmod +x "resources/${{ matrix.tng_bin }}"
+          # 删除占位文件，使安装包只含真实 tng
+          rm -f resources/tng.placeholder
+          ls -la resources/
+
+      - name: Tauri build + upload
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'tngui ${{ github.ref_name }}'
+          releaseBody: |
+            tngui ${{ github.ref_name }}
+
+            内含 5 目标安装包，各自内置对应平台的 tng（取自 TNG 官方 release v${{ steps.tng.outputs.version }}，随 resources 打包）：
+            - Windows x86_64（tng 为 gnu 版，自包含可运行）
+            - Linux x86_64 / aarch64
+            - macOS x86_64 / aarch64
+
+            注意：
+            - macOS 包未签名，首次打开需在 Gatekeeper 处放行。
+            - Windows ARM64 本期未发布（TNG 无官方 win-arm64 产物），列为后续。
+            - tngui 版本由 Cargo.toml [workspace.package] version 钉定（须与 tag 一致）；tng 版本由 TNG_VERSION 钉定，二者解耦。
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}${{ matrix.bundles && format(' --bundles {0}', matrix.bundles) || '' }}

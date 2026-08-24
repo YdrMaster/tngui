@@ -142,6 +142,28 @@ impl TngSupervisor {
         }
     }
 
+    /// spawn 前确保 `bin` 可执行：无 owner 执行位则尝试补上；失败（如缺 chmod 权限）则忽略，
+    /// 由后续 spawn 自然报错。Windows 无执行位概念，空操作。
+    #[cfg(unix)]
+    fn ensure_executable(&self) {
+        use std::os::unix::fs::PermissionsExt;
+        let p = Path::new(&self.bin);
+        let Ok(meta) = std::fs::metadata(p) else {
+            return;
+        };
+        if !meta.is_file() {
+            return;
+        }
+        let mode = meta.permissions().mode();
+        if mode & 0o100 == 0 {
+            // 既无 owner 执行位：补 u/g/o 执行位（保留原读写位）。chmod 失败（无权限）则忽略。
+            let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode | 0o111));
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn ensure_executable(&self) {}
+
     /// 构造 `tng launch -c <config_file> --log-file <log_file>` 命令（可单测）。
     fn build_command(&self, config_file: &Path, log_file: &Path) -> Command {
         let mut c = Command::new(&self.bin);
@@ -158,6 +180,7 @@ impl TngSupervisor {
     pub async fn launch(&mut self, config_file: &Path, log_file: &Path) -> io::Result<u32> {
         self.kill_current().await;
         self.clear_log();
+        self.ensure_executable();
         let cmd = self.build_command(config_file, log_file);
         let m = spawn_managed(cmd, self.log.clone()).await?;
         let pid = m.pid;
