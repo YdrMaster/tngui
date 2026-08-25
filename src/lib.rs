@@ -94,6 +94,37 @@ fn export_config(path: String, json: String) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| format!("写入失败 {path}: {e}"))
 }
 
+/// 停止当前 tng 子进程。
+#[tauri::command]
+async fn stop_tng(state: State<'_, AppState>) -> Result<(), String> {
+    state.supervisor.lock().await.kill_current().await;
+    Ok(())
+}
+
+/// 仅保存 TNG 配置到磁盘（不 spawn）。
+#[tauri::command]
+async fn save_config(app: AppHandle, config_json: String) -> Result<(), String> {
+    let prepared = prepare_config(&config_json).map_err(|e| e.to_string())?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("取 app_data_dir 失败: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建数据目录失败: {e}"))?;
+    write_runtime_config(&dir, &prepared).map_err(|e| format!("写 runtime 配置失败: {e}"))?;
+    Ok(())
+}
+
+/// 通过 tng 透明代理发送推理请求，返回 assistant 响应文本。
+#[tauri::command]
+async fn send_inference(
+    port: u16,
+    model: String,
+    api_key: String,
+    prompt: String,
+) -> Result<String, String> {
+    tngui_core::send_inference(port, &model, &api_key, &prompt).await
+}
+
 /// 解析随包分发的 tng：在 `resource_dir` 下找 `tng`/`tng.exe`（兼容平铺与 `resources/` 子目录两种打包落点）；
 /// 找不到回退 `PATH` 上的 `tng`（开发态）。
 fn resolve_tng_path(app: &tauri::App) -> String {
@@ -135,7 +166,10 @@ pub fn run() {
             get_status,
             get_output,
             import_config,
-            export_config
+            export_config,
+            stop_tng,
+            save_config,
+            send_inference
         ])
         .run(generate_context!())
         .expect("启动 Tauri 失败");

@@ -1,31 +1,24 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import { message } from "ant-design-vue";
-import {
-  defaultModel,
-  defaultFields,
-  type ConfigModel,
-  type EntryModel,
-} from "../formspec";
-import { serialize, parse } from "../configmodel";
-import {
-  launchTng,
-  pickImportPath,
-  pickExportPath,
-  importConfig,
-  exportConfig,
-} from "../tauri";
+import { defaultFields } from "../formspec";
+import { parse } from "../configmodel";
+import { launchTng, pickImportPath, pickExportPath, importConfig, exportConfig } from "../tauri";
 import EntryEditor from "../components/EntryEditor.vue";
+import { useTngConfig } from "../composables/useTngConfig";
+import { useInferenceConfig } from "../composables/useInferenceConfig";
 
-// 不持久化：每次进入即默认模板
-const model = ref<ConfigModel>(defaultModel());
+// TNG 配置 model 由共享 composable 管理（全景/概览/设置共用同一份内存态）
+const { model, isDirty, markSaved, serializeCurrent } = useTngConfig();
+// 密态推理凭据（不持久化，仅本会话）
+const { model: inferenceModel, apiKey } = useInferenceConfig();
 
 const activeTab = ref<"form" | "raw">("form");
-const rawEditing = ref(serialize(model.value));
-const launching = ref(false);
+const rawEditing = ref(serializeCurrent());
 
 function syncRaw() {
-  rawEditing.value = serialize(model.value);
+  rawEditing.value = serializeCurrent();
 }
 
 function onTabChange(key: string | number) {
@@ -66,22 +59,31 @@ function removeEgress(i: number) {
   model.value.add_egress.splice(i, 1);
 }
 
-async function onLaunch() {
-  launching.value = true;
+async function onSaveConfig() {
+  if (!isDirty()) {
+    message.info("配置未变");
+    return;
+  }
+  const json = serializeCurrent();
   try {
-    await launchTng(serialize(model.value));
-    message.success("已拉起 tng（启动/重启）");
+    const status = await invoke<{ reachable: boolean }>("get_status");
+    if (status.reachable) {
+      await invoke("launch_tng", { configJson: json });
+      message.success("已保存并重启 tng");
+    } else {
+      await invoke("save_config", { configJson: json });
+      message.success("已保存");
+    }
+    markSaved();
   } catch (e) {
-    message.error("启动失败: " + String(e));
-  } finally {
-    launching.value = false;
+    message.error("保存失败: " + String(e));
   }
 }
 
 async function onImport() {
   try {
     const path = await pickImportPath();
-    if (!path) return; // 取消
+    if (!path) return;
     const json = await importConfig(path);
     const r = parse(json);
     if (r.error) {
@@ -99,37 +101,36 @@ async function onImport() {
 async function onExport() {
   try {
     const path = await pickExportPath();
-    if (!path) return; // 取消
-    await exportConfig(path, serialize(model.value));
+    if (!path) return;
+    await exportConfig(path, serializeCurrent());
     message.success("已导出: " + path);
   } catch (e) {
     message.error("导出失败: " + String(e));
   }
 }
 
-// 表单编辑时，若 raw 视图已打开则同步（便于观察），但不覆盖用户在 raw 的未应用编辑
+// 表单编辑时，若 raw 视图已打开则同步
 watch(
   () => model.value,
   () => {
     if (activeTab.value === "raw") syncRaw();
   },
-  { deep: true },
+  { deep: true }
 );
 </script>
 
 <template>
   <div style="display: flex; flex-direction: column; gap: 12px; height: 100%">
     <a-space wrap>
-      <a-button type="primary" :loading="launching" @click="onLaunch">启动 / 重启</a-button>
+      <a-button type="primary" @click="onSaveConfig">保存</a-button>
       <a-button @click="onImport">导入 JSON</a-button>
       <a-button @click="onExport">导出 JSON</a-button>
     </a-space>
 
     <a-tabs v-model:activeKey="activeTab" @change="onTabChange" style="flex: 1; overflow: auto">
-      <!-- 结构化表单 -->
       <a-tab-pane key="form" tab="结构化">
         <a-form layout="vertical">
-          <a-card size="small" title="control_interface（GUI 私有，host 强制 127.0.0.1）">
+          <a-card size="small" title="control_interface（host 强制 127.0.0.1）">
             <a-form-item label="restful.host">
               <a-input :value="model.control_interface.restful.host" disabled />
             </a-form-item>
@@ -164,10 +165,22 @@ watch(
             />
             <a-button style="margin-top: 8px" @click="addEgress">添加 egress</a-button>
           </a-card>
+
+          <a-card
+            size="small"
+            title="密态推理（model + API Key，直接填写，不持久化）"
+            style="margin-top: 12px"
+          >
+            <a-form-item label="Model">
+              <a-input v-model:value="inferenceModel" placeholder="如 gpt-4 / vllm-model" />
+            </a-form-item>
+            <a-form-item label="API Key">
+              <a-input-password v-model:value="apiKey" placeholder="推理 API Key（仅本会话使用）" />
+            </a-form-item>
+          </a-card>
         </a-form>
       </a-tab-pane>
 
-      <!-- 原始 JSON -->
       <a-tab-pane key="raw" tab="原始 JSON" force-render>
         <a-space style="margin-bottom: 8px">
           <a-button type="primary" @click="applyRaw">应用回填表单</a-button>

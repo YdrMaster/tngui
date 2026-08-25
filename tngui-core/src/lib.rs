@@ -8,11 +8,13 @@
 //! 本 crate 不链接任何 TNG 代码，纯逻辑可脱离 webview 单独编译与测试。
 
 pub mod config;
+pub mod inference;
 pub mod log;
 pub mod process;
 pub mod status;
 
 pub use config::{PrepareError, control_port, prepare_config, write_runtime_config};
+pub use inference::send_inference;
 pub use log::BoundedLog;
 pub use process::{ManagedChild, TngSupervisor, kill_group, spawn_managed};
 pub use status::{StatusReport, fetch_status};
