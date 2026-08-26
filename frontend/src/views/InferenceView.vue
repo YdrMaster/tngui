@@ -12,7 +12,6 @@ const prompt = ref("");
 const output = ref("");
 const sending = ref(false);
 
-// 推理请求端点：第一个 ingress 的 listen 端口
 const inferencePort = computed((): number | null => {
   const entries = tngConfigModel.value.add_ingress;
   if (!entries || entries.length === 0) return null;
@@ -57,22 +56,22 @@ async function onSend() {
 </script>
 
 <template>
-  <div style="display: flex; flex-direction: column; gap: 12px; height: 100%">
+  <div class="flex flex-col gap-3 h-full">
     <!-- Model 只读 -->
     <div>
       <strong>Model: </strong>
       <span v-if="inferenceModel">{{ inferenceModel }}</span>
-      <span v-else style="color: #999">（请先在"设置"中填写 Model）</span>
+      <span v-else class="text-slate-400">（请先在"设置"中填写 Model）</span>
     </div>
 
     <!-- Prompt textarea（不清空） -->
     <div>
-      <div style="margin-bottom: 4px; font-weight: 600">Prompt：</div>
+      <div class="mb-1 font-semibold">Prompt：</div>
       <a-textarea
         v-model:value="prompt"
         :rows="8"
         placeholder="输入推理请求 prompt"
-        style="font-family: monospace"
+        class="font-mono"
       />
     </div>
 
@@ -80,41 +79,20 @@ async function onSend() {
     <a-button type="primary" :loading="sending" :disabled="!canSend" @click="onSend">
       发送推理请求
     </a-button>
-    <span v-if="inferencePort === null" style="color: #999; font-size: 12px">
+    <span v-if="inferencePort === null" class="text-slate-400 text-xs">
       ⚠ 未检测到可用 ingress 端口，请在设置中添加 http_proxy 或 mapping ingress。
     </span>
 
     <!-- 输出区（只读，覆盖上一次） -->
-    <div class="panel" style="flex: 1; overflow: auto">
-      <div class="panel-title">推理输出（只读）</div>
-      <pre>{{ output || "（尚未发送）" }}</pre>
+    <div class="rounded-lg border border-slate-200 bg-slate-50/50 p-4 flex-1 overflow-auto">
+      <div class="text-sm text-slate-500 mb-2 font-semibold">推理输出（只读）</div>
+      <pre class="font-mono text-xs text-slate-700 m-0 whitespace-pre-wrap break-all">{{ output || "（尚未发送）" }}</pre>
     </div>
 
     <!-- RA 过程区 占位 -->
-    <div class="panel">
-      <div class="panel-title">RA 验证过程（TODO 接数据）</div>
-      <pre style="color: #999">待接数据。TODO: 从 tng stdout 抓 encrypted= / attested= 行</pre>
+    <div class="rounded-lg border border-slate-200 bg-slate-50/50 p-4">
+      <div class="text-sm text-slate-500 mb-2 font-semibold">RA 验证过程（TODO 接数据）</div>
+      <pre class="font-mono text-xs text-slate-400 m-0 whitespace-pre-wrap break-all">待接数据。TODO: 从 tng stdout 抓 encrypted= / attested= 行</pre>
     </div>
   </div>
 </template>
-
-<style scoped>
-.panel {
-  border: 1px solid #555;
-  border-radius: 6px;
-  padding: 8px;
-  background: rgba(127, 127, 127, 0.08);
-}
-.panel-title {
-  font-size: 13px;
-  color: #888;
-  margin-bottom: 6px;
-  font-weight: 600;
-}
-pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-all;
-  font-size: 12px;
-}
-</style>

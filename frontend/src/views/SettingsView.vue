@@ -120,7 +120,7 @@ watch(
 </script>
 
 <template>
-  <div style="display: flex; flex-direction: column; gap: 12px; height: 100%">
+  <div class="flex flex-col gap-3 h-full">
     <a-space wrap>
       <a-button type="primary" @click="onSaveConfig">保存</a-button>
       <a-button @click="onImport">导入 JSON</a-button>

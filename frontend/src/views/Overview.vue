@@ -13,13 +13,18 @@ const outputLines = ref<string[]>([]);
 const launching = ref(false);
 let timer: number | undefined;
 
-// 解析 stdout 是否出现过 encrypted=true → "已连接"
 const connected = computed(() =>
   outputLines.value.some((l) => l.includes("encrypted=true"))
 );
-
-// tng 是否在跑（非红=黄/绿）
-const tngRunning = computed(() => light.value === "yellow" || light.value === "green");
+const tngRunning = computed(
+  () => light.value === "yellow" || light.value === "green"
+);
+const lightBg = computed(() => {
+  if (light.value === "red") return "bg-red-500";
+  if (light.value === "yellow") return "bg-yellow-400";
+  if (light.value === "green") return "bg-green-600";
+  return "bg-slate-400";
+});
 
 async function poll() {
   try {
@@ -80,35 +85,31 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div style="display: flex; flex-direction: column; gap: 12px; height: 100%">
+  <div class="flex flex-col gap-3 h-full">
     <!-- 3 状态块 -->
     <a-row :gutter="12">
       <a-col :span="8">
         <a-card size="small" :bordered="false">
-          <div class="status-title">进程</div>
-          <div class="status-value">
-            <span class="light" :class="light"></span>
-            <span style="margin-left: 8px; font-weight: 600">{{ label }}</span>
+          <div class="text-sm text-slate-500 mb-1 font-semibold">进程</div>
+          <div class="flex items-center gap-2">
+            <span :class="['inline-block w-4 h-4 rounded-full border border-slate-300', lightBg]"></span>
+            <span class="font-semibold">{{ label }}</span>
           </div>
         </a-card>
       </a-col>
       <a-col :span="8">
         <a-card size="small" :bordered="false">
-          <div class="status-title">配置 + 连接</div>
-          <div class="status-value">
-            <a-tag :color="connected ? 'green' : 'default'">
-              {{ connected ? "已连接服务端" : "未建立隧道" }}
-            </a-tag>
-          </div>
+          <div class="text-sm text-slate-500 mb-1 font-semibold">配置 + 连接</div>
+          <a-tag :color="connected ? 'green' : 'default'">
+            {{ connected ? "已连接服务端" : "未建立隧道" }}
+          </a-tag>
         </a-card>
       </a-col>
       <a-col :span="8">
         <a-card size="small" :bordered="false">
-          <div class="status-title">RA 验证</div>
-          <div class="status-value">
-            <a-tag color="default">待接数据</a-tag>
-          </div>
-          <div class="status-hint">TODO: 解析 stdout 的 attested= 行</div>
+          <div class="text-sm text-slate-500 mb-1 font-semibold">RA 验证</div>
+          <a-tag color="default">待接数据</a-tag>
+          <div class="text-xs text-slate-400 mt-1">TODO: 解析 stdout attested=</div>
         </a-card>
       </a-col>
     </a-row>
@@ -120,62 +121,17 @@ onBeforeUnmount(() => {
     </a-space>
 
     <!-- /status/ JSON -->
-    <div class="panel">
-      <div class="panel-title">GET /status/</div>
-      <pre>{{ statusJson }}</pre>
+    <div class="rounded-lg border border-slate-200 bg-slate-50/50 p-4">
+      <div class="text-sm text-slate-500 mb-2 font-semibold">GET /status/</div>
+      <pre class="font-mono text-xs text-slate-700 m-0 whitespace-pre-wrap break-all">{{ statusJson }}</pre>
     </div>
 
     <!-- tng stdout/stderr -->
-    <div class="panel" style="flex: 1; overflow: auto">
-      <div class="panel-title">tng 进程输出（stdout / stderr，只读）</div>
-      <pre style="color: #6abf6a">{{ outputLines.length ? outputLines.join("\n") : "（暂无输出）" }}</pre>
+    <div class="rounded-lg border border-slate-200 bg-slate-50/50 p-4 flex-1 overflow-auto">
+      <div class="text-sm text-slate-500 mb-2 font-semibold">tng 进程输出（stdout / stderr，只读）</div>
+      <pre class="font-mono text-xs text-green-700 m-0 whitespace-pre-wrap break-all">{{
+        outputLines.length ? outputLines.join("\n") : "（暂无输出）"
+      }}</pre>
     </div>
   </div>
 </template>
-
-<style scoped>
-.light {
-  display: inline-block;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  border: 1px solid #888;
-  vertical-align: middle;
-  background: #999;
-}
-.light.red { background: #e53935; }
-.light.yellow { background: #fdd835; }
-.light.green { background: #43a047; }
-.status-title {
-  font-size: 13px;
-  color: #888;
-  margin-bottom: 4px;
-  font-weight: 600;
-}
-.status-value {
-  font-size: 14px;
-}
-.status-hint {
-  font-size: 11px;
-  color: #999;
-  margin-top: 2px;
-}
-.panel {
-  border: 1px solid #555;
-  border-radius: 6px;
-  padding: 8px;
-  background: rgba(127, 127, 127, 0.08);
-}
-.panel-title {
-  font-size: 13px;
-  color: #888;
-  margin-bottom: 6px;
-  font-weight: 600;
-}
-pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-all;
-  font-size: 12px;
-}
-</style>
