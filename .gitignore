@@ -22,6 +22,9 @@ frontend/components.d.ts
 # TS 增量构建信息
 *.tsbuildinfo
 
+# npm 本地 registry 配置（环境级，不入库，防止内部镜像 URL 泄漏进 lock）
+frontend/.npmrc
+
 # 随包 tng 二进制（CI 每目标从 TNG 官方产物填入，不入库）；但保留占位文件以满足 tauri-build 校验
 /resources/*
 !/resources/tng.placeholder

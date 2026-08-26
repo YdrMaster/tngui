@@ -18,6 +18,7 @@
     "vue": "^3.5.0"
   },
   "devDependencies": {
+    "@ant-design/icons-vue": "^7.0.1",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-vue": "^5.1.0",
     "tailwindcss": "^4.3.3",

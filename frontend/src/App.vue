@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, onMounted, onBeforeUnmount } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { message } from "ant-design-vue";
+import {
+  SafetyCertificateOutlined, DashboardOutlined, ExperimentOutlined, SettingOutlined,
+} from "@ant-design/icons-vue";
 import Overview from "./views/Overview.vue";
 import InferenceView from "./views/InferenceView.vue";
 import SettingsView from "./views/SettingsView.vue";
@@ -22,6 +25,26 @@ const themeConfig = {
   },
 };
 
+const menuItems = [
+  { key: "overview", icon: DashboardOutlined, label: "概览" },
+  { key: "inference", icon: ExperimentOutlined, label: "密态推理调试" },
+  { key: "settings", icon: SettingOutlined, label: "设置" },
+];
+
+const runtimeStatus = ref({ gatewayReady: false, statusLabel: "检测中…" });
+let runtimeTimer: number | undefined;
+
+async function pollRuntime() {
+  try {
+    const s = await invoke<{ reachable: boolean; ready: boolean }>("get_status");
+    runtimeStatus.value.gatewayReady = s.reachable;
+    runtimeStatus.value.statusLabel = s.ready ? "运行中" : s.reachable ? "启动中…" : "未运行";
+  } catch {
+    runtimeStatus.value.gatewayReady = false;
+    runtimeStatus.value.statusLabel = "未运行";
+  }
+}
+
 async function beforeLeaveSettings() {
   const { isDirty, markSaved, serializeCurrent } = useTngConfig();
   if (!isDirty()) return;
@@ -40,41 +63,68 @@ async function beforeLeaveSettings() {
     } else {
       message.success("配置已保存");
     }
-  } catch {
-    /* ignore */
-  }
+  } catch { /* ignore */ }
   markSaved();
 }
 
 async function onMenuClick(e: { key: string }) {
-  if (view.value === "settings") {
-    await beforeLeaveSettings();
-  }
+  if (view.value === "settings") await beforeLeaveSettings();
   view.value = e.key as View;
 }
+
+onMounted(() => {
+  pollRuntime();
+  runtimeTimer = window.setInterval(pollRuntime, 2000);
+});
+onBeforeUnmount(() => {
+  if (runtimeTimer) window.clearInterval(runtimeTimer);
+});
 </script>
 
 <template>
   <a-config-provider :theme="themeConfig">
-    <a-layout class="h-screen">
-      <a-layout-sider width="160" theme="light" style="border-right: 1px solid #e2e8f0">
-        <div class="px-4 py-4 font-semibold text-lg" style="color: var(--portal-navy)">
-          TNG GUI
+    <a-layout class="h-screen" style="background:var(--bg-layout)">
+      <a-layout-sider width="216" theme="light" class="sidebar">
+        <div class="brand">
+          <div class="brand-mark"><SafetyCertificateOutlined /></div>
+          <div>
+            <div class="brand-title">可信网关</div>
+            <div class="brand-subtitle"><strong>TNG</strong> Trusted Network Gateway</div>
+          </div>
         </div>
-        <a-menu :selectedKeys="[view]" mode="inline" @click="onMenuClick">
-          <a-menu-item key="overview">概览</a-menu-item>
-          <a-menu-item key="inference">密态推理</a-menu-item>
-          <a-menu-item key="settings">设置</a-menu-item>
-        </a-menu>
+        <div class="sidebar-menu">
+          <a-button
+            v-for="item in menuItems"
+            :key="item.key"
+            :type="view === item.key ? 'primary' : 'text'"
+            @click="onMenuClick({ key: item.key })"
+          >
+            <component :is="item.icon" />
+            <span style="margin-left:8px">{{ item.label }}</span>
+          </a-button>
+        </div>
+        <div class="sidebar-bottom">
+          <div class="runtime-mini">
+            <a-badge :status="runtimeStatus.gatewayReady ? 'success' : 'error'" />
+            <div>
+              <strong>{{ runtimeStatus.statusLabel }}</strong>
+              <div style="color:var(--text-secondary);font-size:11px">
+                XMPP 信道 {{ runtimeStatus.gatewayReady ? "已连接" : "已断开" }}
+              </div>
+            </div>
+          </div>
+        </div>
       </a-layout-sider>
-      <a-layout-content
-        class="p-4 overflow-auto"
-        style="background: linear-gradient(145deg, #ffffff 0%, #f3f8ff 52%, #f8fbff 100%)"
-      >
-        <Overview v-if="view === 'overview'" />
-        <InferenceView v-else-if="view === 'inference'" />
-        <SettingsView v-else />
-      </a-layout-content>
+      <a-layout style="background:var(--bg-layout)">
+        <a-layout-content
+          class="p-6 overflow-auto"
+          style="background:linear-gradient(145deg,#ffffff 0%,#f3f8ff 52%,#f8fbff 100%)"
+        >
+          <Overview v-if="view === 'overview'" />
+          <InferenceView v-else-if="view === 'inference'" />
+          <SettingsView v-else />
+        </a-layout-content>
+      </a-layout>
     </a-layout>
   </a-config-provider>
 </template>
