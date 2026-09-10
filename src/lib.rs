@@ -69,6 +69,10 @@ async fn get_status(state: State<'_, AppState>) -> Result<Value, String> {
             livez_ok: false,
             ready: false,
             status_json: Value::Null,
+            ingress_ids: serde_json::json!([]),
+            ingress_keys: Value::Null,
+            ingress_keys_error: None,
+            process_error: None,
             error: Some("尚未启动 tng".to_string()),
         },
     };

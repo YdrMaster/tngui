@@ -7,6 +7,10 @@ export interface StatusReport {
   livez_ok: boolean;
   ready: boolean;
   status_json: unknown;
+  ingress_ids?: unknown;
+  ingress_keys?: unknown;
+  ingress_keys_error?: string | null;
+  process_error?: string | null;
   error?: string | null;
 }
 

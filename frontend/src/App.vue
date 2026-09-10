@@ -31,17 +31,23 @@ const menuItems = [
   { key: "settings", icon: SettingOutlined, label: "设置" },
 ];
 
-const runtimeStatus = ref({ gatewayReady: false, statusLabel: "检测中…" });
+const runtimeStatus = ref({ running: false, statusLabel: "检测中…" });
 let runtimeTimer: number | undefined;
 
 async function pollRuntime() {
   try {
-    const s = await invoke<{ reachable: boolean; ready: boolean }>("get_status");
-    runtimeStatus.value.gatewayReady = s.reachable;
-    runtimeStatus.value.statusLabel = s.ready ? "运行中" : s.reachable ? "启动中…" : "未运行";
+    const s = await invoke<{ reachable: boolean; livez_ok: boolean; ready: boolean }>("get_status");
+    runtimeStatus.value.running = s.ready;
+    runtimeStatus.value.statusLabel = !s.reachable
+      ? "关停"
+      : s.ready
+        ? "运行"
+        : s.livez_ok
+          ? "关停"
+          : "错误";
   } catch {
-    runtimeStatus.value.gatewayReady = false;
-    runtimeStatus.value.statusLabel = "未运行";
+    runtimeStatus.value.running = false;
+    runtimeStatus.value.statusLabel = "关停";
   }
 }
 
@@ -89,7 +95,7 @@ onBeforeUnmount(() => {
           <div class="brand-mark"><SafetyCertificateOutlined /></div>
           <div>
             <div class="brand-title">可信网关</div>
-            <div class="brand-subtitle"><strong>TNG</strong> Trusted Network Gateway</div>
+            <div class="brand-subtitle"><strong>T</strong>rusted <strong>N</strong>etwork <strong>G</strong>ateway</div>
           </div>
         </div>
         <div class="sidebar-menu">
@@ -105,11 +111,11 @@ onBeforeUnmount(() => {
         </div>
         <div class="sidebar-bottom">
           <div class="runtime-mini">
-            <a-badge :status="runtimeStatus.gatewayReady ? 'success' : 'error'" />
+            <a-badge :status="runtimeStatus.running ? 'success' : 'default'" />
             <div>
               <strong>{{ runtimeStatus.statusLabel }}</strong>
               <div style="color:var(--text-secondary);font-size:11px">
-                XMPP 信道 {{ runtimeStatus.gatewayReady ? "已连接" : "已断开" }}
+                本地进程状态
               </div>
             </div>
           </div>

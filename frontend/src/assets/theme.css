@@ -58,7 +58,7 @@ button, input, textarea { font: inherit; }
 .brand { height: 70px; display: flex; align-items: center; gap: 11px; padding: 0 18px; }
 .brand-mark { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 10px; color: white; font-size: 21px; background: linear-gradient(145deg, #1677ff, #4096ff); box-shadow: 0 5px 14px rgba(22,119,255,.26); }
 .brand-title { font-size: 16px; line-height: 21px; font-weight: 650; }
-.brand-subtitle { font-size: 10px; line-height: 15px; color: var(--text-tertiary); letter-spacing: 1.3px; }
+.brand-subtitle { font-size: 10px; line-height: 15px; color: var(--text-tertiary); letter-spacing: 1.3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sidebar-menu { flex: 1; padding: 10px 10px; display: flex; flex-direction: column; gap: 5px; }
 .sidebar-menu .ant-btn { height: 42px; justify-content: flex-start; padding-left: 14px; text-align: left; }
 .sidebar-bottom { border-top: 1px solid var(--split); padding: 10px; }
@@ -202,3 +202,43 @@ button, input, textarea { font: inherit; }
 @media (prefers-reduced-motion: reduce) {
   *, *:before, *:after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
+/* ================================================================
+ * Ingress state home cards
+ * ================================================================ */
+.ingress-top-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+@media (min-width: 860px) {
+  .ingress-top-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+.ingress-card {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  position: relative;
+}
+.ingress-card-body { padding: 16px; }
+.ingress-card-ok { border-color: rgba(82,196,26,.32); }
+.ingress-card-info { border-color: rgba(22,119,255,.22); background: #fbfdff; }
+.ingress-card-title { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.ingress-card-title b { font-size: 14px; font-weight: 650; }
+.ingress-card-pos { font-size: 10px; color: var(--text-tertiary); background: #f0f0f0; padding: 2px 6px; border-radius: 999px; }
+.ingress-state-line { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.ingress-state-dot { width: 10px; height: 10px; border-radius: 50%; background: #8c8c8c; }
+.ingress-dot-ok { background: #52c41a; }
+.ingress-dot-warn { background: #faad14; }
+.ingress-dot-err { background: #ff4d4f; }
+.ingress-dot-neutral { background: #8c8c8c; }
+.ingress-state-text { font-size: 15px; font-weight: 650; }
+.ingress-state-sub { margin-top: 6px; font-size: 11px; color: var(--text-tertiary); }
+.ingress-src-line { margin-top: 10px; font-size: 11px; color: var(--text-secondary); }
+.ingress-src-line b { font-weight: 650; }
+.ingress-info-list { display: grid; gap: 6px; font-size: 12px; color: var(--text-secondary); margin-top: 12px; }
+.ingress-info-row { display: flex; justify-content: space-between; gap: 8px; }
+.ingress-info-row b { font-weight: 650; }
+.ingress-debug-grid { display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 18px; }
+@media (min-width: 980px) { .ingress-debug-grid { grid-template-columns: 1fr 1fr; } }

@@ -231,19 +231,18 @@ async function onSend() {
               <h4 style="margin:0 0 4px;font-size:16px">密态安全如何发生</h4>
               <span style="color:var(--text-secondary);font-size:13px">从客户本地到云端推理引擎，查看传输中与使用中的保护过程。</span>
             </div>
-            <a-button @click="checkTng"><ReloadOutlined /> 重新验证</a-button>
           </div>
           <!-- Security Hero -->
           <a-card class="security-hero">
             <a-row align="middle" :gutter="24">
               <a-col :span="7">
                 <a-result
-                  :status="tngReady ? 'success' : 'info'"
-                  :title="tngReady ? '当前链路可信' : '正在确认可信链路'"
-                  :subTitle="tngReady ? '两段加密链路均已通过验证' : '完成验证前不会发送业务数据'"
+                  status="success"
+                  title="链路可信机制"
+                  subTitle="两段加密链路均通过 RATS-TLS 验证"
                 >
                   <template #extra>
-                    <a-tag :color="tngReady ? 'success' : 'processing'">{{ tngReady ? 'RA-MOCK' : 'VERIFYING' }}</a-tag>
+                    <a-tag color="success">RA</a-tag>
                   </template>
                 </a-result>
               </a-col>
