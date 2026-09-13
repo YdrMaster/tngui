@@ -158,7 +158,7 @@ async function onSend() {
                     <span style="color:var(--text-secondary);font-size:13px">
                       {{ phase === 0 ? "请求明文不离开本机。"
                         : phase === 1 ? "校验硬件证明、软件度量和服务身份。"
-                        : phase === 2 ? "验证结果与 RATS-TLS 会话绑定后再发送。"
+                        : phase === 2 ? "OHTTP 加密并绑定网关证明后再发送。"
                         : phase === 3 ? "请求仅在云端可信执行环境内解密和计算。"
                         : "等待响应返回…" }}
                     </span>
@@ -239,7 +239,7 @@ async function onSend() {
                 <a-result
                   status="success"
                   title="链路可信机制"
-                  subTitle="两段加密链路均通过 RATS-TLS 验证"
+                  subTitle="两段加密：Seg1 OHTTP + Seg2 RA-TLS，均经远程证明"
                 >
                   <template #extra>
                     <a-tag color="success">RA</a-tag>
@@ -280,7 +280,7 @@ async function onSend() {
             <a-col :span="12">
               <a-card title="推理过程中如何保护" class="protection-card">
                 <ProtectionItem :icon="CloudServerOutlined" title="TEE 加密内存" tag="内存保护" description="Gateway 和推理引擎运行在可信执行环境中，宿主机 OS 无法读取正在处理的数据。" />
-                <ProtectionItem :icon="ApiOutlined" title="CPU-GPU 加密链路" tag="PCIe IDE / TDX-IO" description="模型权重、KV cache 和中间激活值在 PCIe 总线上保持加密。" />
+                <ProtectionItem :icon="ApiOutlined" title="CPU-GPU 加密链路" tag="PCIe 链路加密" description="模型权重、KV cache 和中间激活值在 PCIe 总线上保持加密。" />
                 <ProtectionItem :icon="SafetyCertificateOutlined" title="密码学证明可审计" tag="Attestation" description="每次握手生成可验证的证明声明，可由审计方独立核验。" />
               </a-card>
             </a-col>
@@ -291,7 +291,7 @@ async function onSend() {
               <a-tab-pane key="boundary" tab="加密边界">
                 <div class="boundary-list">
                   <div class="boundary-row"><b>User App → 客户端 TNG</b><a-tag>明文</a-tag><span>客户域内，仅本机</span></div>
-                  <div class="boundary-row encrypted"><b>客户端 TNG → Gateway TNG</b><a-tag color="blue">密文</a-tag><span>RATS-TLS 段 1 · 单向证明</span></div>
+                  <div class="boundary-row encrypted"><b>客户端 TNG → Gateway TNG</b><a-tag color="blue">密文</a-tag><span>OHTTP/HPKE 段 1 · 单向证明</span></div>
                   <div class="boundary-row"><b>Gateway TNG → Envoy → EPP</b><a-tag>明文</a-tag><span>同 Pod localhost，共享 TEE 边界</span></div>
                   <div class="boundary-row encrypted"><b>Gateway TNG → vLLM TNG</b><a-tag color="blue">密文</a-tag><span>RATS-TLS 段 2 · 双向证明</span></div>
                   <div class="boundary-row"><b>vLLM TNG → 推理引擎</b><a-tag>明文</a-tag><span>同 Pod localhost，共享 TEE 边界</span></div>
@@ -311,10 +311,10 @@ async function onSend() {
                 <a-descriptions bordered :column="2">
                   <a-descriptions-item label="证明 ID"><span class="mono">RA-260824-7C21</span></a-descriptions-item>
                   <a-descriptions-item label="验证时间">2026-08-24 14:26:08</a-descriptions-item>
-                  <a-descriptions-item label="硬件可信环境"><a-tag color="success">Intel TDX</a-tag></a-descriptions-item>
+                  <a-descriptions-item label="可信执行环境"><a-tag color="success">远程证明（RA）</a-tag></a-descriptions-item>
                   <a-descriptions-item label="软件度量"><a-tag color="success">参考值匹配</a-tag></a-descriptions-item>
                   <a-descriptions-item label="可信策略"><span class="mono">policy-prod-2026.08</span></a-descriptions-item>
-                  <a-descriptions-item label="加密协议">RATS-TLS / TLS 1.3</a-descriptions-item>
+                  <a-descriptions-item label="加密协议">Seg1 OHTTP/HPKE + Seg2 RA-TLS(TLS 1.3)</a-descriptions-item>
                 </a-descriptions>
                 <a-alert type="success" showIcon style="margin-top:12px"
                   message="中心控制面只负责服务开通与 API Key 管理，不承载本次请求正文。" />

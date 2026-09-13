@@ -14,8 +14,8 @@ withDefaults(defineProps<{ compact?: boolean }>(), { compact: false });
     </div>
     <div class="secure-segment">
       <span class="segment-badge"><LockOutlined /> 网络密文</span>
-      <b>RATS-TLS 段 1</b>
-      <small>单向证明：客户端验证 Gateway TEE</small>
+      <b>OHTTP 段 1</b>
+      <small>单向证明：客户端验证 Gateway TEE · OHTTP/HPKE 消息级加密</small>
       <div class="segment-line"><i /></div>
     </div>
     <div class="trust-zone gateway-zone">
