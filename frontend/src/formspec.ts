@@ -1,157 +1,109 @@
-// form-spec：手写的结构化配置字段模型（据 TNG 源码；不链接 tng）。
-// 覆盖常用路径：control port、ingress/egress 各模式字段、no_ra。
-// 未覆盖（RA attest/verify、ohttp 高级、metric/trace 等）→ 原始 JSON 视图，经 extra 容器往返不丢。
+// form-spec：结构化配置字段模型——客户端 ingress 锁定 OHTTP 形态。
+// 客户端侧只配 add_ingress（mapping 地址端口 / http_proxy 域名两种远端形态），不承载 add_egress。
+// ohttp 常开、header_passthrough 写死；no_ra/verify 互斥序列化（见 configmodel.ts）。
+// 据真实 cmaas-deploy 客户端配置（publish/docs/03-使用.md §2），不链接 tng 代码。
 
-/** 回环地址：控制面 host 由 GUI 强制（契约 B 安全）。 */
+/** 回环地址：ingress 本地监听 host 由前后端共同强制为回环（与 control_interface.restful 同法）。 */
 export const LOCALHOST = "127.0.0.1";
 
-export type IngressMode = "mapping" | "http_proxy" | "socks5" | "netfilter" | "hook";
-export type EgressMode = "mapping" | "netfilter" | "hook";
+export type IngressMode = "mapping" | "http_proxy";
+export const INGRESS_MODES: IngressMode[] = ["mapping", "http_proxy"];
+/** parse 识别的 ingress 模式 tag（其余 tag 视为不支持，见 configmodel.parseEntry）。 */
+export const ALL_MODES: IngressMode[] = ["mapping", "http_proxy"];
 
-export const INGRESS_MODES: IngressMode[] = ["mapping", "http_proxy", "socks5", "netfilter", "hook"];
-export const EGRESS_MODES: EgressMode[] = ["mapping", "netfilter", "hook"];
+/** 内置默认监听口（默认开局模板用）。 */
+export const DEFAULT_LISTEN_PORT = 18443;
+/** 内置默认远端口（mapping 占位）。 */
+export const DEFAULT_OUT_PORT = 10000;
 
-/** 已知所有模式（含 feature 门控的 mapping_udp，仅在 parse 时识别以保往返）。 */
-export const ALL_MODES = [...INGRESS_MODES, "mapping_udp"];
+/** 客户端走 OHTTP 时透传的请求头——写死，用户不可改。 */
+export const HEADER_PASSTHROUGH = ["x-model", "x-api-key", "authorization"] as const;
+/** 注入到每条 ingress 序列化结果的锁定 ohttp 子配置。 */
+export const LOCKED_OHTTP = {
+  header_passthrough: { request_headers: ["x-model", "x-api-key", "authorization"] },
+};
 
-// —— 复合字段类型 ——
-export interface Endpoint {
-  host?: string;
-  port: number;
+export interface VerifyConfig {
+  model: string;
+  as_provider: string;
 }
+/** verify 默认值（no_ra=false 时用）。 */
+export const DEFAULT_VERIFY: VerifyConfig = { model: "passport", as_provider: "tpm" };
+
+// —— 嵌套形状（serialize/parse 用，extra 字段仍可经 entry extra 容器往返） ——
 export interface RuleEndpoint {
-  host?: string;
+  host: string;
   port: number;
-  port_end?: number;
 }
 export interface MappingRule {
   in: RuleEndpoint;
   out: RuleEndpoint;
 }
-/** dst_filter：host 匹配（domain/ip/cidr/正则/all 的字符串形式）+ 可选端口范围。 */
-export interface DstFilter {
-  host?: string;
-  port?: number;
-  port_end?: number;
+export interface ProxyListen {
+  host: string;
+  port: number;
 }
-/** netfilter/hook capture_dst：host(cidr) 或 ipset（互斥）+ 可选端口范围。 */
-export interface CaptureDst {
-  host?: string;
-  ipset?: string;
-  port?: number;
-  port_end?: number;
-}
-/** egress hook intercept 条目。 */
-export interface HookIntercept {
-  host?: string;
-  ifname?: string;
-  port?: number;
-  port_end?: number;
-  redirect_to_port?: number;
-  redirect_to_port_end?: number;
+export interface DstFilters {
+  domain: string;
 }
 
-/** 一条 ingress/egress 条目的模型。extra 容纳未结构化字段（RA 等）。 */
+/** 一条 ingress 条目的模型。fields 为各模式的嵌套字段；verify 仅在 no_ra=false 时有效。 */
 export interface EntryModel {
-  mode: string;
+  mode: IngressMode;
   fields: Record<string, unknown>;
   no_ra: boolean;
+  verify?: VerifyConfig;
   extra: Record<string, unknown>;
 }
 
-/** 配置模型。control_interface 的 restful 子段（管控面 host+port）由 tngui 在拉起 tng 时注入，
- * 不向用户暴露、不在此承载；仅保留 control_interface 的同级字段（如 ttrpc）以维持未结构化字段往返。 */
+/** 配置模型。control_interface 仅留同级 extra（ttrpc 等），restful 子段由 tngui 启动时注入（auto-manage-control-port）。 */
 export interface ConfigModel {
-  control_interface_extra: Record<string, unknown>; // control_interface 同级：ttrpc 等
+  control_interface_extra: Record<string, unknown>;
   add_ingress: EntryModel[];
-  add_egress: EntryModel[];
-  extra: Record<string, unknown>; // 顶层：metric/trace/admin_bind 等
+  extra: Record<string, unknown>;
 }
 
-// —— form-spec：每模式的字段声明，驱动 Vue 表单渲染 ——
-export type FieldType =
-  | "number"
-  | "text"
-  | "bool"
-  | "endpoint"
-  | "stringList"
-  | "ruleList"
-  | "filterList"
-  | "captureList"
-  | "interceptList";
+// —— form-spec：驱动 EntryEditor/FieldRenderer 渲染 ——
+export type FieldType = "listenHostPort" | "outHostPort" | "domainText" | "verifyFields";
 
 export interface FieldSpec {
   key: string;
   label: string;
   type: FieldType;
   required?: boolean;
-  /** 默认值（用于新增条目/切模式重置）。 */
-  default?: unknown;
 }
 
 export const INGRESS_FIELDS: Record<IngressMode, FieldSpec[]> = {
   mapping: [
-    { key: "rules", label: "端口映射规则", type: "ruleList", required: true, default: [{ in: { port: 10001 }, out: { host: LOCALHOST, port: 30001 } }] },
+    { key: "listen", label: "本地监听（host 锁定 127.0.0.1）", type: "listenHostPort", required: true },
+    { key: "remote", label: "远端地址端口（out：IP + 端口）", type: "outHostPort", required: true },
   ],
   http_proxy: [
-    { key: "proxy_listen", label: "监听地址", type: "endpoint", required: true, default: { host: LOCALHOST, port: 0 } },
-    { key: "dst_filters", label: "目标过滤", type: "filterList", default: [] },
-  ],
-  socks5: [
-    { key: "proxy_listen", label: "监听地址", type: "endpoint", required: true, default: { host: LOCALHOST, port: 0 } },
-    { key: "dst_filters", label: "目标过滤", type: "filterList", default: [] },
-  ],
-  netfilter: [
-    { key: "capture_dst", label: "捕获目标", type: "captureList", required: true, default: [] },
-    { key: "capture_cgroup", label: "捕获 cgroup", type: "stringList", default: [] },
-    { key: "nocapture_cgroup", label: "排除 cgroup", type: "stringList", default: [] },
-    { key: "listen_port", label: "监听端口", type: "number" },
-    { key: "so_mark", label: "SO_MARK", type: "number" },
-  ],
-  hook: [
-    { key: "capture_dst", label: "捕获目标", type: "captureList", required: true, default: [] },
-    { key: "proxy_port", label: "代理端口", type: "number" },
-    { key: "proxy_listen", label: "代理监听 host", type: "text" },
-    { key: "capture_local_traffic", label: "捕获本地流量", type: "bool", default: false },
+    { key: "listen", label: "本地监听（host 锁定 127.0.0.1）", type: "listenHostPort", required: true },
+    { key: "remote", label: "远端域名（完整域名，不限 http/https）", type: "domainText", required: true },
   ],
 };
 
-export const EGRESS_FIELDS: Record<EgressMode, FieldSpec[]> = {
-  mapping: [
-    { key: "rules", label: "端口映射规则", type: "ruleList", required: true, default: [{ in: { port: 10001 }, out: { host: LOCALHOST, port: 30001 } }] },
-  ],
-  netfilter: [
-    { key: "capture_dst", label: "捕获目标", type: "captureList", required: true, default: [] },
-    { key: "capture_local_traffic", label: "捕获本地流量", type: "bool", default: false },
-    { key: "capture_cgroup", label: "捕获 cgroup", type: "stringList", default: [] },
-    { key: "nocapture_cgroup", label: "排除 cgroup", type: "stringList", default: [] },
-    { key: "listen_port", label: "监听端口", type: "number" },
-    { key: "so_mark", label: "SO_MARK", type: "number" },
-  ],
-  hook: [
-    { key: "capture_listen", label: "拦截目标", type: "interceptList", required: true, default: [] },
-    { key: "capture_local_traffic", label: "捕获本地流量", type: "bool", default: false },
-  ],
-};
-
-/** 某模式的字段默认值集合（深拷贝，避免共享引用）。 */
+/** 某 mode 的默认嵌套字段（深拷贝，避免共享引用）。 */
 export function defaultFields(mode: string): Record<string, unknown> {
-  const specs: FieldSpec[] | undefined =
-    mode in INGRESS_FIELDS
-      ? INGRESS_FIELDS[mode as IngressMode]
-      : mode in EGRESS_FIELDS
-        ? EGRESS_FIELDS[mode as EgressMode]
-        : undefined;
-  const out: Record<string, unknown> = {};
-  if (!specs) return out;
-  for (const s of specs) {
-    out[s.key] = s.default === undefined ? undefined : structuredClone(s.default);
+  if (mode === "mapping") {
+    return {
+      rules: [
+        { in: { host: LOCALHOST, port: DEFAULT_LISTEN_PORT }, out: { host: "", port: DEFAULT_OUT_PORT } },
+      ],
+    };
   }
-  return out;
+  if (mode === "http_proxy") {
+    return {
+      proxy_listen: { host: LOCALHOST, port: DEFAULT_LISTEN_PORT },
+      dst_filters: { domain: "" },
+    };
+  }
+  return {};
 }
 
-/** 内置默认开局模板：一条 no_ra mapping ingress 示例。control_interface 的 restful 子段由 tngui
- * 在拉起 tng 时注入，不在模板中。 */
+/** 内置默认开局模板：一条锁定形态的 OHTTP mapping ingress（no_ra=false → verify on，默认 passport/tpm）。
+ * 不含 add_egress、不含 control_interface.restful（restful 由 tngui 拉起 tng 时注入）。 */
 export function defaultModel(): ConfigModel {
   return {
     control_interface_extra: {},
@@ -159,11 +111,11 @@ export function defaultModel(): ConfigModel {
       {
         mode: "mapping",
         fields: defaultFields("mapping"),
-        no_ra: true,
+        no_ra: false,
+        verify: { ...DEFAULT_VERIFY },
         extra: {},
       },
     ],
-    add_egress: [],
     extra: {},
   };
 }

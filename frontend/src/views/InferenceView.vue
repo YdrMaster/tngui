@@ -39,13 +39,13 @@ const inferencePort = computed((): number | null => {
   const entries = tngConfigModel.value.add_ingress;
   if (!entries?.length) return null;
   const first = entries[0];
-  if (first.mode === "http_proxy" || first.mode === "socks5") {
+  if (first.mode === "http_proxy") {
     const pl = first.fields["proxy_listen"] as { port?: number } | undefined;
     return pl?.port ?? null;
   }
   if (first.mode === "mapping") {
     const rules = first.fields["rules"] as Array<{ in: { port?: number } }> | undefined;
-    if (rules?.length) return rules[0].in.port ?? null;
+    if (rules?.length) return rules[0].in?.port ?? null;
   }
   return null;
 });

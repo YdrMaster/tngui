@@ -83,7 +83,41 @@ pub fn prepare_config(user_json: &str, control_port: u16) -> Result<Value, Prepa
     restful_obj.insert("host".to_string(), Value::String(LOCALHOST.to_string()));
     restful_obj.insert("port".to_string(), Value::from(control_port));
 
+    // 客户端不承载 egress（见变更 lock-ingress-ohttp-drop-egress）：丢弃 add_egress。
+    root.remove("add_egress");
+
+    // 强制每条 ingress 的本地监听 host 为回环（与 control_interface.restful 同向），
+    // 仅处理客户端两种形态 mapping(in.host)/http_proxy(proxy_listen.host)。
+    if let Some(add_ingress) = root.get_mut("add_ingress") {
+        if let Some(arr) = add_ingress.as_array_mut() {
+            for entry in arr.iter_mut() {
+                force_ingress_listen_host(entry);
+            }
+        }
+    }
+
     Ok(v)
+}
+
+/// 强制一条 ingress 的本地监听 host 为 `127.0.0.1`：
+/// `mapping` 的 `rules[*].in.host`、`http_proxy` 的 `proxy_listen.host`。其余形态不动。
+fn force_ingress_listen_host(entry: &mut Value) {
+    let Some(obj) = entry.as_object_mut() else {
+        return;
+    };
+    if let Some(m) = obj.get_mut("mapping").and_then(Value::as_object_mut) {
+        if let Some(rules) = m.get_mut("rules").and_then(Value::as_array_mut) {
+            for r in rules.iter_mut() {
+                if let Some(in_ep) = r.get_mut("in").and_then(Value::as_object_mut) {
+                    in_ep.insert("host".to_string(), Value::String(LOCALHOST.to_string()));
+                }
+            }
+        }
+    } else if let Some(h) = obj.get_mut("http_proxy").and_then(Value::as_object_mut) {
+        if let Some(pl) = h.get_mut("proxy_listen").and_then(Value::as_object_mut) {
+            pl.insert("host".to_string(), Value::String(LOCALHOST.to_string()));
+        }
+    }
 }
 
 /// 从（已收口的）配置读出控制端口。保留作诊断用途。
@@ -219,5 +253,41 @@ mod tests {
         assert!(body.contains("\"127.0.0.1\""), "写盘内容: {body}");
         assert!(body.contains("\"port\": 7"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_drops_add_egress() {
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"0.0.0.0","port":1},"out":{"host":"1.1.1.1","port":2}}]},"no_ra":true}],"add_egress":[{"mapping":{"rules":[{"in":{"port":3},"out":{"host":"127.0.0.1","port":4}}]}}]}"#;
+        let v = prepare_config(src, 40030).unwrap();
+        assert!(v.get("add_egress").is_none(), "add_egress 应被丢弃");
+        assert_eq!(v["control_interface"]["restful"]["port"], 40030);
+    }
+
+    #[test]
+    fn prepare_forces_mapping_listen_host_loopback() {
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"0.0.0.0","port":1},"out":{"host":"10.0.0.1","port":2}}]},"no_ra":true}]}"#;
+        let v = prepare_config(src, 40031).unwrap();
+        assert_eq!(
+            v["add_ingress"][0]["mapping"]["rules"][0]["in"]["host"],
+            "127.0.0.1"
+        );
+        assert_eq!(
+            v["add_ingress"][0]["mapping"]["rules"][0]["out"]["host"],
+            "10.0.0.1"
+        );
+    }
+
+    #[test]
+    fn prepare_forces_http_proxy_listen_host_loopback() {
+        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"10.0.0.1","port":18443},"dst_filters":{"domain":"x.example.com"}},"no_ra":true}]}"#;
+        let v = prepare_config(src, 40032).unwrap();
+        assert_eq!(
+            v["add_ingress"][0]["http_proxy"]["proxy_listen"]["host"],
+            "127.0.0.1"
+        );
+        assert_eq!(
+            v["add_ingress"][0]["http_proxy"]["dst_filters"]["domain"],
+            "x.example.com"
+        );
     }
 }

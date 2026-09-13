@@ -13,15 +13,14 @@ TNG 把可信网络通信分成两端：
 - Ingress：靠近用户侧的入口网关，负责接收本地应用请求，并把请求通过可信通道转发到远端。
 - Egress：靠近服务侧的出口网关，负责把可信通道里的请求还原并转给后端服务。
 
-tngui 主要面向 Ingress 侧：它启动并管理本机的 tng 进程，展示本机入口和该入口到远端的链路状态。入口模式描述本机怎样捕获请求：
+tngui 是客户端侧工具：它启动并管理本机的 tng 进程，只配置客户端 ingress、不承载 egress（egress 属服务侧/网关侧）。客户端 ingress 的"入口形态"描述本机怎样捕获请求；tngui 结构化配置只支持下列两种客户端形态：
 
-| 入口模式 | 概念 | 常见用途 |
+| 客户端 ingress 形态 | 概念 | 用途 |
 |---|---|---|
-| mapping | 端口映射 | 把本地一个端口映射到远端端口 |
-| http_proxy | HTTP 代理 | 应用通过 HTTP 代理把流量交给 TNG |
-| socks5 | SOCKS5 代理 | 应用通过 SOCKS5 把流量交给 TNG |
-| netfilter | 透明拦截 | 在网络层透明捕获目标流量 |
-| hook | 钩子 | 通过挂接方式捕获流量 |
+| mapping（地址端口） | 端口映射 | 把本地一个端口映射到远端 `<IP>:<端口>`（TNG 约束 host 须为 IP） |
+| http_proxy（域名） | HTTP 代理 | 应用经 HTTP 代理把流量交给 TNG，远端为单文本的完整域名（不限定 http/https） |
+
+TNG 通用能力还提供其它入口模式（透明拦截 / 钩子等非推理用例形态），但 tngui 客户端不暴露、不配置。两种形态下 ingress 到 egress 的业务流量均走 OHTTP 封装（见 1.3）。
 
 ### 1.2 控制面与探针
 
@@ -106,8 +105,8 @@ TNG Ingress 到 Egress 的业务流量使用 OHTTP 封装。Ingress 会向 Egres
 
 这张卡只展示入口配置摘要，让用户知道“本机入口配置成了什么样”。它读取配置里的第一个 ingress 条目，并按入口模式提取监听信息：
 
-- 入口模式：映射 / HTTP 代理 / SOCKS5 代理 / 透明拦截 / 钩子等用户可读标签。
-- 监听地址：mapping 取第一条入站规则的 `in.host`；http_proxy/socks5 取 `proxy_listen.host`；netfilter/hook 按各自捕获字段确定；缺省时显示 `——`。
+- 入口形态：映射（地址端口）/ HTTP 代理（域名）等用户可读标签。
+- 监听地址：mapping 取第一条入站规则 `in.host`、http_proxy 取 `proxy_listen.host`（二者均强制 `127.0.0.1`，仅展示监听端口）；缺省时显示 `——`。
 - 监听端口：对应模式的监听端口；缺省或无法确定时显示 `——`。
 
 入口信息卡不使用状态色点，因为它只是一段配置摘要，不表示业务是否可达。
@@ -224,20 +223,24 @@ SecureFlow 五步对应密态推理的保护过程：
 - 密态推理功能卡：
   - API Key：可粘贴、可显隐；API Key 在中心侧管理，本机只保存使用凭据，申请/查看/重置在 1 号节点完成。
   - Model：推理模型名，发送时使用，不持久化，关闭 GUI 后不保留。
-  - 保存并验证、复制本地 URL、导入配置、导出配置按钮。
-  - 清除本机配置：移除本机 API Key 与 Model，不影响中心侧 Key。
+  - 本地 URL 取自结构化 ingress 的第一条监听端口（`http://127.0.0.1:<端口>/v1`）；提供保存并验证、复制本地 URL、导入配置、导出配置按钮。
+  - 本机不在此配置本地端口 / 远端；二者取自下方"高级 TNG 配置"的结构化 ingress。
+  - 清除本机凭据：移除本机 API Key 与 Model，不影响中心侧 Key。
 
 ### 5.3 高级 TNG 配置
 
 结构化编辑与原始 JSON 双向同步，供高级编辑和未结构化字段兜底。
 
-- 结构化：
+- 结构化（客户端 ingress 锁定 OHTTP 形态，不承载 egress）：
   - control_interface 的管控端口（restful 子段）由 tngui 在拉起 tng 时自动选取空闲回环端口并注入、对用户不暴露；配置页不提供其控件。
-  - add_ingress：每条支持模式选择器和该模式字段，可增删。
-  - add_egress：同上。
-  - 每条 ingress/egress 可切换 `no_ra` 开关，并在高级折叠区编辑 ohttp/RATS-TLS/RA 等未结构化原始 JSON。
+  - 本地监听：host 强制 `127.0.0.1`（只读），端口可配。
+  - 远端形态二选一：`地址端口`（`mapping`，`out = <IP>:<端口>`，host 须为 IP）/ `域名`（`http_proxy`，`dst_filters.domain` 单文本框、不限定 http/https、不拆分端口）。
+  - `ohttp` 常开且写死：每条 ingress 始终带 `ohttp`，`header_passthrough.request_headers` 固定为 `["x-model","x-api-key","authorization"]`，用户不可关闭、不可改这组 header。
+  - `no_ra` 开关与 `verify` 互斥：`no_ra` 关（默认）则出可配置的 `verify`（`model` / `as_provider`，默认 `passport` / `tpm`）；`no_ra` 开则不带 `verify`。
+  - 不提供 `add_egress` 结构化控件——客户端不承载 egress。
+  - 未结构化字段（RA `attest` 等）由全局原始 JSON 视图兜底。
 - 原始 JSON：直接编辑整份配置，点击“应用回填表单”后同步到结构化控件；非法 JSON 不破坏表单状态。
-- 导入/导出 JSON：通过原生文件对话框导入或导出配置。
+- 导入/导出 JSON：通过原生文件对话框导入或导出配置；导入会丢弃文件中的 `add_egress`、ingress 的自定义 `ohttp`（由锁定值替代），且仅接受 `mapping` / `http_proxy` 形态的 ingress（其余形态被丢弃并提示）。
 
 ### 5.4 客户端信息
 
