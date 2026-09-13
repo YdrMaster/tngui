@@ -1,75 +1,92 @@
-//! 配置契约：解析用户提供的 TNG JSON，做安全收口后写盘。
+//! 配置契约：解析用户提供的 TNG JSON 并做安全收口，写盘前供启动流程使用。
 //!
-//! 安全收口（设计稿 D2）：
-//! - 强制 `control_interface.restful.host = "127.0.0.1"`（控制面无鉴权，tng 默认 `0.0.0.0`）。
-//! - 缺 `control_interface.restful.port` 时返回错误（状态客户端无端口无法轮询）。
+//! 安全收口（设计稿 D2 + 变更 auto-manage-control-port）：
+//! - `control_interface.restful` 由 tngui 自有：host 强制 `127.0.0.1`、port 由 tngui 在
+//!   启动时自动选取空闲回环端口注入，覆写用户的任何输入；前端/用户配置不再携带它。
+//! - 用户其余字段（`control_interface` 同级如 `ttrpc`、顶层 `extra`、ingress/egress）原样保留。
 
 use serde_json::Value;
 use std::fmt;
 use std::io;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
 /// 回环地址。控制面强制绑定于此，避免无鉴权接口暴露到外部网卡。
 const LOCALHOST: &str = "127.0.0.1";
 
+/// 管控面由 tngui 自管、端口不对用户暴露：绑定 `127.0.0.1:0` 取一个 OS 分配的空闲回环
+/// 端口后立即释放返回，交给启动流程注入传给 tng 的配置。该端口随后由 `PortCell` 持有
+/// 供控制面轮询。loopback 上从释放到 tng 实际绑定的竞态窗口极小（与 tng 自身
+/// `testutil::pick_unused_port` 同法）。
+pub fn pick_free_port() -> io::Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
+}
+
 #[derive(Debug)]
 pub enum PrepareError {
-    /// JSON 解析失败（包括 tng 的 deny_unknown_fields 会在 tng 侧报错，这里只管 serde 自身）。
+    /// JSON 解析失败（serde 层）。
     InvalidJson(serde_json::Error),
-    /// `control_interface.restful` 缺失或不是对象。
-    InvalidRestful,
-    /// `control_interface.restful.port` 缺失——状态客户端无法轮询。
-    NoRestfulPort,
+    /// 配置根不是 JSON 对象。
+    RootNotObject,
 }
 
 impl fmt::Display for PrepareError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PrepareError::InvalidJson(e) => write!(f, "JSON 解析失败: {e}"),
-            PrepareError::InvalidRestful => {
-                write!(f, "control_interface.restful 必须是含 host/port 的对象")
-            }
-            PrepareError::NoRestfulPort => write!(
-                f,
-                "配置缺少 control_interface.restful.port，状态客户端无法轮询控制面"
-            ),
+            PrepareError::RootNotObject => write!(f, "配置根须为 JSON 对象"),
         }
     }
 }
 
 impl std::error::Error for PrepareError {}
 
-/// 解析用户 JSON 并做安全收口：强制 `host=127.0.0.1`，缺 `port` 报错。
-///
-/// 返回修改后的 `Value`（调用方负责序列化/写盘）。用户其余字段原样保留。
-pub fn prepare_config(user_json: &str) -> Result<Value, PrepareError> {
-    let mut v: Value = serde_json::from_str(user_json).map_err(PrepareError::InvalidJson)?;
-
-    let restful = v
-        .get_mut("control_interface")
-        .and_then(|ci| ci.get_mut("restful"));
-
-    let restful = match restful {
-        Some(r) if r.is_object() => r,
-        _ => return Err(PrepareError::NoRestfulPort),
-    };
-
-    // 必须有 port
-    let has_port = restful
-        .get("port")
-        .map(|p| p.is_u64() || p.is_string())
-        .unwrap_or(false);
-    if !has_port {
-        return Err(PrepareError::NoRestfulPort);
+/// 校验用户侧配置：仅 JSON 解析 + 根对象校验。不要求、不校验
+/// `control_interface.restful`——管控面由 tngui 在启动时注入（见 `prepare_config`）。
+/// 供 `save_config` 持久化"不含 restful"的用户侧配置。
+pub fn validate_user_config(user_json: &str) -> Result<Value, PrepareError> {
+    let v: Value = serde_json::from_str(user_json).map_err(PrepareError::InvalidJson)?;
+    if !v.is_object() {
+        return Err(PrepareError::RootNotObject);
     }
+    Ok(v)
+}
 
-    // 强制 host = 127.0.0.1（缺则注入、其他值则覆盖）
-    restful["host"] = Value::String(LOCALHOST.to_string());
+/// 在 `validate_user_config` 基础上注入/覆盖
+/// `control_interface.restful = { "host": "127.0.0.1", "port": control_port }`，
+/// 保留 `control_interface` 的同级字段（如 `ttrpc`）与 `restful` 的其余键。供 `launch_tng`。
+pub fn prepare_config(user_json: &str, control_port: u16) -> Result<Value, PrepareError> {
+    let mut v = validate_user_config(user_json)?;
+
+    let root = v
+        .as_object_mut()
+        .expect("validate_user_config 保证根为对象");
+    let ci = root
+        .entry("control_interface")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !ci.is_object() {
+        *ci = Value::Object(serde_json::Map::new());
+    }
+    let ci_obj = ci.as_object_mut().expect("control_interface 现为对象");
+
+    let restful = ci_obj
+        .entry("restful")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !restful.is_object() {
+        *restful = Value::Object(serde_json::Map::new());
+    }
+    let restful_obj = restful.as_object_mut().expect("restful 现为对象");
+
+    restful_obj.insert("host".to_string(), Value::String(LOCALHOST.to_string()));
+    restful_obj.insert("port".to_string(), Value::from(control_port));
 
     Ok(v)
 }
 
-/// 从（已收口的）配置读出控制端口。缺省或越界返回 `None`。
+/// 从（已收口的）配置读出控制端口。保留作诊断用途。
 pub fn control_port(config: &Value) -> Option<u16> {
     let port = config
         .get("control_interface")?
@@ -100,60 +117,90 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_port_is_error() {
-        // 缺 port → Err(NoRestfulPort)
-        let none = r#"{"control_interface":{"restful":{"host":"127.0.0.1"}}}"#;
-        assert!(matches!(
-            prepare_config(none),
-            Err(PrepareError::NoRestfulPort)
-        ));
-        // 完全没有 control_interface → Err
-        assert!(matches!(
-            prepare_config(r#"{"add_ingress":[]}"#),
-            Err(PrepareError::NoRestfulPort)
-        ));
-        // restful 非对象 → Err
-        assert!(matches!(
-            prepare_config(r#"{"control_interface":{"restful":5}}"#),
-            Err(PrepareError::NoRestfulPort)
-        ));
+    fn pick_free_port_returns_loopback_usable_port() {
+        let port = pick_free_port().expect("bind 127.0.0.1:0 should succeed");
+        assert!((1..=65535).contains(&port), "port={port}");
+        assert_ne!(port, 0, "OS 不应返回 0");
+        // 释放后该端口应能被立即重新绑定（loopback 上窗口极小）
+        let r = TcpListener::bind(("127.0.0.1", port));
+        assert!(r.is_ok(), "reuse bind failed for port={port}: {r:?}");
     }
 
     #[test]
-    fn host_forced_to_localhost() {
-        let cases = [
-            // 缺省 host
-            r#"{"control_interface":{"restful":{"port":50000}}}"#,
-            // 0.0.0.0
-            r#"{"control_interface":{"restful":{"host":"0.0.0.0","port":50000}}}"#,
-            // 其他值
-            r#"{"control_interface":{"restful":{"host":"10.0.0.1","port":50000}}}"#,
-        ];
-        for src in cases {
-            let v = prepare_config(src).expect("ok");
-            let host = v["control_interface"]["restful"]["host"].as_str().unwrap();
-            assert_eq!(host, "127.0.0.1", "host 未被强制为 127.0.0.1，源={src}");
-        }
+    fn validate_rejects_non_object_and_bad_json() {
+        assert!(matches!(
+            validate_user_config("{ not json }"),
+            Err(PrepareError::InvalidJson(_))
+        ));
+        assert!(matches!(
+            validate_user_config("[]"),
+            Err(PrepareError::RootNotObject)
+        ));
+        assert!(matches!(
+            validate_user_config("5"),
+            Err(PrepareError::RootNotObject)
+        ));
+        // 合法对象通过
+        assert!(validate_user_config(r#"{"control_interface":{"restful":{"port":5}}}"#).is_ok());
     }
 
     #[test]
-    fn valid_config_preserves_port_and_rest() {
+    fn prepare_creates_control_interface_when_absent() {
+        // 无 control_interface → 注入 host=127.0.0.1、port=注入值
+        let v = prepare_config(r#"{"add_ingress":[]}"#, 40001).unwrap();
+        assert_eq!(v["control_interface"]["restful"]["host"], "127.0.0.1");
+        assert_eq!(v["control_interface"]["restful"]["port"], 40001);
+        // 缺 restful 对象也行
+        let v = prepare_config(r#"{"control_interface":{}}"#, 40002).unwrap();
+        assert_eq!(v["control_interface"]["restful"]["host"], "127.0.0.1");
+        assert_eq!(v["control_interface"]["restful"]["port"], 40002);
+    }
+
+    #[test]
+    fn prepare_overrides_user_host_and_port() {
+        let v = prepare_config(
+            r#"{"control_interface":{"restful":{"host":"0.0.0.0","port":99999}}}"#,
+            40005,
+        )
+        .unwrap();
+        assert_eq!(v["control_interface"]["restful"]["host"], "127.0.0.1");
+        assert_eq!(v["control_interface"]["restful"]["port"], 40005);
+        let v = prepare_config(
+            r#"{"control_interface":{"restful":{"host":"10.0.0.1","port":7}}}"#,
+            40006,
+        )
+        .unwrap();
+        assert_eq!(v["control_interface"]["restful"]["host"], "127.0.0.1");
+        assert_eq!(v["control_interface"]["restful"]["port"], 40006);
+    }
+
+    #[test]
+    fn prepare_preserves_control_interface_siblings_and_other_keys() {
         let src = r#"{
-            "control_interface":{"restful":{"host":"0.0.0.0","port":12345}},
+            "control_interface":{"restful":{"host":"0.0.0.0","port":12345},"ttrpc":{"path":"/tmp/x"}},
             "add_ingress":[{"mapping":{"in":{"port":10001},"out":{"host":"127.0.0.1","port":30001}},"no_ra":true}]
         }"#;
-        let v = prepare_config(src).expect("ok");
+        let v = prepare_config(src, 40010).unwrap();
         assert_eq!(v["control_interface"]["restful"]["host"], "127.0.0.1");
-        assert_eq!(v["control_interface"]["restful"]["port"], 12345);
-        // 其余字段保留
+        assert_eq!(v["control_interface"]["restful"]["port"], 40010);
+        assert_eq!(v["control_interface"]["ttrpc"]["path"], "/tmp/x");
         assert_eq!(v["add_ingress"][0]["no_ra"], true);
-        assert_eq!(control_port(&v), Some(12345));
+        assert_eq!(control_port(&v), Some(40010));
+    }
+
+    #[test]
+    fn prepare_rewrites_non_object_control_interface_or_restful() {
+        let v = prepare_config(r#"{"control_interface":5}"#, 40020).unwrap();
+        assert_eq!(v["control_interface"]["restful"]["port"], 40020);
+        let v = prepare_config(r#"{"control_interface":{"restful":7}}"#, 40021).unwrap();
+        assert_eq!(v["control_interface"]["restful"]["host"], "127.0.0.1");
+        assert_eq!(v["control_interface"]["restful"]["port"], 40021);
     }
 
     #[test]
     fn invalid_json_is_error() {
         assert!(matches!(
-            prepare_config("{ not json }"),
+            prepare_config("{ not json }", 7),
             Err(PrepareError::InvalidJson(_))
         ));
     }
@@ -162,8 +209,11 @@ mod tests {
     fn write_runtime_config_creates_file_with_localhost() {
         let dir = std::env::temp_dir().join(format!("tngui-cfg-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let v = prepare_config(r#"{"control_interface":{"restful":{"host":"0.0.0.0","port":7}}}"#)
-            .unwrap();
+        let v = prepare_config(
+            r#"{"control_interface":{"restful":{"host":"0.0.0.0","port":7}}}"#,
+            7,
+        )
+        .unwrap();
         let path = write_runtime_config(&dir, &v).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("\"127.0.0.1\""), "写盘内容: {body}");

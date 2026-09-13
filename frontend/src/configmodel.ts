@@ -1,16 +1,17 @@
 // 配置模型的序列化/解析。extra 容器保证未结构化字段（RA attest/verify 等）往返不丢。
-import { ALL_MODES, LOCALHOST, type ConfigModel, type EntryModel } from "./formspec";
+// control_interface 的 restful 子段（管控面 host+port）由 tngui 在拉起 tng 时注入（host
+// 127.0.0.1 + 自动空闲回环端口），不向用户暴露：serialize 不输出该子段；parse 丢弃
+// 导入/回填的 restful，保留 control_interface 同级字段与其它未结构化字段。
+import { ALL_MODES, type ConfigModel, type EntryModel } from "./formspec";
 
-/** model → TNG JSON（外挂 tag、no_ra 平铺、host 强制 127.0.0.1、extra 原样回填）。 */
+/** model → TNG JSON（外挂 tag、no_ra 平铺、extra 原样回填；不含 control_interface 的 restful）。 */
 export function serialize(model: ConfigModel): string {
   const out: Record<string, unknown> = {};
 
-  // control_interface（host 强制 127.0.0.1）
-  const ci: Record<string, unknown> = {
-    restful: { host: LOCALHOST, port: model.control_interface.restful.port },
-    ...model.control_interface.extra,
-  };
-  out.control_interface = ci;
+  // 仅输出 control_interface 的同级 extra（如 ttrpc）；restful 由 tngui 启动时注入
+  if (Object.keys(model.control_interface_extra).length > 0) {
+    out.control_interface = { ...model.control_interface_extra };
+  }
 
   out.add_ingress = model.add_ingress.map(serializeEntry);
   out.add_egress = model.add_egress.map(serializeEntry);
@@ -32,7 +33,8 @@ export interface ParseResult {
   error?: string;
 }
 
-/** JSON → model。未知字段进 extra；非法 JSON/缺 port 返回 error。 */
+/** JSON → model。未知字段进 extra；非法 JSON 返回 error。导入的 control_interface 的 restful
+ * 子段一律丢弃（tngui 启动时注入），其余未结构化字段继续往返。 */
 export function parse(json: string): ParseResult {
   let v: unknown;
   try {
@@ -45,15 +47,10 @@ export function parse(json: string): ParseResult {
   }
   const root = v as Record<string, unknown>;
 
-  // control_interface
+  // control_interface：丢弃 restful 子段，其余同级（ttrpc 等）进 extra
   const ciRaw = (root.control_interface ?? {}) as Record<string, unknown>;
-  const restfulRaw = (ciRaw.restful ?? {}) as Record<string, unknown>;
-  const port = restfulRaw.port;
-  if (typeof port !== "number" || !Number.isFinite(port)) {
-    return { error: "配置缺少 control_interface.restful.port（数值）" };
-  }
-  const ciExtra: Record<string, unknown> = { ...ciRaw };
-  delete ciExtra.restful;
+  const control_interface_extra: Record<string, unknown> = { ...ciRaw };
+  delete control_interface_extra["restful"];
 
   // ingress/egress
   const ingressArr = Array.isArray(root.add_ingress) ? root.add_ingress : [];
@@ -78,10 +75,7 @@ export function parse(json: string): ParseResult {
 
   return {
     model: {
-      control_interface: {
-        restful: { host: LOCALHOST, port },
-        extra: ciExtra,
-      },
+      control_interface_extra,
       add_ingress: ingress.map((r) => r.model!) as EntryModel[],
       add_egress: egress.map((r) => r.model!) as EntryModel[],
       extra: topExtra,

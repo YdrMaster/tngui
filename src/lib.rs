@@ -13,7 +13,8 @@ use tauri::{Builder, generate_context, generate_handler};
 use tokio::sync::Mutex;
 
 use tngui_core::{
-    StatusReport, TngSupervisor, control_port, fetch_status, prepare_config, write_runtime_config,
+    StatusReport, TngSupervisor, fetch_status, pick_free_port, prepare_config,
+    validate_user_config, write_runtime_config,
 };
 
 /// 进程分享的控制端口；启动后写入，状态轮询读取。
@@ -33,10 +34,10 @@ async fn launch_tng(
     state: State<'_, AppState>,
     config_json: String,
 ) -> Result<u32, String> {
-    // 1. 解析 + 安全收口（强制 127.0.0.1、缺 port 报错）
-    let prepared = prepare_config(&config_json).map_err(|e| e.to_string())?;
-    let port = control_port(&prepared)
-        .ok_or_else(|| "无法读取 control_interface.restful.port".to_string())?;
+    // 1. 由 tngui 自行选取空闲回环端口作为 tng 管控端口（不对用户暴露）
+    let port = pick_free_port().map_err(|e| format!("无法分配控制端口: {e}"))?;
+    // 2. 解析 + 注入 control_interface.restful（host 强制 127.0.0.1、port=自动端口）
+    let prepared = prepare_config(&config_json, port).map_err(|e| e.to_string())?;
 
     // 2. 写盘到应用数据目录
     let dir = app
@@ -108,13 +109,14 @@ async fn stop_tng(state: State<'_, AppState>) -> Result<(), String> {
 /// 仅保存 TNG 配置到磁盘（不 spawn）。
 #[tauri::command]
 async fn save_config(app: AppHandle, config_json: String) -> Result<(), String> {
-    let prepared = prepare_config(&config_json).map_err(|e| e.to_string())?;
+    // 仅校验用户侧配置（不注入 control_interface.restful）——保存的配置对用户可见、不含管控端口
+    let validated = validate_user_config(&config_json).map_err(|e| e.to_string())?;
     let dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("取 app_data_dir 失败: {e}"))?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建数据目录失败: {e}"))?;
-    write_runtime_config(&dir, &prepared).map_err(|e| format!("写 runtime 配置失败: {e}"))?;
+    write_runtime_config(&dir, &validated).map_err(|e| format!("写 runtime 配置失败: {e}"))?;
     Ok(())
 }
 

@@ -121,9 +121,6 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
                 <div><strong>{{ tngReady ? "已连接" : "已断开" }}</strong><div style="color:var(--text-secondary)">控制信道</div></div>
               </div>
             </a-col>
-            <a-col :span="8">
-              <div class="gateway-state"><ApiOutlined /><div><strong>127.0.0.1:{{ model.control_interface.restful.port }}</strong><div style="color:var(--text-secondary)">控制面监听</div></div></div>
-            </a-col>
           </a-row>
         </a-col>
         <a-col :span="10" style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end">
@@ -188,7 +185,7 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
 
     <!-- Section 高级 TNG 配置 -->
     <div class="settings-section-heading" style="margin-top:24px">
-      <div><h4 style="margin:0 0 3px;font-size:16px;font-weight:600">高级 TNG 配置</h4><span style="color:var(--text-secondary)">结构化编辑 TNG 网关的 ingress/egress、控制端口、no_ra 等。</span></div>
+      <div><h4 style="margin:0 0 3px;font-size:16px;font-weight:600">高级 TNG 配置</h4><span style="color:var(--text-secondary)">结构化编辑 TNG 网关的 ingress/egress、no_ra 等。</span></div>
       <span style="display:flex;gap:8px">
         <a-button type="primary" @click="onSaveConfig">保存</a-button>
         <a-button @click="onImport">导入 JSON</a-button>
@@ -199,12 +196,6 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
     <a-tabs v-model:activeKey="activeTab" @change="onTabChange">
       <a-tab-pane key="form" tab="结构化">
         <a-form layout="vertical">
-          <a-card size="small" title="control_interface（host 强制 127.0.0.1）">
-            <a-form-item label="restful.host"><a-input :value="model.control_interface.restful.host" disabled /></a-form-item>
-            <a-form-item label="restful.port" required>
-              <a-input-number v-model:value="model.control_interface.restful.port" :min="1" :max="65535" style="width:100%" />
-            </a-form-item>
-          </a-card>
           <a-card size="small" title="add_ingress" style="margin-top:12px">
             <EntryEditor v-for="(e, i) in model.add_ingress" :key="i" :entry="e" kind="ingress" @remove="removeIngress(i)" />
             <a-button style="margin-top:8px" @click="addIngress">添加 ingress</a-button>

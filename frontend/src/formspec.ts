@@ -59,14 +59,13 @@ export interface EntryModel {
   extra: Record<string, unknown>;
 }
 
+/** 配置模型。control_interface 的 restful 子段（管控面 host+port）由 tngui 在拉起 tng 时注入，
+ * 不向用户暴露、不在此承载；仅保留 control_interface 的同级字段（如 ttrpc）以维持未结构化字段往返。 */
 export interface ConfigModel {
-  control_interface: {
-    restful: { host: string; port: number };
-    extra: Record<string, unknown>; // ttrpc 等
-  };
+  control_interface_extra: Record<string, unknown>; // control_interface 同级：ttrpc 等
   add_ingress: EntryModel[];
   add_egress: EntryModel[];
-  extra: Record<string, unknown>; // metric/trace/admin_bind 等
+  extra: Record<string, unknown>; // 顶层：metric/trace/admin_bind 等
 }
 
 // —— form-spec：每模式的字段声明，驱动 Vue 表单渲染 ——
@@ -151,13 +150,11 @@ export function defaultFields(mode: string): Record<string, unknown> {
   return out;
 }
 
-/** 内置默认开局模板：control port 50000 + 一条 no_ra mapping ingress。 */
+/** 内置默认开局模板：一条 no_ra mapping ingress 示例。control_interface 的 restful 子段由 tngui
+ * 在拉起 tng 时注入，不在模板中。 */
 export function defaultModel(): ConfigModel {
   return {
-    control_interface: {
-      restful: { host: LOCALHOST, port: 50000 },
-      extra: {},
-    },
+    control_interface_extra: {},
     add_ingress: [
       {
         mode: "mapping",
