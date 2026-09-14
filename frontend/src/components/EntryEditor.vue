@@ -18,7 +18,6 @@ const remoteTypeOptions = [
   { value: "http_proxy", label: "域名 (http_proxy)" },
 ];
 
-const listenSpec = computed(() => INGRESS_FIELDS[props.entry.mode][0]);
 const remoteSpec = computed(() => INGRESS_FIELDS[props.entry.mode][1]);
 
 function ensureMappingRule() {
@@ -39,15 +38,7 @@ function ensureDstFilters() {
   if (typeof df !== "object" || df === null) props.entry.fields.dst_filters = { domain: "" };
 }
 
-// 锁定形态的嵌套子对象（供 FieldRenderer 绑定）
-const listenFields = computed<Record<string, any>>(() => {
-  if (props.entry.mode === "mapping") {
-    ensureMappingRule();
-    return (props.entry.fields.rules as Record<string, any>[])[0].in;
-  }
-  ensureProxyListen();
-  return props.entry.fields.proxy_listen as Record<string, any>;
-});
+// 锁定形态的嵌套子对象（供 FieldRenderer 绑定 remote / verify）
 const remoteFields = computed<Record<string, any>>(() => {
   if (props.entry.mode === "mapping") {
     ensureMappingRule();
@@ -61,8 +52,15 @@ const verifyFields = computed<Record<string, any>>(() => {
   return props.entry.verify;
 });
 
+// 行1：反代对外绑定——host 在 127.0.0.1/0.0.0.0 间 toggle（off=仅本机、on=对外网卡）+ 对外 port。
+const outwardExternal = computed<boolean>({
+  get: () => props.entry.outward.host === "0.0.0.0",
+  set: (v: boolean) => {
+    props.entry.outward.host = v ? "0.0.0.0" : "127.0.0.1";
+  },
+});
+
 // 远程证明开关表示 "ra"（是否启用远程证明）：开=ra/`no_ra=false` 渲染 verify；关=`no_ra=true` 仅开关。
-// 底层仍存储 `no_ra`，开关经取反 computed 与其绑定。
 const raEnabled = computed<boolean>({
   get: () => !props.entry.no_ra,
   set: (v: boolean) => {
@@ -85,8 +83,26 @@ function onRemTypeChange(val: string | number) {
     </template>
 
     <a-form layout="vertical">
-      <!-- 行1：本地监听 独立成行 -->
-      <FieldRenderer :fields="listenFields" :spec="listenSpec" />
+      <!-- 行1：本机端口 / 反代对外绑定（host toggle + 对外 port）独立成行 -->
+      <a-form-item label="本机端口（反代对外绑定）">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <a-switch
+            v-model:checked="outwardExternal"
+            checked-children="0.0.0.0"
+            un-checked-children="127.0.0.1"
+          />
+          <a-input-number
+            v-model:value="entry.outward.port"
+            :min="1"
+            :max="65535"
+            style="width:130px"
+            placeholder="端口"
+          />
+          <span style="color:var(--text-secondary);font-size:12px">{{
+            outwardExternal ? "对外网卡（0.0.0.0，须在受信网络下使用）" : "仅本机访问（127.0.0.1）"
+          }}</span>
+        </div>
+      </a-form-item>
 
       <!-- 行2：远端类型 + 当前远端字段 同一横排 -->
       <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start">

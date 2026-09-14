@@ -8,14 +8,12 @@ import {
   DownloadOutlined, ImportOutlined, ExportOutlined, GlobalOutlined,
 } from "@ant-design/icons-vue";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
-import { useTngConfig } from "../composables/useTngConfig";
-import { getStatus } from "../tauri";
+import { getStatus, proxyEndpoint } from "../tauri";
 import SecureFlow from "../components/SecureFlow.vue";
 import ArchitectureFlow from "../components/ArchitectureFlow.vue";
 import ProtectionItem from "../components/ProtectionItem.vue";
 
 const { model: inferenceModel, apiKey } = useInferenceConfig();
-const { model: tngConfigModel, serializeCurrent: _ } = useTngConfig();
 
 const activeTab = ref<"request" | "integration" | "security">("request");
 const prompt = ref("请用三点说明密态推理如何保护我的输入数据。");
@@ -25,36 +23,46 @@ const phase = ref(4);
 const phaseTimer = ref<number | undefined>(undefined);
 const statusCode = ref(0);
 const tngReady = ref(false);
+// 反代对外端口（取自 proxy_endpoint[0].port）：tng 未启动时为 null。
+const proxyPort = ref<number | null>(null);
 let statusTimer: number | undefined;
 
+async function fetchProxy() {
+  try {
+    const eps = await proxyEndpoint();
+    proxyPort.value = eps?.[0]?.port ?? null;
+  } catch {
+    proxyPort.value = null;
+  }
+}
+
 async function checkTng() {
-  try { const s = await getStatus(); tngReady.value = s.ready; }
-  catch { tngReady.value = false; }
+  try {
+    const s = await getStatus();
+    tngReady.value = s.ready;
+    if (s.ready) await fetchProxy();
+    else proxyPort.value = null;
+  } catch {
+    tngReady.value = false;
+    proxyPort.value = null;
+  }
 }
 checkTng();
 statusTimer = window.setInterval(checkTng, 2000);
 if (typeof window !== "undefined" && statusTimer) window.onbeforeunload = () => clearInterval(statusTimer);
 
-const inferencePort = computed((): number | null => {
-  const entries = tngConfigModel.value.add_ingress;
-  if (!entries?.length) return null;
-  const first = entries[0];
-  if (first.mode === "http_proxy") {
-    const pl = first.fields["proxy_listen"] as { port?: number } | undefined;
-    return pl?.port ?? null;
-  }
-  if (first.mode === "mapping") {
-    const rules = first.fields["rules"] as Array<{ in: { port?: number } }> | undefined;
-    if (rules?.length) return rules[0].in?.port ?? null;
-  }
-  return null;
-});
-const localEndpoint = computed(() => inferencePort.value !== null ? `http://127.0.0.1:${inferencePort.value}/v1` : "未配置");
-const usable = computed(() => tngReady.value && !!inferenceModel.value && !!apiKey.value && inferencePort.value !== null);
+const localEndpoint = computed(() =>
+  proxyPort.value !== null
+    ? `http://127.0.0.1:${proxyPort.value}/v1`
+    : "未配置",
+);
+const usable = computed(
+  () => tngReady.value && !!inferenceModel.value && !!apiKey.value && proxyPort.value !== null,
+);
 
-const curlExample = computed(() => `curl http://127.0.0.1:${inferencePort.value ?? 8080}/v1/chat/completions \\
-  -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer <YOUR_API_KEY>" \\
+const curlExample = computed(() => `curl http://127.0.0.1:${proxyPort.value ?? 8080}/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <YOUR_API_KEY>" \
   -d '{
     "model": "${inferenceModel.value || "model"}",
     "messages": [{"role": "user", "content": "请分析这段文本"}]
@@ -68,7 +76,7 @@ Model ID       ${inferenceModel.value || "model"}`);
 async function onSend() {
   if (!usable.value) { message.warning("请先在设置中配置 model/API Key 并启动 TNG 网关"); return; }
   if (!prompt.value.trim()) { message.warning("请输入测试内容"); return; }
-  if (inferencePort.value === null) return;
+  if (proxyPort.value === null) return;
   sending.value = true; output.value = ""; statusCode.value = 0; phase.value = 0;
   let step = 0;
   phaseTimer.value = window.setInterval(() => {
@@ -77,7 +85,7 @@ async function onSend() {
   }, 520);
   try {
     const result = await invoke<string>("send_inference", {
-      port: inferencePort.value, model: inferenceModel.value, apiKey: apiKey.value, prompt: prompt.value,
+      port: proxyPort.value, model: inferenceModel.value, apiKey: apiKey.value, prompt: prompt.value,
     });
     window.clearInterval(phaseTimer.value); phase.value = 4; statusCode.value = 200;
     output.value = result;

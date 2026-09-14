@@ -14,15 +14,30 @@ use std::path::{Path, PathBuf};
 /// 回环地址。控制面强制绑定于此，避免无鉴权接口暴露到外部网卡。
 const LOCALHOST: &str = "127.0.0.1";
 
-/// 管控面由 tngui 自管、端口不对用户暴露：绑定 `127.0.0.1:0` 取一个 OS 分配的空闲回环
-/// 端口后立即释放返回，交给启动流程注入传给 tng 的配置。该端口随后由 `PortCell` 持有
-/// 供控制面轮询。loopback 上从释放到 tng 实际绑定的竞态窗口极小（与 tng 自身
-/// `testutil::pick_unused_port` 同法）。
+/// 反代对外绑定端口的默认值（前端 `formspec.DEFAULT_LISTEN_PORT` 的后端镜像；仅当用户配置
+/// 不含 `tngui_outward.port` 时回退——正常路径前端总会显式写入）。
+const DEFAULT_OUTWARD_PORT: u16 = 18443;
+
+/// 管控面由 tngui 自管、端口不对用户暴露：端口由 `pick_free_ports` 批取（绑定
+/// `127.0.0.1:0` 占住再放）后交给启动流程注入传给 tng 的配置。该端口随后由 `PortCell`
+/// 持有供控制面轮询。单端口取号 `pick_free_port` 退化为批取 1 个，保留以兼容既有调用点。
 pub fn pick_free_port() -> io::Result<u16> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
+    Ok(pick_free_ports(1)?[0])
+}
+
+/// 批取 n 个回环端口：顺序 `bind` n 个 `127.0.0.1:0` listener 并同时持住、收齐端口后
+/// 统一 `drop` 整批释放。因 n 个 listener 同时持在、OS 不会把同一端口分配给两个在用
+/// listener，返回的 n 个端口必然两两互不相同——从根上消除单点"取号即放"的取号重复。
+pub fn pick_free_ports(n: usize) -> io::Result<Vec<u16>> {
+    let mut listeners = Vec::with_capacity(n);
+    let mut ports = Vec::with_capacity(n);
+    for _ in 0..n {
+        let l = TcpListener::bind(("127.0.0.1", 0))?;
+        ports.push(l.local_addr()?.port());
+        listeners.push(l);
+    }
+    drop(listeners); // 整批释放
+    Ok(ports)
 }
 
 #[derive(Debug)]
@@ -61,13 +76,39 @@ pub fn validate_user_config(user_json: &str) -> Result<Value, PrepareError> {
 
 /// 在 `validate_user_config` 基础上注入/覆盖
 /// `control_interface.restful = { "host": "127.0.0.1", "port": control_port }`，
-/// 保留 `control_interface` 的同级字段（如 `ttrpc`）与 `restful` 的其余键。供 `launch_tng`。
+/// 每条 ingress 的本地监听 `host=127.0.0.1`+`port=自动空闲端口`（覆盖用户），并剥离
+/// tngui 侧"反代对外绑定"字段（不进 tng 配置）。仅返回 tng 绑定的配置（路由被丢弃）。
 pub fn prepare_config(user_json: &str, control_port: u16) -> Result<Value, PrepareError> {
-    let mut v = validate_user_config(user_json)?;
+    // 测试/诊断便利入口：自行批取各 ingress 内部端口（启动路径 `launch_tng` 经
+    // `pick_launch_ports` 批探测并先验避让对外端口，不走此处的简单批取）。
+    let n = ingress_count(user_json)?;
+    let internal = pick_free_ports(n)
+        .map_err(|e| PrepareError::IngressInvalid(format!("无法分配内部端口: {e}")))?;
+    prepare_launch(user_json, control_port, &internal).map(|(v, _)| v)
+}
 
+/// 用户配置中 `add_ingress` 的条数（缺失或非数组视为 0）。
+fn ingress_count(user_json: &str) -> Result<usize, PrepareError> {
+    let v = validate_user_config(user_json)?;
+    Ok(v.get("add_ingress")
+        .and_then(|a| a.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0))
+}
+
+/// 同 `prepare_config`，但额外返回每条 ingress 的反代路由（带内部端口）供 `launch_tng`
+/// 启动反代。tng 绑定的配置不再含反代对外绑定字段；ingress 本地监听为注入的内部端口。
+pub fn prepare_launch(
+    user_json: &str,
+    control_port: u16,
+    internal_ports: &[u16],
+) -> Result<(Value, Vec<crate::proxy::ProxyRoute>), PrepareError> {
+    let mut v = validate_user_config(user_json)?;
     let root = v
         .as_object_mut()
         .expect("validate_user_config 保证根为对象");
+
+    // control_interface.restful 注入
     let ci = root
         .entry("control_interface")
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
@@ -75,7 +116,6 @@ pub fn prepare_config(user_json: &str, control_port: u16) -> Result<Value, Prepa
         *ci = Value::Object(serde_json::Map::new());
     }
     let ci_obj = ci.as_object_mut().expect("control_interface 现为对象");
-
     let restful = ci_obj
         .entry("restful")
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
@@ -83,20 +123,24 @@ pub fn prepare_config(user_json: &str, control_port: u16) -> Result<Value, Prepa
         *restful = Value::Object(serde_json::Map::new());
     }
     let restful_obj = restful.as_object_mut().expect("restful 现为对象");
-
     restful_obj.insert("host".to_string(), Value::String(LOCALHOST.to_string()));
     restful_obj.insert("port".to_string(), Value::from(control_port));
 
     // 客户端不承载 egress（见变更 lock-ingress-ohttp-drop-egress）：丢弃 add_egress。
     root.remove("add_egress");
 
-    // 强制每条 ingress 的本地监听 host 为回环（与 control_interface.restful 同向），
-    // 仅处理客户端两种形态 mapping(in.host)/http_proxy(proxy_listen.host)。
-    if let Some(add_ingress) = root.get_mut("add_ingress") {
-        if let Some(arr) = add_ingress.as_array_mut() {
-            for entry in arr.iter_mut() {
-                force_ingress_listen_host(entry);
-            }
+    // 每条 ingress：读反代对外绑定、注入调用方批探测供给的内部端口 + host=127.0.0.1
+    // （覆盖用户）、剥离 tngui_outward（不进 tng 配置），并产出反代路由（带内部端口）。
+    let mut routes = Vec::new();
+    if let Some(add_ingress) = root.get_mut("add_ingress").and_then(Value::as_array_mut) {
+        for (i, entry) in add_ingress.iter_mut().enumerate() {
+            let internal_port = internal_ports.get(i).copied().ok_or_else(|| {
+                PrepareError::IngressInvalid(format!(
+                    "内部端口数（{}）少于 ingress 条数",
+                    internal_ports.len()
+                ))
+            })?;
+            routes.push(prepare_ingress_entry(entry, internal_port)?);
         }
     }
 
@@ -105,12 +149,62 @@ pub fn prepare_config(user_json: &str, control_port: u16) -> Result<Value, Prepa
     // 状态卡恒"关停"、用户仅能在日志里看到 cryptic 的反序列化错误。
     validate_ingress_for_launch(root)?;
 
-    Ok(v)
+    Ok((v, routes))
 }
 
-/// 强制一条 ingress 的本地监听 host 为 `127.0.0.1`：
-/// `mapping` 的 `rules[*].in.host`、`http_proxy` 的 `proxy_listen.host`。其余形态不动。
-fn force_ingress_listen_host(entry: &mut Value) {
+/// 处理一条 ingress 的反代对外绑定与内部本地监听注入：
+/// - 读 `tngui_outward`（缺失用默认 `127.0.0.1` + `DEFAULT_OUTWARD_PORT`），校验 host 仅
+///   为 `127.0.0.1`/`0.0.0.0`；
+/// - 选空闲回环端口作为 tng 内部 ingress 本地监听端口，注入 `in.host=127.0.0.1`+
+///   `in.port=自动端口`（覆盖用户任何 host/port）、`http_proxy` 的 `proxy_listen` 同理；
+/// - 剥离 `tngui_outward`（不进 tng 配置）。
+/// 返回反代路由（对外绑定 + 内部端口）。
+fn prepare_ingress_entry(
+    entry: &mut Value,
+    internal_port: u16,
+) -> Result<crate::proxy::ProxyRoute, PrepareError> {
+    let (out_host, out_port) = read_outward(entry);
+    if out_host != crate::proxy::BIND_LOCALHOST && out_host != crate::proxy::BIND_ANY {
+        return Err(PrepareError::IngressInvalid(format!(
+            "反代对外绑定 host 仅支持 127.0.0.1/0.0.0.0，得到 {out_host:?}"
+        )));
+    }
+
+    // 剥离 tngui 侧"反代对外绑定"——不进 tng 配置。
+    if let Some(o) = entry.as_object_mut() {
+        o.remove("tngui_outward");
+    }
+
+    // 注入内部本地监听 host（127.0.0.1）+ port（由调用方批探测供给，覆盖用户）。
+    inject_ingress_listen(entry, internal_port);
+
+    Ok(crate::proxy::ProxyRoute {
+        out_host: out_host.to_string(),
+        out_port,
+        internal_port,
+    })
+}
+
+/// 读 ingress 的反代对外绑定 `(host, port)`；`tngui_outward` 缺失时用默认值。
+fn read_outward(entry: &Value) -> (String, u16) {
+    let o = entry.get("tngui_outward").and_then(Value::as_object);
+    let host = o
+        .and_then(|x| x.get("host"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| crate::proxy::BIND_LOCALHOST.to_string());
+    let port = o
+        .and_then(|x| x.get("port"))
+        .and_then(Value::as_u64)
+        .map(|n| n as u16)
+        .unwrap_or(DEFAULT_OUTWARD_PORT);
+    (host, port)
+}
+
+/// 注入 ingress 的内部本地监听 `host=127.0.0.1` + `port`（覆盖用户任何 host/port）：
+/// `mapping` 的 `rules[*].in` 与 legacy `mapping.in`、`http_proxy` 的 `proxy_listen`。
+fn inject_ingress_listen(entry: &mut Value, port: u16) {
     let Some(obj) = entry.as_object_mut() else {
         return;
     };
@@ -119,12 +213,17 @@ fn force_ingress_listen_host(entry: &mut Value) {
             for r in rules.iter_mut() {
                 if let Some(in_ep) = r.get_mut("in").and_then(Value::as_object_mut) {
                     in_ep.insert("host".to_string(), Value::String(LOCALHOST.to_string()));
+                    in_ep.insert("port".to_string(), Value::from(port));
                 }
             }
+        } else if let Some(in_ep) = m.get_mut("in").and_then(Value::as_object_mut) {
+            in_ep.insert("host".to_string(), Value::String(LOCALHOST.to_string()));
+            in_ep.insert("port".to_string(), Value::from(port));
         }
     } else if let Some(h) = obj.get_mut("http_proxy").and_then(Value::as_object_mut) {
         if let Some(pl) = h.get_mut("proxy_listen").and_then(Value::as_object_mut) {
             pl.insert("host".to_string(), Value::String(LOCALHOST.to_string()));
+            pl.insert("port".to_string(), Value::from(port));
         }
     }
 }
@@ -180,6 +279,43 @@ fn validate_ingress_for_launch(root: &serde_json::Map<String, Value>) -> Result<
         }
     }
     Ok(())
+}
+
+/// 读出用户配置中各 ingress 的反代对外端口（`tngui_outward.port`，缺失用默认），按
+/// `add_ingress` 顺序。供 `pick_launch_ports` 构成禁止集合（注入端口须避让对外端口）。
+fn outward_ports(user_json: &str) -> Result<Vec<u16>, PrepareError> {
+    let v = validate_user_config(user_json)?;
+    let mut out = Vec::new();
+    if let Some(arr) = v.get("add_ingress").and_then(|a| a.as_array()) {
+        for entry in arr {
+            let (_, port) = read_outward(entry);
+            out.push(port);
+        }
+    }
+    Ok(out)
+}
+
+/// 批探测一次取齐「1 个管控端口 + 各 ingress 内部端口」：用 `pick_free_ports(1 + N)`
+/// 占住再放（保证两两互不相同），并对各 ingress 反代对外端口先验避让——任一批取结果
+/// 命中对外端口即整批丢弃重取（有界重试，避免死循环）。重试耗尽则启动失败并明示。
+/// 返回 `(control_port, internal_ports)`，供 `launch_tng` 经 `prepare_launch` 注入。
+pub fn pick_launch_ports(user_json: &str) -> Result<(u16, Vec<u16>), PrepareError> {
+    let n_ingress = ingress_count(user_json)?;
+    let forbidden = outward_ports(user_json)?;
+    let total = 1 + n_ingress;
+    const MAX_RETRIES: usize = 64;
+    for _ in 0..MAX_RETRIES {
+        let ports = pick_free_ports(total)
+            .map_err(|e| PrepareError::IngressInvalid(format!("无法分配端口: {e}")))?;
+        if !ports.iter().any(|p| forbidden.contains(p)) {
+            let (ctrl, internal) = ports.split_first().expect("total >= 1");
+            return Ok((*ctrl, internal.to_vec()));
+        }
+        // 命中对外端口：整批丢弃重试
+    }
+    Err(PrepareError::IngressInvalid(
+        "批探测端口反复命中对外端口、重试耗尽".to_string(),
+    ))
 }
 
 /// 从（已收口的）配置读出控制端口。保留作诊断用途。
@@ -407,5 +543,124 @@ mod tests {
     #[test]
     fn prepare_accepts_no_ingress() {
         assert!(prepare_config(r#"{"control_interface":{}}"#, 40056).is_ok());
+    }
+
+    #[test]
+    fn prepare_launch_returns_routes_and_injects_internal_port() {
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"0.0.0.0","port":1},"out":{"host":"10.0.0.1","port":2}}]},"tngui_outward":{"host":"0.0.0.0","port":8443},"no_ra":true}]}"#;
+        let ports = pick_free_ports(1).unwrap();
+        let (v, routes) = prepare_launch(src, 40100, &ports).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].out_host, "0.0.0.0");
+        assert_eq!(routes[0].out_port, 8443);
+        let in_port = v["add_ingress"][0]["mapping"]["rules"][0]["in"]["port"]
+            .as_u64()
+            .unwrap() as u16;
+        assert!(in_port > 0, "应注入非 0 内部端口");
+        assert_ne!(in_port, 1, "应覆盖用户端口 1");
+        assert_eq!(
+            v["add_ingress"][0]["mapping"]["rules"][0]["in"]["host"],
+            "127.0.0.1"
+        );
+        assert!(
+            v["add_ingress"][0].get("tngui_outward").is_none(),
+            "tngui_outward 应被剥离"
+        );
+    }
+
+    #[test]
+    fn prepare_launch_http_proxy_route() {
+        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"10.0.0.1","port":1},"dst_filters":{"domain":"x"}},"tngui_outward":{"host":"127.0.0.1","port":18443}}]}"#;
+        let ports = pick_free_ports(1).unwrap();
+        let (v, routes) = prepare_launch(src, 40101, &ports).unwrap();
+        assert_eq!(routes[0].out_host, "127.0.0.1");
+        assert_eq!(routes[0].out_port, 18443);
+        assert_eq!(
+            v["add_ingress"][0]["http_proxy"]["proxy_listen"]["host"],
+            "127.0.0.1"
+        );
+        assert_ne!(
+            v["add_ingress"][0]["http_proxy"]["proxy_listen"]["port"]
+                .as_u64()
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn prepare_launch_rejects_invalid_outward_host() {
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]},"tngui_outward":{"host":"8.8.8.8","port":1}}]}"#;
+        let ports = pick_free_ports(1).unwrap();
+        let err = prepare_launch(src, 40102, &ports).unwrap_err();
+        assert!(matches!(err, PrepareError::IngressInvalid(_)), "{err}");
+        assert!(err.to_string().contains("host 仅支持"), "{err}");
+    }
+
+    #[test]
+    fn prepare_launch_default_outward_when_missing() {
+        // 用户配置不含 tngui_outward → 默认 (127.0.0.1, DEFAULT_OUTWARD_PORT=18443)
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]}}]}"#;
+        let ports = pick_free_ports(1).unwrap();
+        let (_v, routes) = prepare_launch(src, 40103, &ports).unwrap();
+        assert_eq!(routes[0].out_host, "127.0.0.1");
+        assert_eq!(routes[0].out_port, 18443);
+    }
+
+    #[test]
+    fn prepare_launch_multiple_ingress_each_gets_internal_port() {
+        let src = r#"{"add_ingress":[
+            {"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]},"tngui_outward":{"host":"127.0.0.1","port":18443}},
+            {"http_proxy":{"proxy_listen":{"host":"127.0.0.1","port":3},"dst_filters":{"domain":"y"}},"tngui_outward":{"host":"127.0.0.1","port":18444}}
+        ]}"#;
+        let ports = pick_free_ports(2).unwrap();
+        let (v, routes) = prepare_launch(src, 40104, &ports).unwrap();
+        assert_eq!(routes.len(), 2);
+        assert_ne!(
+            routes[0].internal_port, routes[1].internal_port,
+            "各 ingress 内部端口应不同"
+        );
+        assert_eq!(routes[0].out_port, 18443);
+        assert_eq!(routes[1].out_port, 18444);
+        for i in 0..2 {
+            assert!(v["add_ingress"][i].get("tngui_outward").is_none());
+        }
+    }
+
+    #[test]
+    fn pick_free_ports_returns_n_distinct_loopback_ports() {
+        let ports = pick_free_ports(5).expect("批取 5 个应成功");
+        assert_eq!(ports.len(), 5);
+        assert!(ports.iter().all(|p| *p > 0), "端口应非 0: {ports:?}");
+        let mut sorted = ports.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 5, "批取端口应两两不同: {ports:?}");
+    }
+
+    #[test]
+    fn pick_launch_ports_avoids_outward_port() {
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]},"tngui_outward":{"host":"127.0.0.1","port":18443}}]}"#;
+        let (ctrl, internal) = pick_launch_ports(src).unwrap();
+        assert_ne!(ctrl, 18443);
+        assert_eq!(internal.len(), 1);
+        assert_ne!(internal[0], 18443);
+        assert_ne!(ctrl, internal[0], "管控与内部端口应不同");
+    }
+
+    #[test]
+    fn pick_launch_ports_multiple_distinct_and_avoid_outward() {
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]},"tngui_outward":{"host":"127.0.0.1","port":18443}},{"http_proxy":{"proxy_listen":{"host":"127.0.0.1","port":3},"dst_filters":{"domain":"y"}},"tngui_outward":{"host":"127.0.0.1","port":18444}}]}"#;
+        let (ctrl, internal) = pick_launch_ports(src).unwrap();
+        let mut all = vec![ctrl];
+        all.extend(internal.iter());
+        assert_eq!(all.len(), 3);
+        let mut sorted = all.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 3, "管控+内部端口应两两不同: {all:?}");
+        assert!(
+            !all.contains(&18443) && !all.contains(&18444),
+            "应避让对外端口: {all:?}"
+        );
     }
 }

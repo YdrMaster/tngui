@@ -29,6 +29,15 @@ export interface VerifyConfig {
 }
 /** verify 默认值（no_ra=false 时用）。 */
 export const DEFAULT_VERIFY: VerifyConfig = { model: "passport", as_provider: "tpm" };
+/** 反代对外绑定（D1：host 在 127.0.0.1/0.0.0.0 间 toggle；port 为用户可配的「本机端口」）。
+ * tngui 侧字段——不进 tng `add_ingress[].mapping.rules[].in`（tng 本地监听由 tngui 启动时注入）。
+ */
+export interface OutwardBind {
+  host: "127.0.0.1" | "0.0.0.0";
+  port: number;
+}
+/** 反代对外绑定默认值（仅本机回环 + 内置默认端口）。 */
+export const DEFAULT_OUTWARD: OutwardBind = { host: "127.0.0.1", port: DEFAULT_LISTEN_PORT };
 
 // —— 嵌套形状（serialize/parse 用，extra 字段仍可经 entry extra 容器往返） ——
 export interface RuleEndpoint {
@@ -47,12 +56,14 @@ export interface DstFilters {
   domain: string;
 }
 
-/** 一条 ingress 条目的模型。fields 为各模式的嵌套字段；verify 仅在 no_ra=false 时有效。 */
+/** 一条 ingress 条目的模型。fields 为各模式的嵌套字段；verify 仅在 no_ra=false 时有效；
+ * `outward` 为 tngui 反代对外绑定（tngui 侧、不进 tng 配置）。 */
 export interface EntryModel {
   mode: IngressMode;
   fields: Record<string, unknown>;
   no_ra: boolean;
   verify?: VerifyConfig;
+  outward: OutwardBind;
   extra: Record<string, unknown>;
 }
 
@@ -113,6 +124,7 @@ export function defaultModel(): ConfigModel {
         fields: defaultFields("mapping"),
         no_ra: false,
         verify: { ...DEFAULT_VERIFY },
+        outward: { ...DEFAULT_OUTWARD },
         extra: {},
       },
     ],

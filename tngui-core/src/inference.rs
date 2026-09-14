@@ -1,7 +1,10 @@
-//! 密态推理请求：通过 tng 透明代理发送 OpenAI 兼容 POST 请求。
+//! 密态推理请求：通过 tngui 反向代理对外端点发送 OpenAI 兼容 POST 请求。
 //!
-//! tng 不解析 HTTP path（按 Host 路由），透传到 egress `out`。无 --log-file → tng 日志走 stdout 被捕获。
-//! 非流式：POST /v1/chat/completions，响应一次性返回。
+//! `send_inference` 是普通 OpenAI 客户端：仅带 `Authorization: Bearer` + JSON body
+//! （`{model, messages}`）POST 到 `127.0.0.1:<port>`——`port` 调用方传的是 tngui 反代对外
+//! 端口（`launch_tng` 启动反代、`proxy_endpoint` 命令暴露）；`x-model` 头由反代按
+//! `body.model` 注入/覆盖，此处不注。反代透传到 tng 透明代理（ingress）。非流式：POST
+//! /v1/chat/completions，响应一次性返回。
 
 use std::io;
 use std::time::Duration;
@@ -126,5 +129,56 @@ mod tests {
         assert!(r.is_err());
         let e = r.unwrap_err();
         assert!(e.contains("HTTP POST 失败") || e.contains("连接超时"));
+    }
+
+    /// send_inference 退化为普通客户端：不注 x-model（由反代注入），并解析 choices。
+    #[tokio::test]
+    async fn send_inference_posts_without_x_model_and_returns_content() {
+        use std::sync::{Arc, Mutex};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen2 = seen.clone();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut buf = Vec::new();
+            loop {
+                let mut t = [0u8; 1024];
+                let n = s.read(&mut t).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&t[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = String::from_utf8_lossy(&buf);
+            let x_model = head.lines().skip(1).find_map(|ln| {
+                let ln = ln.trim_end_matches('\r');
+                let mut kv = ln.splitn(2, ':');
+                let k = kv.next()?.trim();
+                if k.eq_ignore_ascii_case("x-model") {
+                    kv.next().map(|v| v.trim().to_string())
+                } else {
+                    None
+                }
+            });
+            *seen2.lock().unwrap() = x_model;
+            let body = r#"{"choices":[{"message":{"content":"hi-from-model"}}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = s.write_all(resp.as_bytes()).await;
+            let _ = s.flush().await;
+        });
+        let r = send_inference(port, "gpt-x", "key", "ping").await.unwrap();
+        assert_eq!(r, "hi-from-model");
+        assert!(
+            seen.lock().unwrap().is_none(),
+            "send_inference 不应自注 x-model（由反代注入）"
+        );
     }
 }

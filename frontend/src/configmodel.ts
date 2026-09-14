@@ -1,20 +1,22 @@
 // 配置模型的序列化/解析（客户端 ingress 锁定 OHTTP 形态）。
 // - serialize：不输出 add_egress、不输出 control_interface.restful；每条 ingress 注入锁定 ohttp；
 //   按 no_ra/verify 互斥产出（no_ra=true → "no_ra":true 且无 verify；no_ra=false → verify 且无 no_ra）；
-//   本地监听 host 强制 127.0.0.1。
-// - parse：丢弃 add_egress（warning）、丢弃 ingress 的 ohttp（用锁定值）、读 verify 回填；
-//   仅认 mapping/http_proxy 两种 ingress，其余被丢弃并以 warning 提示。
+//   tng 本地监听 host/port 不进用户序列化（in/proxy_listen 输出为空对象，由 tngui 启动时注入）；
+//   反代对外绑定作 tngui 侧 `tngui_outward` 与 add_ingress 平级 sibling 输出（不进 tng 的 mapping.in）。
+// - parse：丢弃 add_egress（warning）、丢弃 ingress 的 ohttp（用锁定值）、读 verify 回填、
+//   读 `tngui_outward` 回填 `entry.outward`（缺失用默认）；仅认 mapping/http_proxy 两种 ingress。
 // control_interface.restful 子段由 tngui 启动时注入（auto-manage-control-port），这里丢弃/不输出。
 import {
   ALL_MODES,
   DEFAULT_LISTEN_PORT,
   DEFAULT_OUT_PORT,
+  DEFAULT_OUTWARD,
   DEFAULT_VERIFY,
-  LOCALHOST,
   LOCKED_OHTTP,
   type ConfigModel,
   type EntryModel,
   type IngressMode,
+  type OutwardBind,
   type VerifyConfig,
 } from "./formspec";
 
@@ -37,32 +39,32 @@ function serializeEntry(e: EntryModel): Record<string, unknown> {
     obj.verify = e.verify ? { ...e.verify } : { ...DEFAULT_VERIFY };
   }
   obj.ohttp = JSON.parse(JSON.stringify(LOCKED_OHTTP));
+  obj.tngui_outward = { host: e.outward.host, port: e.outward.port };
   for (const [k, v] of Object.entries(e.extra)) obj[k] = v;
   return obj;
 }
 
-/** 规整为锁定形态并强制本地监听 host=127.0.0.1（serialize 侧兜底，与后端 prepare_config 同向）。 */
+/** 规整为锁定形态：剥除 tng 本地监听 host/port（输出 `in`/`proxy_listen` 为空对象，由 tngui 启动注入），
+ *  保留远端字段（mapping 的 out、http_proxy 的 dst_filters）。 */
 function sanitizeFields(mode: IngressMode, fields: Record<string, unknown>): Record<string, unknown> {
   if (mode === "mapping") {
     const rules = Array.isArray(fields.rules) ? fields.rules : [];
     const first = rules.find((r) => r && typeof r === "object") as
       | { in?: Record<string, unknown>; out?: Record<string, unknown> }
       | undefined;
-    const inEp = first?.in ?? {};
     const outEp = first?.out ?? {};
     return {
       rules: [
         {
-          in: { host: LOCALHOST, port: numOr(inEp.port, DEFAULT_LISTEN_PORT) },
+          in: {},
           out: { host: strOr(outEp.host, ""), port: numOr(outEp.port, DEFAULT_OUT_PORT) },
         },
       ],
     };
   }
-  const pl = (fields.proxy_listen ?? {}) as Record<string, unknown>;
   const df = (fields.dst_filters ?? {}) as Record<string, unknown>;
   return {
-    proxy_listen: { host: LOCALHOST, port: numOr(pl.port, DEFAULT_LISTEN_PORT) },
+    proxy_listen: {},
     dst_filters: { domain: strOr(df.domain, "") },
   };
 }
@@ -154,13 +156,28 @@ function parseEntry(
     verify = undefined;
   }
 
+  // 反代对外绑定：tngui 侧 `tngui_outward`（缺失/非法用默认）
+  const outward = parseOutward(e.tngui_outward);
+
   const extra: Record<string, unknown> = { ...e };
   delete extra[mode];
   delete extra.no_ra;
   delete extra.verify;
   delete extra.ohttp;
+  delete extra.tngui_outward;
 
-  return { model: { mode, fields, no_ra, verify, extra } };
+  return { model: { mode, fields, no_ra, verify, outward, extra } };
+}
+
+/** 解析 `tngui_outward`：host 仅认 127.0.0.1/0.0.0.0，port 须为数字；缺失/非法用 `DEFAULT_OUTWARD`。 */
+function parseOutward(raw: unknown): OutwardBind {
+  if (raw && typeof raw === "object") {
+    const o = raw as Record<string, unknown>;
+    const host = o.host === "0.0.0.0" ? "0.0.0.0" : o.host === "127.0.0.1" ? "127.0.0.1" : DEFAULT_OUTWARD.host;
+    const port = typeof o.port === "number" && Number.isFinite(o.port) ? o.port : DEFAULT_OUTWARD.port;
+    return { host, port: port as OutwardBind["port"] };
+  }
+  return { ...DEFAULT_OUTWARD };
 }
 
 function numOr(v: unknown, def: number): number {

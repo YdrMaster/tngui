@@ -57,6 +57,7 @@ describe("isRemoteConfigured（镜像后端 validate_ingress_for_launch）", () 
           mode: "http_proxy",
           fields: { proxy_listen: { host: "127.0.0.1", port: 18443 }, dst_filters: { domain: "" } },
           no_ra: true,
+          outward: { host: "127.0.0.1", port: 18443 },
           extra: {},
         },
       ],
@@ -70,6 +71,7 @@ describe("isRemoteConfigured（镜像后端 validate_ingress_for_launch）", () 
       mode: "mapping",
       fields: { rules: [{ in: { host: "127.0.0.1", port: 18444 }, out: { host: "not-an-ip", port: 10000 } }] },
       no_ra: true,
+      outward: { host: "127.0.0.1", port: 18443 },
       extra: {},
     };
     m.add_ingress.push(e2);

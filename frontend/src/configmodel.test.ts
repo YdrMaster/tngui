@@ -4,6 +4,7 @@ import {
   defaultModel,
   HEADER_PASSTHROUGH,
   LOCALHOST,
+  DEFAULT_OUTWARD,
   DEFAULT_VERIFY,
   INGRESS_MODES,
   type ConfigModel,
@@ -48,7 +49,7 @@ describe("默认模板", () => {
 describe("ingress 锁定形态与互斥序列化", () => {
   it("每种远端形态 defaultFields → serialize → parse 往返保留 mode 与锁定字段", () => {
     for (const mode of INGRESS_MODES) {
-      const entry: EntryModel = { mode, fields: (defaultModel().add_ingress[0].fields), no_ra: false, verify: { ...DEFAULT_VERIFY }, extra: {} };
+      const entry: EntryModel = { mode, fields: (defaultModel().add_ingress[0].fields), no_ra: false, verify: { ...DEFAULT_VERIFY }, outward: { ...DEFAULT_OUTWARD }, extra: {} };
       entry.mode = mode;
       entry.fields = (mode === "mapping"
         ? { rules: [{ in: { host: LOCALHOST, port: 12345 }, out: { host: "10.0.0.1", port: 9999 } }] }
@@ -65,7 +66,7 @@ describe("ingress 锁定形态与互斥序列化", () => {
 
   it("no_ra=true：出 no_ra 不出 verify；no_ra=false：出 verify 不出 no_ra", () => {
     for (const no_ra of [true, false]) {
-      const entry: EntryModel = { mode: "mapping", fields: defaultModel().add_ingress[0].fields, no_ra, verify: no_ra ? undefined : { model: "passport", as_provider: "tpm" }, extra: {} };
+      const entry: EntryModel = { mode: "mapping", fields: defaultModel().add_ingress[0].fields, no_ra, verify: no_ra ? undefined : { model: "passport", as_provider: "tpm" }, outward: { ...DEFAULT_OUTWARD }, extra: {} };
       const o = JSON.parse(serialize(mk({ add_ingress: [entry] }))) as Record<string, unknown>;
       const ing = (o.add_ingress as Record<string, unknown>[])[0];
       if (no_ra) {
@@ -78,17 +79,19 @@ describe("ingress 锁定形态与互斥序列化", () => {
     }
   });
 
-  it("本地监听 host 强制 127.0.0.1（serialize 与 parse 双侧）", () => {
-    const m = mk({ add_ingress: [{ mode: "mapping", fields: { rules: [{ in: { host: "0.0.0.0", port: 1 }, out: { host: "10.0.0.1", port: 2 } }] }, no_ra: true, extra: {} }] });
-    const o = JSON.parse(serialize(m)) as { add_ingress: { mapping: { rules: { in: { host: string } }[] } }[] };
-    expect(o.add_ingress[0].mapping.rules[0].in.host).toBe("127.0.0.1");
+  it("tng 本地监听 host/port 不进用户序列化（in 剥离为空、注入交后端）；outward 序列化往返", () => {
+    const m = mk({ add_ingress: [{ mode: "mapping", fields: { rules: [{ in: { host: "0.0.0.0", port: 1 }, out: { host: "10.0.0.1", port: 2 } }] }, no_ra: true, outward: { host: "127.0.0.1", port: 18443 }, extra: {} }] });
+    const o = JSON.parse(serialize(m)) as { add_ingress: { mapping: { rules: { in: Record<string, never> }[] }; tngui_outward: { host: string; port: number } }[] };
+    // in 被剥离为空对象（tng 本地监听由 tngui 启动时注入，不进用户序列化）
+    expect(Object.keys(o.add_ingress[0].mapping.rules[0].in)).toHaveLength(0);
+    // outward 作 tngui 侧字段序列化、往返保留
+    expect(o.add_ingress[0].tngui_outward).toEqual({ host: "127.0.0.1", port: 18443 });
     const r = parse(serialize(m));
-    const rules = r.model!.add_ingress[0].fields.rules as { in: { host: string } }[];
-    expect(rules[0].in.host).toBe("127.0.0.1");
+    expect(r.model!.add_ingress[0].outward).toEqual({ host: "127.0.0.1", port: 18443 });
   });
 
   it("http_proxy dst_filters.domain 单文本往返（不结构限定）", () => {
-    const m = mk({ add_ingress: [{ mode: "http_proxy", fields: { proxy_listen: { host: LOCALHOST, port: 1 }, dst_filters: { domain: "https://x.example.com/v1" } }, no_ra: true, extra: {} }] });
+    const m = mk({ add_ingress: [{ mode: "http_proxy", fields: { proxy_listen: { host: LOCALHOST, port: 1 }, dst_filters: { domain: "https://x.example.com/v1" } }, no_ra: true, outward: { ...DEFAULT_OUTWARD }, extra: {} }] });
     const r = parse(serialize(m));
     const df = r.model!.add_ingress[0].fields.dst_filters as { domain: string };
     expect(df.domain).toBe("https://x.example.com/v1");
@@ -137,7 +140,7 @@ describe("egress 去除与 ingress 形态收敛", () => {
 describe("未结构化字段往返", () => {
   it("ingress extra（ attest 等）与顶层 extra 往返；ohttp 仍用锁定值", () => {
     const m = mk({
-      add_ingress: [{ mode: "mapping", fields: defaultModel().add_ingress[0].fields, no_ra: false, verify: { model: "passport", as_provider: "tpm" }, extra: { attest: { aa_provider: "coco" } } }],
+      add_ingress: [{ mode: "mapping", fields: defaultModel().add_ingress[0].fields, no_ra: false, verify: { model: "passport", as_provider: "tpm" }, outward: { ...DEFAULT_OUTWARD }, extra: { attest: { aa_provider: "coco" } } }],
       extra: { metric: { step: 30 } },
     });
     const r = parse(serialize(m));

@@ -29,6 +29,12 @@ const ingressInfo = computed(() => {
   return deriveIngressInfo(entries[0]);
 });
 
+// tng 本地监听对用户隐藏（tngui 启动时注入）；概览入口信息以反代对外绑定为"本机入口"。
+const entryOutward = computed(() => {
+  const e = model.value.add_ingress?.[0];
+  return e?.outward ?? null;
+});
+
 const states = computed(() => {
   const report = statusReport.value;
   const observation: IngressObservation = {
@@ -179,8 +185,8 @@ onBeforeUnmount(() => {
       <IngressInfoCard title="入口信息">
         <template #rows>
           <div class="ingress-info-row"><b>入口模式</b><span>{{ ingressInfo.modeLabel }}</span></div>
-          <div class="ingress-info-row"><b>监听地址</b><span>{{ ingressInfo.listenAddress }}</span></div>
-          <div class="ingress-info-row"><b>监听端口</b><span>{{ ingressInfo.listenPort }}</span></div>
+          <div class="ingress-info-row"><b>绑定地址</b><span>{{ entryOutward ? entryOutward.host : "——" }}</span></div>
+          <div class="ingress-info-row"><b>本机端口</b><span>{{ entryOutward ? entryOutward.port : "——" }}</span></div>
         </template>
       </IngressInfoCard>
       <IngressStateCard

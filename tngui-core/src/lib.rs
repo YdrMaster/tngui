@@ -11,13 +11,15 @@ pub mod config;
 pub mod inference;
 pub mod log;
 pub mod process;
+pub mod proxy;
 pub mod status;
 
 pub use config::{
-    PrepareError, control_port, pick_free_port, prepare_config, validate_user_config,
-    write_runtime_config,
+    PrepareError, control_port, pick_free_port, pick_free_ports, pick_launch_ports, prepare_config,
+    prepare_launch, validate_user_config, write_runtime_config,
 };
 pub use inference::send_inference;
 pub use log::BoundedLog;
 pub use process::{ManagedChild, TngSupervisor, kill_group, spawn_managed};
+pub use proxy::{ProxyHandle, ProxyRoute, start_proxy};
 pub use status::{StatusReport, fetch_status};

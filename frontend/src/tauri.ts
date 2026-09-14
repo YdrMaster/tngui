@@ -22,6 +22,15 @@ export async function getOutput(): Promise<string[]> {
   return invoke<string[]>("get_output");
 }
 
+/** 反代对外端点（按 add_ingress 顺序；未启动返回空）。 */
+export interface ProxyEndpoint {
+  host: string;
+  port: number;
+}
+export async function proxyEndpoint(): Promise<ProxyEndpoint[]> {
+  return invoke<ProxyEndpoint[]>("proxy_endpoint");
+}
+
 export async function launchTng(configJson: string): Promise<number> {
   return invoke<number>("launch_tng", { configJson });
 }

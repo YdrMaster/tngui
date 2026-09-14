@@ -6,7 +6,7 @@ import {
   ApiOutlined, ExperimentOutlined, EyeOutlined, EyeInvisibleOutlined,
   ImportOutlined, ExportOutlined, CopyOutlined,
 } from "@ant-design/icons-vue";
-import { defaultFields } from "../formspec";
+import { defaultFields, DEFAULT_OUTWARD } from "../formspec";
 import { parse } from "../configmodel";
 import { launchTng, pickImportPath, pickExportPath, importConfig, exportConfig, appInfo } from "../tauri";
 import EntryEditor from "../components/EntryEditor.vue";
@@ -49,10 +49,7 @@ fetchAppInfo();
 const localUrl = computed(() => {
   const e = model.value.add_ingress[0];
   if (!e) return "未配置 ingress";
-  const port = e.mode === "mapping"
-    ? (e.fields.rules as { in?: { port?: number } }[] | undefined)?.[0]?.in?.port
-    : (e.fields.proxy_listen as { port?: number } | undefined)?.port;
-  return port ? `http://127.0.0.1:${port}/v1` : "未配置端口";
+  return `http://127.0.0.1:${e.outward.port}/v1`;
 });
 
 function syncRaw() { rawEditing.value = serializeCurrent(); }
@@ -66,7 +63,12 @@ function applyRaw() {
 }
 function addIngress() {
   model.value.add_ingress.push({
-    mode: "mapping", fields: defaultFields("mapping"), no_ra: false, verify: { model: "passport", as_provider: "tpm" }, extra: {},
+    mode: "mapping",
+    fields: defaultFields("mapping"),
+    no_ra: false,
+    verify: { model: "passport", as_provider: "tpm" },
+    outward: { ...DEFAULT_OUTWARD },
+    extra: {},
   });
 }
 function removeIngress(i: number) { model.value.add_ingress.splice(i, 1); }
