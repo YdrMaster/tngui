@@ -31,6 +31,9 @@ pub enum PrepareError {
     InvalidJson(serde_json::Error),
     /// 配置根不是 JSON 对象。
     RootNotObject,
+    /// ingress 配置 tng 必然在加载期拒绝（如 mapping 的 out.host 缺失/非 IPv4），
+    /// 在拉起 tng 前拦截，避免 tng 加载即崩、控制面永不绑定、状态卡恒"关停"。
+    IngressInvalid(String),
 }
 
 impl fmt::Display for PrepareError {
@@ -38,6 +41,7 @@ impl fmt::Display for PrepareError {
         match self {
             PrepareError::InvalidJson(e) => write!(f, "JSON 解析失败: {e}"),
             PrepareError::RootNotObject => write!(f, "配置根须为 JSON 对象"),
+            PrepareError::IngressInvalid(msg) => write!(f, "ingress 配置不可启动: {msg}"),
         }
     }
 }
@@ -96,6 +100,11 @@ pub fn prepare_config(user_json: &str, control_port: u16) -> Result<Value, Prepa
         }
     }
 
+    // 拦截 tng 加载期必然拒绝的 ingress（mapping 的 out.host 须为有效 IPv4）：默认模板
+    // out.host 留空（用户须填网关 IP），不拦则 tng 启动后加载配置即崩——控制面永不绑定，
+    // 状态卡恒"关停"、用户仅能在日志里看到 cryptic 的反序列化错误。
+    validate_ingress_for_launch(root)?;
+
     Ok(v)
 }
 
@@ -118,6 +127,59 @@ fn force_ingress_listen_host(entry: &mut Value) {
             pl.insert("host".to_string(), Value::String(LOCALHOST.to_string()));
         }
     }
+}
+
+/// 拦截 tng 加载期必然拒绝的 ingress 远端配置：`mapping` 每条规则（序列化形态
+/// `{ rules: [{ in, out }] }`，也兼容遗留 `{ in, out }`）的 `out.host` 须为非空 IPv4——
+/// 与 tng `mapping_rule::RuleEndpoint.host: Option<Ipv4Addr>` 一致，空串/非 IP 会被
+/// `untagged enum MappingDe` 整体拒掉。`http_proxy` 的 `dst_filters.domain` 即便为空 tng 也
+/// 加载（仅匹配不到），故不拦。
+fn validate_ingress_for_launch(root: &serde_json::Map<String, Value>) -> Result<(), PrepareError> {
+    let Some(entries) = root.get("add_ingress").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for (i, entry) in entries.iter().enumerate() {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        // 仅拦客户端两种形态；其余形态序列化层不会产生，交 tng 自行处理。
+        if let Some(m) = obj.get("mapping").and_then(Value::as_object) {
+            let out_hosts: Vec<Option<&str>> = match m.get("rules").and_then(Value::as_array) {
+                Some(rules) => rules
+                    .iter()
+                    .map(|r| {
+                        r.get("out")
+                            .and_then(Value::as_object)
+                            .and_then(|o| o.get("host"))
+                            .and_then(Value::as_str)
+                    })
+                    .collect(),
+                None => vec![
+                    m.get("out")
+                        .and_then(Value::as_object)
+                        .and_then(|o| o.get("host"))
+                        .and_then(Value::as_str),
+                ],
+            };
+            if out_hosts.is_empty() {
+                // rules 为空数组：tng 接受（空规则不做事），不拦。
+                continue;
+            }
+            for (j, out_host) in out_hosts.iter().enumerate() {
+                let Some(h) = out_host.map(str::trim).filter(|s| !s.is_empty()) else {
+                    return Err(PrepareError::IngressInvalid(format!(
+                        "add_ingress[{i}] mapping rule {j} 缺少 out.host（须填网关 IPv4 地址）"
+                    )));
+                };
+                if h.parse::<std::net::Ipv4Addr>().is_err() {
+                    return Err(PrepareError::IngressInvalid(format!(
+                        "add_ingress[{i}] mapping rule {j} out.host={h:?} 不是有效 IPv4（tng 仅接受 IP）"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 从（已收口的）配置读出控制端口。保留作诊断用途。
@@ -289,5 +351,61 @@ mod tests {
             v["add_ingress"][0]["http_proxy"]["dst_filters"]["domain"],
             "x.example.com"
         );
+    }
+
+    #[test]
+    fn prepare_rejects_empty_mapping_out_host() {
+        // 默认模板场景：out.host 留空 → tng 加载期 MappingDe 拒掉（host: Option<Ipv4Addr>）
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":18443},"out":{"host":"","port":10000}}]},"verify":{"model":"passport","as_provider":"tpm"},"ohttp":{"header_passthrough":{"request_headers":["x-model"]}}}]}"#;
+        let err = prepare_config(src, 40050).unwrap_err();
+        assert!(matches!(err, PrepareError::IngressInvalid(_)), "{err}");
+        assert!(err.to_string().contains("out.host"), "{err}");
+        assert!(err.to_string().contains("ingress 配置不可启动"), "{err}");
+    }
+
+    #[test]
+    fn prepare_rejects_non_ipv4_mapping_out_host() {
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"example.com","port":2}}]}}]}"#;
+        assert!(
+            prepare_config(src, 40051)
+                .unwrap_err()
+                .to_string()
+                .contains("IPv4")
+        );
+    }
+
+    #[test]
+    fn prepare_rejects_legacy_mapping_missing_out_host() {
+        let src = r#"{"add_ingress":[{"mapping":{"in":{"host":"127.0.0.1","port":1}}}]}"#;
+        assert!(matches!(
+            prepare_config(src, 40052).unwrap_err(),
+            PrepareError::IngressInvalid(_)
+        ));
+    }
+
+    #[test]
+    fn prepare_accepts_valid_mapping_out_host_rules_and_legacy() {
+        assert!(prepare_config(
+            r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]}}]}"#,
+            40053
+        )
+        .is_ok());
+        assert!(prepare_config(
+            r#"{"add_ingress":[{"mapping":{"in":{"port":10001},"out":{"host":"127.0.0.1","port":30001}}}]}"#,
+            40054
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn prepare_accepts_http_proxy_empty_domain() {
+        // http_proxy 空 domain 也能加载（tng 接受）→ 不拦
+        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"127.0.0.1","port":18443},"dst_filters":{"domain":""}}}]}"#;
+        assert!(prepare_config(src, 40055).is_ok());
+    }
+
+    #[test]
+    fn prepare_accepts_no_ingress() {
+        assert!(prepare_config(r#"{"control_interface":{}}"#, 40056).is_ok());
     }
 }

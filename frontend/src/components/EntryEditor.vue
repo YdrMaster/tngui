@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Modal } from "ant-design-vue";
 import {
   INGRESS_FIELDS,
   defaultFields,
@@ -62,17 +61,20 @@ const verifyFields = computed<Record<string, any>>(() => {
   return props.entry.verify;
 });
 
+// 远程证明开关表示 "ra"（是否启用远程证明）：开=ra/`no_ra=false` 渲染 verify；关=`no_ra=true` 仅开关。
+// 底层仍存储 `no_ra`，开关经取反 computed 与其绑定。
+const raEnabled = computed<boolean>({
+  get: () => !props.entry.no_ra,
+  set: (v: boolean) => {
+    props.entry.no_ra = !v;
+  },
+});
+
 function onRemTypeChange(val: string | number) {
   const next = String(val) as IngressMode;
   if (next === props.entry.mode) return;
-  Modal.confirm({
-    title: "切换远端类型将重置该条字段",
-    content: `确认从 ${props.entry.mode} 切到 ${next}？ohttp（常开）与 no_ra/verify 保留。`,
-    onOk: () => {
-      props.entry.mode = next;
-      props.entry.fields = defaultFields(next);
-    },
-  });
+  props.entry.mode = next;
+  props.entry.fields = defaultFields(next);
 }
 </script>
 
@@ -82,26 +84,41 @@ function onRemTypeChange(val: string | number) {
       <a-button size="small" danger @click="emit('remove')">删除</a-button>
     </template>
 
-    <a-space style="margin-bottom: 8px" wrap>
-      <span>远端类型：</span>
-      <a-select
-        :value="entry.mode"
-        style="width: 180px"
-        :options="remoteTypeOptions"
-        @update:value="onRemTypeChange"
-      />
-      <span>no_ra：</span>
-      <a-switch v-model:checked="entry.no_ra" />
-    </a-space>
-
     <a-form layout="vertical">
+      <!-- 行1：本地监听 独立成行 -->
       <FieldRenderer :fields="listenFields" :spec="listenSpec" />
-      <FieldRenderer :fields="remoteFields" :spec="remoteSpec" />
-      <FieldRenderer
-        v-if="!entry.no_ra"
-        :fields="verifyFields"
-        :spec="{ key: 'verify', label: 'verify（model / as_provider，默认 passport / tpm）', type: 'verifyFields' }"
-      />
+
+      <!-- 行2：远端类型 + 当前远端字段 同一横排 -->
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start">
+        <div style="flex:0 0 180px;max-width:180px">
+          <a-form-item label="远端类型">
+            <a-select
+              :value="entry.mode"
+              style="width:100%"
+              :options="remoteTypeOptions"
+              @update:value="onRemTypeChange"
+            />
+          </a-form-item>
+        </div>
+        <div style="flex:1;min-width:240px">
+          <FieldRenderer :fields="remoteFields" :spec="remoteSpec" />
+        </div>
+      </div>
+
+      <!-- 行3：远程证明开关（表示 ra）+ verify 配置 同一横排（开关开=no_ra=false 渲染 verify） -->
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start">
+        <div style="flex:0 0 140px;max-width:140px">
+          <a-form-item label="远程证明">
+            <a-switch v-model:checked="raEnabled" />
+          </a-form-item>
+        </div>
+        <div v-if="raEnabled" style="flex:1;min-width:340px">
+          <FieldRenderer
+            :fields="verifyFields"
+            :spec="{ key: 'verify', label: 'verify（model / as_provider，默认 passport / tpm）', type: 'verifyFields' }"
+          />
+        </div>
+      </div>
     </a-form>
   </a-card>
 </template>

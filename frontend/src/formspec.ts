@@ -119,3 +119,42 @@ export function defaultModel(): ConfigModel {
     extra: {},
   };
 }
+
+
+/**
+ * 远端是否已配置到"tng 可加载且具备出向目标"。与后端
+ * `config::validate_ingress_for_launch` 精确对齐（同一判定语义），用于在 UI 侧提前禁用
+ * 启动、避免事后弹窗：
+ * - `mapping`：每条 `rules[*].out.host` 经首尾空格 trim 后须为合法 IPv4（与 tng
+ *   `mapping_rule::RuleEndpoint.host: Option<Ipv4Addr>` 一致——恰好 4 段、每段
+ *   0-255、**拒绝前导零**）；`rules` 为空数组视为"不拦"（与后端一致）。
+ * - `http_proxy`：`dst_filters.domain` 即便为空，tng 仍加载（仅匹配不到远端），与后端
+ *   一致——不因此禁用启动。
+ * 缺省模板（out.host 留空）→ false，故启动按钮禁用并引导用户去设置填网关 IPv4。
+ */
+export function isRemoteConfigured(model: ConfigModel): boolean {
+  for (const e of model.add_ingress) {
+    if (e.mode !== "mapping") continue;
+    const raw = e.fields["rules"];
+    const rules = (Array.isArray(raw) ? raw : []) as Array<{ out?: { host?: string } }>;
+    if (rules.length === 0) continue;
+    for (const r of rules) {
+      const h = (r?.out?.host ?? "").trim();
+      if (!h || !isValidIpv4(h)) return false;
+    }
+  }
+  return true;
+}
+
+/** 与 `std::net::Ipv4Addr::from_str`（后端 `out.host.parse::<Ipv4Addr>()`）行为一致：
+ * 恰好 4 段、每段 0-255、**拒绝前导零**（单段 "0" 允许、"01"/"010" 不允许）。入参须已 trim。 */
+function isValidIpv4(s: string): boolean {
+  const parts = s.split(".");
+  if (parts.length !== 4) return false;
+  for (const p of parts) {
+    if (!/^\d+$/.test(p)) return false;
+    if (p.length > 1 && p.charCodeAt(0) === 48 /* '0' */) return false;
+    if (Number(p) > 255) return false;
+  }
+  return true;
+}

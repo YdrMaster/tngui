@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from "vue";
+import { ref, provide, onMounted, onBeforeUnmount } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { message } from "ant-design-vue";
 import {
@@ -73,10 +73,12 @@ async function beforeLeaveSettings() {
   markSaved();
 }
 
-async function onMenuClick(e: { key: string }) {
+async function goTo(target: View) {
   if (view.value === "settings") await beforeLeaveSettings();
-  view.value = e.key as View;
+  view.value = target;
 }
+
+provide("navigate", goTo);
 
 onMounted(() => {
   pollRuntime();
@@ -103,7 +105,7 @@ onBeforeUnmount(() => {
             v-for="item in menuItems"
             :key="item.key"
             :type="view === item.key ? 'primary' : 'text'"
-            @click="onMenuClick({ key: item.key })"
+            @click="goTo(item.key as View)"
           >
             <component :is="item.icon" />
             <span style="margin-left:8px">{{ item.label }}</span>

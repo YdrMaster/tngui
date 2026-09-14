@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, inject, onMounted, onBeforeUnmount } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { message } from "ant-design-vue";
 import { getStatus, getOutput, launchTng } from "../tauri";
 import { useTngConfig } from "../composables/useTngConfig";
+import { isRemoteConfigured } from "../formspec";
 import {
   deriveIngressStates,
   deriveIngressInfo,
@@ -44,6 +45,13 @@ const states = computed(() => {
 });
 
 const tngRunning = computed(() => states.value.runtime === "running");
+
+const navigate = inject<(target: "overview" | "inference" | "settings") => void>(
+  "navigate",
+  () => message.info("请点击左侧导航「设置」"),
+);
+const remoteConfigured = computed(() => isRemoteConfigured(model.value));
+const startDisabled = computed(() => !tngRunning.value && !remoteConfigured.value);
 
 const runtimeView = computed<{ state: "ok" | "warn" | "err"; text: string; subtitle: string }>(() => {
   const map: Record<RuntimeState, { state: "ok" | "warn" | "err"; text: string; subtitle: string }> = {
@@ -137,13 +145,29 @@ onBeforeUnmount(() => {
         <h3 style="margin:0 0 4px;font-size:24px;font-weight:650">概览</h3>
         <span style="color:var(--text-secondary)">查看本机可信网关的运行状态、入口配置和远端链路状态。</span>
       </div>
-      <a-button
-        :type="tngRunning ? 'primary' : 'default'"
-        :danger="tngRunning"
-        :loading="launching"
-        @click="onToggle"
-      >{{ tngRunning ? '停止' : '启动' }}</a-button>
+      <a-tooltip :title="startDisabled ? '远端网关地址（out.host）未配置，请先在「设置」填写网关 IPv4' : undefined">
+        <a-button
+          :type="tngRunning ? 'primary' : 'default'"
+          :danger="tngRunning"
+          :loading="launching"
+          :disabled="startDisabled"
+          @click="onToggle"
+        >{{ tngRunning ? '停止' : '启动' }}</a-button>
+      </a-tooltip>
     </div>
+
+    <a-alert
+      v-if="startDisabled"
+      type="warning"
+      showIcon
+      message="尚未配置远端网关地址，启动已禁用"
+      style="margin-bottom:16px"
+    >
+      <template #description>
+        请在「设置 → 入口」的「远端地址端口」填入集群网关 IPv4 地址（out），保存后返回此处启动。
+        <a-button type="link" size="small" @click="navigate('settings')">前往设置 →</a-button>
+      </template>
+    </a-alert>
 
     <div class="ingress-top-strip">
       <IngressStateCard
