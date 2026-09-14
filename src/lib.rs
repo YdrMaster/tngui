@@ -26,6 +26,28 @@ pub struct AppState {
     port: PortCell,
 }
 
+/// 客户端信息：版本取自编译期 `CARGO_PKG_VERSION`、操作系统取自编译期平台常量
+/// （`std::env::consts::OS` 经友好名映射）。供设置页"客户端信息"展示，不写死。
+#[derive(serde::Serialize)]
+pub struct AppInfo {
+    version: String,
+    os: String,
+}
+
+#[tauri::command]
+fn app_info() -> AppInfo {
+    let os = match std::env::consts::OS {
+        "windows" => "Windows",
+        "macos" => "macOS",
+        "linux" => "Linux",
+        other => other,
+    };
+    AppInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        os: os.to_string(),
+    }
+}
+
 /// 启动/重启 tng：收口配置 → 写 tng-runtime.json → spawn `tng launch`。
 /// 返回新子进程 pid。
 #[tauri::command]
@@ -175,7 +197,8 @@ pub fn run() {
             export_config,
             stop_tng,
             save_config,
-            send_inference
+            send_inference,
+            app_info
         ])
         .run(generate_context!())
         .expect("启动 Tauri 失败");

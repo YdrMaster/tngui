@@ -8,7 +8,7 @@ import {
 } from "@ant-design/icons-vue";
 import { defaultFields } from "../formspec";
 import { parse } from "../configmodel";
-import { launchTng, pickImportPath, pickExportPath, importConfig, exportConfig } from "../tauri";
+import { launchTng, pickImportPath, pickExportPath, importConfig, exportConfig, appInfo } from "../tauri";
 import EntryEditor from "../components/EntryEditor.vue";
 import { useTngConfig } from "../composables/useTngConfig";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
@@ -29,6 +29,21 @@ async function pollStatus() {
 pollStatus();
 statusTimer = window.setInterval(pollStatus, 2000);
 if (typeof window !== "undefined") window.addEventListener("beforeunload", () => clearInterval(statusTimer));
+
+// 客户端信息：版本/操作系统取自后端编译期变量（app_info），不写死
+const clientVersion = ref("…");
+const clientOs = ref("…");
+async function fetchAppInfo() {
+  try {
+    const i = await appInfo();
+    clientVersion.value = i.version;
+    clientOs.value = i.os;
+  } catch {
+    clientVersion.value = "未知";
+    clientOs.value = "未知";
+  }
+}
+fetchAppInfo();
 
 // 本地 URL 取自结构化 ingress 的第一条监听端口（与 InferenceView 同源）
 const localUrl = computed(() => {
@@ -215,8 +230,8 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
     <!-- 客户端信息 -->
     <a-card title="客户端信息" class="client-info-card">
       <a-descriptions :column="3" bordered>
-        <a-descriptions-item label="客户端版本">v0.2.1-dev</a-descriptions-item>
-        <a-descriptions-item label="操作系统">Desktop</a-descriptions-item>
+        <a-descriptions-item label="客户端版本">{{ clientVersion }}</a-descriptions-item>
+        <a-descriptions-item label="操作系统">{{ clientOs }}</a-descriptions-item>
         <a-descriptions-item label="更新通道">稳定版(OTA)</a-descriptions-item>
       </a-descriptions>
     </a-card>

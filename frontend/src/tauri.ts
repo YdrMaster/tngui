@@ -26,6 +26,15 @@ export async function launchTng(configJson: string): Promise<number> {
   return invoke<number>("launch_tng", { configJson });
 }
 
+/** 客户端信息：版本（编译期 CARGO_PKG_VERSION）与操作系统（编译期平台常量）。 */
+export interface AppInfo {
+  version: string;
+  os: string;
+}
+export async function appInfo(): Promise<AppInfo> {
+  return invoke<AppInfo>("app_info");
+}
+
 /** 原生"打开文件"对话框，返回所选路径或 null（取消）。 */
 export async function pickImportPath(): Promise<string | null> {
   const p = await openDialog({
