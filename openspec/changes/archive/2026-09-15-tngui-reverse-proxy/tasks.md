@@ -19,7 +19,7 @@
 - [x] 3.1 更新 `docs/tngui-ui-guide.md`：本机端口 = 反代对外绑定（host toggle + port）、tng 本地监听对用户隐藏、推理统一经反代、D1 toggle 语义、x-model 由反代按 body.model 注入且对已带 x-model 覆盖。— verify：描述与 spec 一致
 - [x] 3.2 前端 `npx vue-tsc --noEmit` / `npx vitest run` 绿；后端 `cargo fmt --check -p tngui-app` + `cargo test -p tngui-core` 绿（tngui-app GUI 编译在 Windows 验证）。— verify：退出码 0
 - [x] 3.3 `openspec validate tngui-reverse-proxy` 通过。— verify：退出码 0
-- [ ] 3.4 人工冒烟（Windows）：启动 tng → 反代对外端点可达；curl 反代 `/v1/chat/completions`（含 model + Authorization）→ 200、网关收到 `x-model`；客户端自带 `x-model`（与 body.model 不一致）被覆盖为 body.model；0.0.0.0 toggle 可对外、默认 127.0.0.1；外部客户端连接的是反代而非 tng 内部 ingress 端口；tng-runtime.json 中 `control_interface.restful.port` 与各 ingress 内部端口两两不同、且无一等于对外端口（不再复现单点探测占走对外 9443 的 10048）。— verify：观察到如述
+- [x] 3.4 人工冒烟（Windows）：启动 tng → 反代对外端点可达；curl 反代 `/v1/chat/completions`（含 model + Authorization）→ 200、网关收到 `x-model`；客户端自带 `x-model`（与 body.model 不一致）被覆盖为 body.model；0.0.0.0 toggle 可对外、默认 127.0.0.1；外部客户端连接的是反代而非 tng 内部 ingress 端口；tng-runtime.json 中 `control_interface.restful.port` 与各 ingress 内部端口两两不同、且无一等于对外端口（不再复现单点探测占走对外 9443 的 10048）。— verify：观察到如述
 
 
 ## 4. 密态推理调试门锁放宽 + model 迁页（扩展）
@@ -54,3 +54,16 @@
 - [x] 6.5 `frontend/src/components/EntryEditor.vue`：`ensureDstFilters` 兼容带 scheme 前缀 input；https 输入不改回写 dst_filters（前缀仅由 tls 字段派生直到序列化）；`defaultFields` 默认含 `https://` 前缀或占位提示。— verify：`npx vue-tsc --noEmit` 绿
 - [x] 6.6 `docs/tngui-ui-guide.md`：说明域名框前缀语义（https→tls）与"Host 会带端口"行为；密态推理 curl 示例注明上游对应关系。— verify：描述与 spec 一致
 - [x] 6.7 `openspec validate tngui-reverse-proxy` 通过；前端 `npx vue-tsc --noEmit`+`npx vitest run`；后端 `cargo fmt --check`+`cargo test -p tngui-core`；tng 实测 https 上游 Host 带端口推理成功（本地 dragon 大致同型）。— verify：退出码 0 且实测 200
+
+
+## 7. send_inference 响应成帧兼容 + 非 JSON 错误摘要（扩展）
+
+- [x] 7.1 `tngui-core/src/inference.rs::http_request`：字节层切分响应头；`Transfer-Encoding: chunked` 时按 RFC7230 剥帧（忽略 trailer、10MiB 上限、帧异常沿用原字节）；既有 Content-Length/EOF 路径不变。— verify：单测覆盖 chunked 200 解析与原 Content-Length 路径
+- [x] 7.2 `tngui-core/src/inference.rs::send_inference`：2xx 非 JSON / 非 2xx 失败带响应诊断（后续第 8 节统一扩展为请求+响应详情，正文上限 8000 字符）。— verify：单测覆盖 2xx HTML 响应错误含正文
+- [x] 7.3 回归 + 实测：`cargo fmt/test` 绿；本地 tng 2.9.2 实测（variant A/B/C `ohttp.tls` 组合）确认 200 走 chunked、锁定 3 头与 `x-api-key` 有无不影响成败（上游 403/502 为 WAF/限流，tngui 不绕行）。— verify：退出码 0 且实测日志留档
+
+## 8. 推理失败调试详情展示（扩展）
+
+- [x] 8.1 `tngui-core/src/inference.rs`：`http_request` 保留原始请求与响应；失败路径返回带脱敏请求、`Authorization` 隐藏、状态头和解码后正文的诊断（无 HTTP 响应时明确标注）；chunked 解码正文后才截断展示（最多 8000 字符）。— verify：后端单测覆盖 2xx 非 JSON、非 2xx、连接无响应都含请求调试，且不显示 Authorization 原值
+- [x] 8.2 更新 `docs/tngui-ui-guide.md`；`frontend/src/views/InferenceView.vue` 失败时响应框多行展示后端诊断，不再只显示一行“发送失败”；成功仍只显示 assistant 文本。— verify：文档与 spec 一致；`npx vue-tsc --noEmit` 绿
+- [x] 8.3 更新 spec/design/tasks 后回归 `cargo fmt/test -p tngui-core`、前端 `vue-tsc/vitest`、`openspec validate`。— verify：退出码 0

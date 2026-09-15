@@ -24,6 +24,7 @@ const sending = ref(false);
 const phase = ref(4);
 const phaseTimer = ref<number | undefined>(undefined);
 const statusCode = ref(0);
+const failed = ref(false);
 // 反代对外端口（取自 proxy_endpoint[0].port）：tng 未启动时为 null。
 const proxyPort = ref<number | null>(null);
 let proxyTimer: number | undefined;
@@ -69,7 +70,7 @@ async function onSend() {
   if (!usable.value) { message.warning("请先在「概览」启动 TNG 网关（显示运行）并在「设置」配置 API Key"); return; }
   if (!prompt.value.trim()) { message.warning("请输入测试内容"); return; }
   if (proxyPort.value === null) { message.warning("网关对外端口未就绪，无法发送"); return; }
-  sending.value = true; output.value = ""; statusCode.value = 0; phase.value = 0;
+  sending.value = true; output.value = ""; statusCode.value = 0; failed.value = false; phase.value = 0;
   let step = 0;
   phaseTimer.value = window.setInterval(() => {
     step += 1; phase.value = step;
@@ -79,11 +80,12 @@ async function onSend() {
     const result = await invoke<string>("send_inference", {
       port: proxyPort.value, model: inferenceModel.value, apiKey: apiKey.value, prompt: prompt.value,
     });
-    window.clearInterval(phaseTimer.value); phase.value = 4; statusCode.value = 200;
+    window.clearInterval(phaseTimer.value); phase.value = 4; statusCode.value = 200; failed.value = false;
     output.value = result;
   } catch (e) {
     window.clearInterval(phaseTimer.value); phase.value = 1;
-    output.value = "发送失败: " + String(e);
+    statusCode.value = 0; failed.value = true;
+    output.value = String(e);
   } finally { sending.value = false; }
 }
 </script>
@@ -143,6 +145,10 @@ async function onSend() {
                     <a-tag color="success">200 OK</a-tag>
                     <span style="color:var(--text-secondary)">响应已在本地解密</span>
                   </span>
+                  <span v-else-if="failed" style="display:flex;gap:8px;align-items:center">
+                    <a-tag color="error">请求失败</a-tag>
+                    <span style="color:var(--text-secondary)">调试详情（Authorization 已脱敏）</span>
+                  </span>
                 </template>
                 <div class="response-panel">
                   <div v-if="sending" class="sending-state">
@@ -165,7 +171,8 @@ async function onSend() {
                     <SecureFlow :activeIndex="phase" style="width:100%;transform:scale(.9)" />
                   </div>
                   <div v-else-if="output" style="padding:8px">
-                    <p class="response-text" style="white-space:pre-line;font-size:15px;line-height:1.85">{{ output }}</p>
+                    <pre v-if="failed" class="code-block response-debug" style="white-space:pre-wrap;overflow:auto;max-height:650px;margin:0">{{ output }}</pre>
+                    <p v-else class="response-text" style="white-space:pre-line;font-size:15px;line-height:1.85">{{ output }}</p>
                   </div>
                   <div v-else class="empty-response">
                     <ExperimentOutlined style="font-size:46px;color:#bfbfbf" />

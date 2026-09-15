@@ -36,7 +36,7 @@
 ### x-model 处理（以 body.model 为准、覆盖既有）
 
 反代 handler 读取并缓存完整 body（非流式，设上限），解析为 JSON：
-- body 含 `model` 字段 → 在转发前设置 `x-model: <body.model>`；若请求**已带** `x-model` 则**覆盖**之（不沿用客户端发来值），body 不改写。
+- body 含 `model` 字段 → 在转发前设置 `x-model: <body.model>`；若请求**已带** `x-model` 则**覆盖**之（不沿用客户端发来值），body 除剥离 UTF-8 BOM 外不改写。
 - body 无 `model` 或非 JSON → 不设置/覆盖 `x-model`、原样转发请求与响应（既有的客户端 `x-model` 头原样透传——不构成绕过：`/v1/chat/completions` 缺 `model` 时下游按 OpenAI 规范拒绝）。
 - 决策：无 model 的客带 `x-model` 透传而不剥离，与用户给出的"带就覆盖"边界一致（覆盖仅在由 `body.model` 驱动时发生）。备选"无 model 时剥离客带 x-model"为更强隔离，记为可选加固。
 
@@ -89,6 +89,34 @@
 - `tls` 是前端内部字段（`EntryModel.tls`），不是用户可切换控件，完全由前缀驱动（单一事实来源，避免"前缀"与"开关"两处不一致）；无前缀/= http:// 都不派生 `tls`，与既有明文内部端口（如 30090）部署向后兼容。
 - 与"客户端 ingress 锁定 OHTTP 协议"协调：**写死** 的是 `header_passthrough` 三头，`tls` 按上述规则派生；两者同一 `ohttp` 对象内共存（`{ header_passthrough: [...], tls: true }`）。
 - `parse` 导入同样读 `ohttp.tls` 回填 `tls`，并在域名框展示时带 `https://` 前缀（`tls=true` 时）——往返一致。
+
+### 推理响应成帧兼容：chunked 与 Content-Length 均可解析（修 `JSON 解析失败`）
+
+实测（tng 2.9.2，上游 `https://inference.cloud.misuan.com:443`）：**成功响应为
+`Transfer-Encoding: chunked`、无 `Content-Length`**；tng 侧网关错误（如上游
+WAF 403/限流致 `HttpCipherTextBadResponse` 502）为 `Content-Length` 成帧。
+`send_inference` 原实现只按"读到 EOF"取体、不剥 chunk 帧，chunk 尺寸/帧分隔符混进
+JSON → `响应 JSON 解析失败: expected value at line 1 column 1`。
+
+- `send_inference`：字节层切响应头，`Transfer-Encoding: chunked` 时按 RFC 7230
+  剥帧（忽略 trailer、上限 10MiB，帧异常时沿用原字节让 JSON 解析报真实错误）。
+- 非 JSON（2xx：WAF 页；非 2xx：网关错误 JSON 之外的形态）→ 失败诊断带
+  响应头和解码后正文（上限 8000 字符），便于区分"网关错误/上游拦截页/真实回复"。
+- 上游 403/502 `HttpCipherTextBadResponse`（body 空/HTML）为**上游 WAF/限流**
+  行为——与请求头无关（实测锁定 3 头 `header_passthrough` 与去 `x-api-key`
+  均不影响；同一配置数分钟前 200 后 502），tngui 只需保证错误可见，不绕行。
+
+### 推理失败调试详情展示（扩展）
+
+失败只给一行摘要会掩盖“实际发了什么、收到什么”。因此 `send_inference` 的失败路径
+返回结构化文本诊断，前端响应框原样多行展示：
+
+- 请求文本：`POST /v1/chat/completions`、`Host`、认证值之外的常规头和 body；
+  `Authorization` 值脱敏为 `Bearer <已隐藏>`，避免 API Key 出现在 UI/剪贴板。
+- 响应文本：收到 HTTP 响应时展示状态行、响应头和解码后正文（chunked 已剥帧；
+  正文最多截取 8000 字符用于 UI 展示）。
+- 无响应：连接/写/读失败时显示“无 HTTP 响应”和底层错误；请求仍在响应框可见。
+- 该详情只在当次发送的响应框内存态展示，随下一次请求覆盖，不持久化。
 
 ### http_proxy dst_filters 拆分主机名+端口并以数组序列化（扩展）
 

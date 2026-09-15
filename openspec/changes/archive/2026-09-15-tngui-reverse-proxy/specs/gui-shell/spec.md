@@ -2,7 +2,7 @@
 
 ### Requirement: tngui 反向代理对外暴露推理入口并注入 x-model 头
 
-系统须（SHALL）在 tng 运行期间由 tngui 自身运行一个常驻 HTTP 反向代理作为推理对外入口：反代随 tng 启动而启动、随 tng 停止而停止。反代的对外绑定地址由用户配置——`host` 可在 `127.0.0.1`（仅本机）与 `0.0.0.0`（对外网卡）之间切换（默认 `127.0.0.1`），`port` 为用户可配的"本机端口"。反代为完整反代：把收到的请求 `method`/`path`/`header`/`body` 转发到 tng 的内部 ingress 本地监听（仅 `127.0.0.1:<tngui 注入的空闲端口>`，见"ingress 本地监听强制走回环"），并原样回传响应（先支持非流式，OpenAI 兼容默认）。反代须（SHALL）对收到的请求：读取并解析 JSON `body` 取 `model` 字段；当 `body` 为含 `model` 字段的 JSON 时，在转发前设置 `x-model: <body.model>` 头——以 `body.model` 为准，若请求已携带 `x-model` 则随之覆盖、不沿用客户端发来的值（与客户端 ingress 锁定 OHTTP `header_passthrough` 中已含的 `x-model` 对齐，经 OHTTP 隧道透传给网关），且不改写 `body`；不含 `model` 字段或 `body` 非 JSON 时不设置/覆盖 `x-model`、原样转发请求与响应。系统绝不（MUST NOT）把 tng 的 ingress 本地监听端口直接暴露给外部客户端——对外只经反代。系统绝不（MUST NOT）链接任何 tng crate——反代是 tngui 自有进程内的 HTTP 服务，与 tng 仅经其 ingress 本地监听端口做 HTTP 转发。
+系统须（SHALL）在 tng 运行期间由 tngui 自身运行一个常驻 HTTP 反向代理作为推理对外入口：反代随 tng 启动而启动、随 tng 停止而停止。反代的对外绑定地址由用户配置——`host` 可在 `127.0.0.1`（仅本机）与 `0.0.0.0`（对外网卡）之间切换（默认 `127.0.0.1`），`port` 为用户可配的"本机端口"。反代为完整反代：把收到的请求 `method`/`path`/`header`/`body` 转发到 tng 的内部 ingress 本地监听（仅 `127.0.0.1:<tngui 注入的空闲端口>`，见"ingress 本地监听强制走回环"），并原样回传响应（先支持非流式，OpenAI 兼容默认）。反代须（SHALL）对收到的请求：读取并解析 JSON `body` 取 `model` 字段；当 `body` 为含 `model` 字段的 JSON 时，在转发前设置 `x-model: <body.model>` 头——以 `body.model` 为准，若请求已携带 `x-model` 则随之覆盖、不沿用客户端发来的值（与客户端 ingress 锁定 OHTTP `header_passthrough` 中已含的 `x-model` 对齐），且只剥离 JSON body 开头的 UTF-8 BOM、其余不改写 `body`；不含 `model` 字段或 `body` 非 JSON 时不设置/覆盖 `x-model`、原样转发请求与响应。系统绝不（MUST NOT）把 tng 的 ingress 本地监听端口直接暴露给外部客户端——对外只经反代。系统绝不（MUST NOT）链接任何 tng crate——反代是 tngui 自有进程内的 HTTP 服务，与 tng 仅经其 ingress 本地监听端口做 HTTP 转发。
 
 #### Scenario: 反代随 tng 生命周期启停
 
@@ -12,7 +12,7 @@
 #### Scenario: 含 model 的推理请求被注入 x-model 后转发
 
 - **WHEN** 客户端以 OpenAI 兼容请求（JSON `body` 含 `model` 与 `messages`、`Authorization` 头）访问反代对外端点
-- **THEN** 反代在转发给 tng 内部 ingress 前注入 `x-model: <body.model>` 头（若请求已带 `x-model` 则覆盖）、不改动 `body`，并把响应原样回传给客户端
+- **THEN** 反代在转发给 tng 内部 ingress 前剥离 JSON body 开头的 UTF-8 BOM（若有）、注入 `x-model: <body.model>` 头（若请求已带 `x-model` 则覆盖），其余 body 不改动，并把响应原样回传给客户端
 
 #### Scenario: 请求自带 x-model 被覆盖为 body.model
 
@@ -134,6 +134,16 @@ tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`
 - **WHEN** tngui 反代把请求转发给 tng 内部 `http_proxy` ingress
 - **THEN** 请求 `Host` 头使用 tngui 远端目标——`dst_filters` 配了有效端口时为 `<domain>:<port>`，未配有效端口时为 `<domain>`（tng 据此 `Host` 头的 host 与端口解析其上游目标；`dst_filters.port` 不决定上游端口）
 
+#### Scenario: 推理响应按 Content-Length 或 chunked 成帧均可解析
+
+- **WHEN** tng/上游以 `Transfer-Encoding: chunked` 或 `Content-Length` 成帧返回非流式推理响应（实测 tng 2.9.2 成功响应走 chunked）
+- **THEN** 密态推理发送逻辑剥除 chunk 帧（或按长度读取）后解析 `choices[0].message.content`，输出区显示真实回复文本——绝不（MUST NOT）把 chunk 尺寸/帧分隔符混进 JSON 而报"解析失败"
+
+#### Scenario: 非 JSON/非 2xx 响应报可读调试详情
+
+- **WHEN** 密态推理发送链路收到 2xx 但响应体非 JSON（如上游 WAF 拦截页 HTML）或非 2xx（如 tng 网关 `HttpCipherTextBadResponse` 502/403）
+- **THEN** 输出区显示失败摘要、脱敏请求与响应原文（正文截断上限 8000 字符）；绝不（MUST NOT）只报"JSON 解析失败"而不带任何上下文
+
 #### Scenario: https 上游经反代加密可达
 
 - **WHEN** 用户以 `域名` 框输入 `https://<域名>` + 端口 `<TLS/HTTPS 端口>` 配置远端并启动 tng（反代 + tng 均就绪）
@@ -209,6 +219,13 @@ tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`
 
 - **WHEN** 用户再次发送推理请求
 - **THEN** 输出区覆盖为最新响应；不显示历史请求列表
+
+#### Scenario: 失败响应框展示脱敏请求与响应调试内容
+
+- **WHEN** 密态推理发送失败且失败发生在请求已构建之后（连接失败、读响应失败、非 2xx、响应非 JSON 或响应缺少 content）
+- **THEN** 响应框显示失败摘要，并显示本次发出的请求文本与收到的响应原文；请求中的 `Authorization` 值必须脱敏，响应正文按 Content-Length/EOF 或解码后的 chunked 内容展示
+- **WHEN** 请求在建立连接/读取响应阶段没有收到任何 HTTP 响应
+- **THEN** 响应框仍显示失败摘要、脱敏请求，以及明确的“无 HTTP 响应”诊断；失败详情只在本次响应框展示，不保留历史
 
 #### Scenario: RA 过程占位
 

@@ -12,7 +12,8 @@
 //! - `x-model`：解析 JSON body 取 `model`；含 `model` 字段则在转发前设
 //!   `x-model: <model>`——若请求已带 `x-model` 则**覆盖**之（不沿用客户端发来的值），
 //!   且不改写 body；无 `model` 或 body 非 JSON 时不设/覆盖 `x-model`、原样转发
-//!   （既有的客户端 `x-model` 头原样透传）。
+//!   （既有的客户端 `x-model` 头原样透传）。例外：JSON body 前的 UTF-8 BOM
+//!   会在转发前剥离（PowerShell 5 写出的 JSON 文件常见且不是合法 JSON）。
 //!
 //! 实现：原生 tokio TCP（无额外依赖，与 `inference.rs` 同向；design D2 由 axum 调整为
 //! 原生 TCP：本沙箱网络受限、避免拉新依赖、与 codebase 风格一致，且非流式单跳足够）。
@@ -167,7 +168,14 @@ async fn handle_conn(
         body.truncate(n);
     }
 
-    // 3. x-model：解析 body.model；含 model（字符串）则设/覆盖 x-model；无则不设
+    // 3. JSON body 对非 JSON Content-Type 不动；对 JSON Content-Type 剥离
+    //    UTF-8 BOM（PowerShell 5 的 Out-File -Encoding utf8 会写入 BOM），
+    //    否则客户端合法 JSON 会被反代判为非 JSON，body 也会被上游拒绝。
+    if is_json_content_type(&headers) && body.starts_with(UTF8_BOM) {
+        body.drain(0..UTF8_BOM.len());
+    }
+
+    // x-model：解析 body.model；含 model（字符串）则设/覆盖 x-model；无则不设
     if let Some(m) = parse_body_model(&body) {
         set_header(&mut headers, "x-model", &m);
     }
@@ -314,6 +322,17 @@ fn strip_hop_by_hop(h: &mut Headers) {
     });
 }
 
+/// UTF-8 BOM 字节；Windows PowerShell 5 的 `-Encoding utf8` 会加入。
+const UTF8_BOM: &[u8; 3] = b"\xEF\xBB\xBF";
+
+/// 仅把 `application/json`（可含 media 参数）识别为 JSON body。
+fn is_json_content_type(headers: &Headers) -> bool {
+    header_get(headers, "content-type")
+        .and_then(|v| v.split(';').next())
+        .map(|v| v.trim().eq_ignore_ascii_case("application/json"))
+        .unwrap_or(false)
+}
+
 fn parse_body_model(body: &[u8]) -> Option<String> {
     if body.is_empty() {
         return None;
@@ -356,9 +375,19 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::{Mutex, Notify};
 
-    /// 起 mock upstream：读一行请求（到 \r\n\r\n + body），取出 `x-model` 头值，
-    /// 回 200 + JSON，其 content 标注收到的 x-model。
-    async fn mock_upstream(port: u16, received: Arc<Mutex<Option<String>>>, ready: Arc<Notify>) {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct MockReceived {
+        x_model: Option<String>,
+        body: Vec<u8>,
+    }
+
+    /// 起 mock upstream：读一行请求（到 \r\n\r\n + body），取出 `x-model` 头值、
+    /// 收到的 body，回 200 + JSON，其 content 标注收到的 x-model。
+    async fn mock_upstream(
+        port: u16,
+        received: Arc<Mutex<Option<MockReceived>>>,
+        ready: Arc<Notify>,
+    ) {
         let l = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
         ready.notify_one();
         let (mut s, _) = l.accept().await.unwrap();
@@ -368,8 +397,11 @@ mod tests {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("x-model"))
             .map(|(_, v)| v.clone());
-        let _body_recvd = &buf[body_off..]; // body 字节（测试不做内容校验）
-        *received.lock().await = x_model.clone();
+        let body_recvd = buf[body_off..].to_vec();
+        *received.lock().await = Some(MockReceived {
+            x_model: x_model.clone(),
+            body: body_recvd,
+        });
         let echoed = x_model.unwrap_or_else(|| "<none>".to_string());
         let body = format!("{{\"got_x_model\":\"{echoed}\"}}");
         let resp = format!(
@@ -380,35 +412,15 @@ mod tests {
         s.flush().await.unwrap();
     }
 
-    async fn send_request(out_port: u16, headers: &[(&str, &str)], body: &str) -> String {
-        let mut s = TcpStream::connect(("127.0.0.1", out_port)).await.unwrap();
-        let mut req = format!(
-            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{out_port}\r\nContent-Length: {}\r\n",
-            body.len()
-        );
-        for (k, v) in headers {
-            req.push_str(&format!("{k}: {v}\r\n"));
-        }
-        req.push_str("\r\n");
-        req.push_str(body);
-        s.write_all(req.as_bytes()).await.unwrap();
-        s.flush().await.unwrap();
-        let mut out = Vec::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf))
-                .await
-                .unwrap()
-                .unwrap();
-            if n == 0 {
-                break;
-            }
-            out.extend_from_slice(&buf[..n]);
-        }
-        String::from_utf8_lossy(&out).to_string()
+    async fn run_once(client_headers: &[(&str, &str)], body: &str) -> (String, Option<String>) {
+        let (resp, received) = run_once_full(client_headers, body.as_bytes().to_vec()).await;
+        (resp, received.and_then(|x| x.x_model))
     }
 
-    async fn run_once(client_headers: &[(&str, &str)], body: &str) -> (String, Option<String>) {
+    async fn run_once_full(
+        client_headers: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> (String, Option<MockReceived>) {
         let up_port = unique_port();
         let out_port = unique_port();
         let received = Arc::new(Mutex::new(None));
@@ -429,14 +441,64 @@ mod tests {
         }])
         .await
         .unwrap();
-        let resp = send_request(out_port, client_headers, body).await;
+        let resp = send_request_bytes(out_port, client_headers, body).await;
         handle.stop().await;
         let got = received.lock().await.clone();
         (resp, got)
     }
 
+    async fn send_request_bytes(out_port: u16, headers: &[(&str, &str)], body: Vec<u8>) -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", out_port)).await.unwrap();
+        let req_head = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{out_port}\r\nContent-Length: {}\r\n",
+            body.len()
+        );
+        let mut req = req_head.into_bytes();
+        for (k, v) in headers {
+            req.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
+        }
+        req.extend_from_slice(b"\r\n");
+        req.extend_from_slice(&body);
+        s.write_all(&req).await.unwrap();
+        s.flush().await.unwrap();
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        String::from_utf8_lossy(&out).to_string()
+    }
+
     fn unique_port() -> u16 {
         crate::config::pick_free_port().unwrap()
+    }
+
+    #[tokio::test]
+    async fn strips_utf8_bom_from_json_body_and_injects_model() {
+        let json = br#"{"model":"ps5", "messages":[]}"#;
+        let mut body = b"\xEF\xBB\xBF".to_vec();
+        body.extend_from_slice(json);
+        let (resp, got) = run_once_full(
+            &[
+                ("Authorization", "Bearer key"),
+                ("Content-Type", "application/json"),
+            ],
+            body,
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
+        assert_eq!(
+            got.as_ref().map(|x| x.x_model.as_deref()),
+            Some(Some("ps5"))
+        );
+        assert_eq!(got.map(|x| x.body), Some(json.to_vec()));
     }
 
     #[tokio::test]
