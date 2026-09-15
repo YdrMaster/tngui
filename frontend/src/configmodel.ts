@@ -38,7 +38,14 @@ function serializeEntry(e: EntryModel): Record<string, unknown> {
   } else {
     obj.verify = e.verify ? { ...e.verify } : { ...DEFAULT_VERIFY };
   }
-  obj.ohttp = JSON.parse(JSON.stringify(LOCKED_OHTTP));
+  const ohttp = JSON.parse(JSON.stringify(LOCKED_OHTTP)) as Record<string, unknown>;
+  // http_proxy：`ohttp.tls` 由域名框前缀派生——带 `https://` 前缀 → `tls: true`（tng 以
+  // TLS 连上游，如 https://…:443）；带 `http://` 前缀或不带前缀 → 不写 `tls`
+  // （保持 `ohttp: {header_passthrough: …}` 原形态，明文如内网 :30090 端口向后兼容）。
+  if (e.mode === "http_proxy" && deriveHttpProxyTls(e)) {
+    ohttp["tls"] = true;
+  }
+  obj.ohttp = ohttp;
   obj.tngui_outward = { host: e.outward.host, port: e.outward.port };
   for (const [k, v] of Object.entries(e.extra)) obj[k] = v;
   return obj;
@@ -62,14 +69,35 @@ function mappingFields(fields: Record<string, unknown>): Record<string, unknown>
   };
 }
 
+/** 域名框文本的 scheme 前缀（大小写不敏感）：`https` / `http` / 无前缀 `null`。 */
+function schemePrefix(domain: string): "https" | "http" | null {
+  const m = /^https?:\/\//i.exec(domain);
+  if (!m) return null;
+  return m[0].toLowerCase().startsWith("https") ? "https" : "http";
+}
+
+/** http_proxy 的 `ohttp.tls` 值：域名框带 `https://` 前缀优先（→ true）、
+ *  带 `http://` 前缀一律 false、无前缀回退到 `EntryModel.tls`
+ *  （parse 从 `ohttp.tls` 回填）。mapping 不涉及。 */
+function deriveHttpProxyTls(e: EntryModel): boolean {
+  const d = (e.fields.dst_filters ?? {}) as Record<string, unknown>;
+  const prefix = schemePrefix(strOr(d.domain, ""));
+  if (prefix === "https") return true;
+  if (prefix === "http") return false;
+  return e.tls === true;
+}
+
 /** 序列化为 TNG 配置形状（内部模型 → 输出）：剥除 tng 本地监听 host/port（`in`/`proxy_listen`
  *  输出为空对象，由 tngui 启动注入）；http_proxy 的 `dst_filters` 输出为 tng 实际接受的数组
- *  `[{domain, port}]`——主机名仅含主机名、端口走独立 `port` 字段，绝不把端口拼进 `domain`；
- *  端口为空（0/越界）时省略 `port`，tng 即 `port_match: None`（匹配任意端口）。 */
+ *  `[{domain, port}]`——主机名仅含主机名（剥离 scheme 前缀）、端口走独立 `port` 字段，
+ *  绝不把端口拼进 `domain`；端口为空（0/越界）时省略 `port`，tng 即 `port_match: None`
+ *  （匹配任意端口）。 */
 function serializeFields(mode: IngressMode, fields: Record<string, unknown>): Record<string, unknown> {
   if (mode === "mapping") return mappingFields(fields);
   const df = (fields.dst_filters ?? {}) as Record<string, unknown>;
-  const dst: Record<string, unknown> = { domain: strOr(df.domain, "") };
+  // 剥离域名框可写的 scheme 前缀——tng `dst_filters.domain` 只认主机名，前缀仅驱动 tls。
+  const domain = strOr(df.domain, "").replace(/^https?:\/\//i, "");
+  const dst: Record<string, unknown> = { domain };
   const p = df.port;
   if (typeof p === "number" && Number.isFinite(p) && p >= 1 && p <= 65535) dst.port = p;
   return { proxy_listen: {}, dst_filters: [dst] };
@@ -170,6 +198,28 @@ function parseEntry(
   }
 
   const fieldsRaw = (e[mode] ?? {}) as Record<string, unknown>;
+  // http_proxy：域名前缀（`https://`/`http://`）与 `ohttp.tls` 派生前端内部 `tls`——
+  // 带前缀以输入为准（https→true、http→false），无前缀回退 `ohttp.tls`；框内文本
+  // 统一回填：保留用户敲入的前缀、或无前缀且 tls=true 时补 `https://` 前缀回显。
+  // tng 的 `dst_filters.domain` 不含前缀（serialize 侧再剥离）。
+  let tls: boolean | undefined;
+  if (mode === "http_proxy") {
+    const ohttpObj = (e.ohttp ?? {}) as Record<string, unknown>;
+    const dfRaw = fieldsRaw.dst_filters;
+    const readDom = (): string => {
+      const first = Array.isArray(dfRaw) ? (dfRaw[0] as Record<string, unknown> | undefined) : (dfRaw as Record<string, unknown> | undefined);
+      return first && typeof first === "object" ? strOr(first.domain, "") : "";
+    };
+    const raw = readDom();
+    const prefix = schemePrefix(raw);
+    tls = prefix === "https" ? true : prefix === "http" ? false : ohttpObj["tls"] === true;
+    const boxed = prefix !== null ? raw : tls ? `https://${raw}` : raw;
+    const writeDom = (o: unknown): void => {
+      if (o && typeof o === "object") (o as Record<string, unknown>).domain = boxed;
+    };
+    if (Array.isArray(dfRaw)) dfRaw.forEach(writeDom);
+    else writeDom(dfRaw);
+  }
   const fields = normalizeFields(mode, fieldsRaw);
 
   let no_ra: boolean;
@@ -193,7 +243,7 @@ function parseEntry(
   delete extra.ohttp;
   delete extra.tngui_outward;
 
-  return { model: { mode, fields, no_ra, verify, outward, extra } };
+  return { model: { mode, fields, no_ra, verify, outward, tls, extra } };
 }
 
 /** 解析 `tngui_outward`：host 仅认 127.0.0.1/0.0.0.0，port 须为数字；缺失/非法用 `DEFAULT_OUTWARD`。 */

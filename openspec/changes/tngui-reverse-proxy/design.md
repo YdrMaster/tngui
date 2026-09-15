@@ -67,6 +67,29 @@
 
 修正：`ProxyRoute` 增 `remote_host`（`config.rs::read_remote_host` 取 `mapping` 首条规则 `out.host`、`http_proxy` 取 `dst_filters` 数组首元素 `dst_filters[0].domain`——`dst_filters` 现序列化为数组 `[{domain, port}]`；`mapping` 的 `out.host` 已由 `validate_required_remote` 保证非空 IPv4）；`handle_conn` 转发时 `Host` 设为该远端非本机地址（空串仅见于 http_proxy 未配 domain 的退化情形，退回原内部地址）。x-model 注入与原样转发不变。
 
+### 反代转发 Host 须含 dst 端口（修 tng 按 Host 头定上游端口）
+
+实测（tng 2.9.2）：`http_proxy` ingress 的**转发上游目标完全由请求 `Host` 头（含端口）决定**——`dst_filters.port` 仅参与 ingress 匹配，不决定实际转发端口：
+
+- `Host: domain`（不带端口）→ tng 转发到 `domain:80`（encrypted=false，打到 443 上游时被其前方 WAF / 非 TLS 层拦截）
+- `Host: domain:443` + `ohttp.tls=true` → tng 转发到 `domain:443`、`encrypted=true`、推理请求成功返回
+
+因此 `read_remote_host` 行为升级：`http_proxy` 读取 `dst_filters[0]` 的 `domain` **与同一元素的 `port`**，`port` 为有效 1–65535 时返回 `domain:port`、否则返回裸 `domain`（与 serialize 省略非法端口的口径一致）。`ProxyRoute.remote_host` 的语义随之从"远端 host"扩为"远端 host[:port]"（`handle_conn` 把它直接用作 Host 头、无需改动）。`mapping` 分支不改（mapping 转发目标是 `out.host:out.port`，不依赖 Host 头，维持现状以缩小影响面）。
+
+### `ohttp.tls` 派生自域名 scheme 前缀（域名框接受 `http://` / `https://`）
+
+`ohttp.tls` 决定 tng 是否以 TLS 连接上游（对 https 上游必须 `true`，明文上游须缺省）。为让 https 链路从 UI 可用，`http_proxy` 远端域名框接受可选 `http://` / `https://` 前缀，由前缀派生 `ohttp.tls`、并剥离前缀供 `dst_filters.domain`：
+
+| 域名框输入 | 前端内部 `tls` | serialize 的 `ohttp` | `dst_filters.domain` |
+|---|---|---|---|
+| `https://a.com` | `true` | 带 `tls: true` | `a.com` |
+| `http://a.com` | `false` | 不带 `tls`（保持 `ohttp:{}`） | `a.com` |
+| `a.com` | `false` | 不带 `tls` | `a.com` |
+
+- `tls` 是前端内部字段（`EntryModel.tls`），不是用户可切换控件，完全由前缀驱动（单一事实来源，避免"前缀"与"开关"两处不一致）；无前缀/= http:// 都不派生 `tls`，与既有明文内部端口（如 30090）部署向后兼容。
+- 与"客户端 ingress 锁定 OHTTP 协议"协调：**写死** 的是 `header_passthrough` 三头，`tls` 按上述规则派生；两者同一 `ohttp` 对象内共存（`{ header_passthrough: [...], tls: true }`）。
+- `parse` 导入同样读 `ohttp.tls` 回填 `tls`，并在域名框展示时带 `https://` 前缀（`tls=true` 时）——往返一致。
+
 ### http_proxy dst_filters 拆分主机名+端口并以数组序列化（扩展）
 
 `域名`（`http_proxy`）远端原为单文本 `domain`（`dst_filters` 序列化为对象 `{domain}`，与 tng 实际 `dst_filters` 数组 schema 不符、且端口无处放）。现改为：主机名 `domain` + 端口 `port` 两个控件；内部模型 `fields.dst_filters` 仍为单一对象 `{domain, port}`（一条 dst），`serialize` 输出为数组 `[{domain, port}]`（端口为空时省略 `port`，`port_match` 即匹配任意端口，tng 接受）；`parse` 同时兼容新数组 `[{domain, port}]` 与遗留对象 `{domain}` 两种输入、统一回填为内部对象。`proxy_listen`（tng 本地监听）仍固定 `127.0.0.1` + tngui 批探测注入的空闲端口，不动（不进用户可见控件、不序列化 host/port）。反代对外默认端口 `DEFAULT_LISTEN_PORT`/`DEFAULT_OUTWARD_PORT` 由 `18443` 改为 `9443`。

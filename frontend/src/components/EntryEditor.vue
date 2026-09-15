@@ -44,7 +44,7 @@ function ensureDstFilters() {
     };
     return;
   }
-  if (typeof df !== "object" || df === null) props.entry.fields.dst_filters = { domain: "", port: 0 };
+  if (typeof df !== "object" || df === null) props.entry.fields.dst_filters = { domain: "https://", port: 0 };
 }
 
 // 锁定形态的嵌套子对象（供 FieldRenderer 绑定 remote / verify）

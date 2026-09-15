@@ -58,13 +58,16 @@ export interface DstFilters {
 }
 
 /** 一条 ingress 条目的模型。fields 为各模式的嵌套字段；verify 仅在 no_ra=false 时有效；
- * `outward` 为 tngui 反代对外绑定（tngui 侧、不进 tng 配置）。 */
+ * `outward` 为 tngui 反代对外绑定（tngui 侧、不进 tng 配置）；
+ * `tls` 仅 http_proxy 使用——由域名框的 `https://` 前缀派生
+ * （`http://`/无前缀均 false）；serialize 时据此决定是否在 `ohttp` 注入 `tls: true`。 */
 export interface EntryModel {
   mode: IngressMode;
   fields: Record<string, unknown>;
   no_ra: boolean;
   verify?: VerifyConfig;
   outward: OutwardBind;
+  tls?: boolean;
   extra: Record<string, unknown>;
 }
 
@@ -92,7 +95,7 @@ export const INGRESS_FIELDS: Record<IngressMode, FieldSpec[]> = {
   ],
   http_proxy: [
     { key: "listen", label: "本地监听（host 锁定 127.0.0.1）", type: "listenHostPort", required: true },
-    { key: "remote", label: "远端域名端口（domain 主机名 + 端口）", type: "domainHostPort", required: true },
+    { key: "remote", label: "远端域名端口（可用 http:// 或 https:// 前缀，前缀决定 TLS）", type: "domainHostPort", required: true },
   ],
 };
 
@@ -108,7 +111,7 @@ export function defaultFields(mode: string): Record<string, unknown> {
   if (mode === "http_proxy") {
     return {
       proxy_listen: { host: LOCALHOST, port: DEFAULT_LISTEN_PORT },
-      dst_filters: { domain: "", port: 0 },
+      dst_filters: { domain: "https://", port: 0 },
     };
   }
   return {};

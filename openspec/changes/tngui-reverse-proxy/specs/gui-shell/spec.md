@@ -82,7 +82,7 @@ tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`
 ### Requirement: 结构化配置控件
 
 系统须（SHALL）在"设置"视图提供结构化控件，仅承载客户端 ingress（一条或多条 `add_ingress`），不承载 `add_egress`。每条 ingress 锁定为客户端 OHTTP 形态：
-- 远端类型二选一：`地址端口`（`mapping`，`out = {host:<IP>, port:<port>}`，`host` 须为 IP）或 `域名`（`http_proxy`，`dst_filters = [{domain:<主机名>, port:<端口号>}]`，主机名与端口分两个控件、主机名仅含主机名不含端口、端口走独立 `port` 字段）；`socks5`/`netfilter`/`hook`/`mapping_udp` 不作为 ingress 模式提供。
+- 远端类型二选一：`地址端口`（`mapping`，`out = {host:<IP>, port:<port>}`，`host` 须为 IP）或 `域名`（`http_proxy`，`dst_filters = [{domain:<主机名>, port:<端口号>}]`，主机名与端口分两个控件、主机名仅含主机名不含端口、端口走独立 `port` 字段；域名框接受可选 `http://` / `https://` 前缀，前缀触发 `ohttp.tls` 派生并剥离进 `domain`——`https://` 派生 `tls: true`，`http://` 或无前缀不派生）；`socks5`/`netfilter`/`hook`/`mapping_udp` 不作为 ingress 模式提供。
 - tng 本地监听 `host`/`port` 由 tngui 自动注入并对用户隐藏（见"ingress 本地监听强制走回环"）；ingress 编辑器行 1 改为呈现 tngui 反代对外绑定——`host` 在 `127.0.0.1`（仅本机）/`0.0.0.0`（对外网卡）间 toggle、`port` 可配（默认 `127.0.0.1`），作为 tngui 侧设置不进 tng 配置（见"tngui 反向代理对外暴露推理入口并注入 x-model 头"）。
 - `ohttp` 永远开、且 `ohttp.header_passthrough.request_headers` 写死为 `["x-model","x-api-key","authorization"]`（见"客户端 ingress 锁定 OHTTP 协议"），用户不可关闭、不可编辑。
 - 保留 `no_ra` 开关；其与 `verify` 的序列化语义见"ingress 的 no_ra 与 verify 互斥序列化"。
@@ -119,6 +119,25 @@ tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`
 - **WHEN** 用户以 `域名`（`http_proxy`）形态配置远端（主机名 + 端口）并触发序列化为 TNG JSON
 - **THEN** 该 ingress 的 `dst_filters` 序列化为数组 `[{ "domain": <主机名>, "port": <端口号> }]`——主机名仅含主机名（不含端口）、端口号走独立 `port` 字段；系统绝不（MUST NOT）把端口拼进 `domain` 字符串、绝不（MUST NOT）以 `{ "domain": "<host>:<port>" }` 单字段对象形式产出
 
+#### Scenario: http_proxy 域名前缀决定 ohttp.tls
+
+- **WHEN** 用户在 `域名`（`http_proxy`）的域名框输入 `https://host` 或 `http://host` 或无前缀的 `host` 并触发序列化为 TNG JSON
+- **THEN** 输入为 `https://host` 时该 ingress 的 `ohttp` 带 `tls: true`；输入为 `http://host` 或无前缀时 `ohttp` 不含 `tls` 字段；三种输入下 `dst_filters[0].domain` 均不含 scheme 前缀（前缀被剥离）；`header_passthrough` 三头写死语义不变
+
+#### Scenario: 导入含 ohttp.tls 的配置回填 tls
+
+- **WHEN** 用户导入的 JSON 中某 `http_proxy` ingress 的 `ohttp` 含 `tls: true`
+- **THEN** 该 ingress 回填前端内部 `tls=true` 并在域名框以 `https://` 前缀回显；`ohttp.tls` 在下次序列化时按前缀派生语义回写
+
+#### Scenario: 反代转发 Host 含 dst 端口
+
+- **WHEN** tngui 反代把请求转发给 tng 内部 `http_proxy` ingress
+- **THEN** 请求 `Host` 头使用 tngui 远端目标——`dst_filters` 配了有效端口时为 `<domain>:<port>`，未配有效端口时为 `<domain>`（tng 据此 `Host` 头的 host 与端口解析其上游目标；`dst_filters.port` 不决定上游端口）
+
+#### Scenario: https 上游经反代加密可达
+
+- **WHEN** 用户以 `域名` 框输入 `https://<域名>` + 端口 `<TLS/HTTPS 端口>` 配置远端并启动 tng（反代 + tng 均就绪）
+- **THEN** tng 以 TLS 连接该上游、反代转发的 `Host` 为 `<域名>:<端口>`，密态推理页面发起的推理请求可获真实回复（非占位、非拦截页）
 ### Requirement: ingress 控件按行分组呈现
 
 系统须（SHALL）在 ingress 的结构化编辑器中按以下三行分组呈现一条 ingress 的控件：第一行为本机端口/反代对外绑定（`host` 在 `127.0.0.1`（仅本机）/`0.0.0.0`（对外网卡）间 toggle + 对外 `port`，为 tngui 反代对外绑定、非 tng ingress 本地监听），独占一行；第二行为远端类型选择（`mapping`/`http_proxy`）与其当前远端类型对应的远端字段（`mapping` → 地址端口 IP+port，`http_proxy` → 域名主机名 + 端口，分两控件），二者在同一横排依次出现，且远端类型切换须（SHALL）即时生效——直接切换控件显示状态与对应远端字段、将字段重置为该类型的默认值，绝不（MUST NOT）弹窗要求用户确认；第三行为远程证明开关（表示"ra"——是否启用远程证明，标签为"远程证明"）与其 verify 配置（model / as_provider，仅在开关开启即 `no_ra=false` 时出现），二者在同一横排依次出现；开关关闭即 `no_ra=true` 时该行仅显示开关，不渲染 verify。该分组不得改变锁定的字段集、不改变 ingress 仅为 `mapping`/`http_proxy` 两种形态、不改变 `no_ra`/`verify` 的互斥序列化语义——仅是呈现排布与切换交互的变化。窄屏下允许单一横排内换行，但不得把上述同一横排的两个控件错位到不相关行。

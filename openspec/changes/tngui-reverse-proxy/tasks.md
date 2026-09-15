@@ -43,3 +43,14 @@
 - [x] 5.5 `tngui-core/src/config.rs`：`DEFAULT_OUTWARD_PORT` 由 `18443` 改 `9443`；`read_remote_host`（http_proxy）改为读 `dst_filters` 数组首元素 `dst_filters[0].domain`，并兼容遗留对象 `{domain}`；更新 `prepare_launch_default_outward_when_missing` 断言为 `9443`、新增数组 `dst_filters` passthrough 与 `read_remote_host` 数组读取测试。— verify：`cargo test -p tngui-core` 绿、`cargo fmt --check -p tngui-core` 绿
 - [x] 5.6 更新 `docs/tngui-ui-guide.md`：http_proxy 远端由单文本域名改为主机名+端口两字段、`dst_filters=[{domain,port}]`。— verify：描述与 spec 一致
 - [x] 5.7 `openspec validate tngui-reverse-proxy` 通过；前端 `npx vue-tsc --noEmit` + `npx vitest run` 绿。— verify：退出码 0
+
+
+## 6. 反代转发 Host 带 dst 端口 + ohttp.tls 派生自域名前缀（扩展）
+
+- [x] 6.1 `tngui-core/src/config.rs::read_remote_host`：`http_proxy` 读取 `dst_filters[0]` 的 `domain` **与同一元素 `port`**（1..=65535 时拼接 `domain:port`，否则返回裸 `domain`）；`mapping` 分支不动；更新 doc 注释与既有数组读取断言为带端口形态。— verify：`cargo test -p tngui-core` 含 Host 端口用例绿
+- [x] 6.2 `tngui-core/src/proxy.rs`：`ProxyRoute.remote_host` doc-comment 语义改为"远端 host[:port]"（`handle_conn` 行为不变）。— verify：cargo compile 绿
+- [x] 6.3 `frontend/src/configmodel.ts`：`EntryModel.tls` 字段；`parse` 读 `ohttp.tls===true` 回填 `tls` 并从 `dst_filters.domain` 剥离 `http(s)://` 前缀；`serialize`：https→`ohttp` 注入 `tls:true`（含写死 `header_passthrough`），否则 `ohttp` 仅含 `header_passthrough`（`ohttp:{}`）；serialize 输出的 `dst_filters.domain` 不含 scheme 前缀。— verify：`npx vitest run` configmodel 含 tls 派生/前缀剥离/回填用例
+- [x] 6.4 `frontend/src/formspec.ts`：`EntryModel` 增 `tls?: boolean`、`defaultFields("http_proxy")` 域名 `"https://"` 默认或提示前缀；`INGRESS_FIELDS.http_proxy` placeholder 说明前缀语义。— verify：`npx vue-tsc --noEmit` 绿
+- [x] 6.5 `frontend/src/components/EntryEditor.vue`：`ensureDstFilters` 兼容带 scheme 前缀 input；https 输入不改回写 dst_filters（前缀仅由 tls 字段派生直到序列化）；`defaultFields` 默认含 `https://` 前缀或占位提示。— verify：`npx vue-tsc --noEmit` 绿
+- [x] 6.6 `docs/tngui-ui-guide.md`：说明域名框前缀语义（https→tls）与"Host 会带端口"行为；密态推理 curl 示例注明上游对应关系。— verify：描述与 spec 一致
+- [x] 6.7 `openspec validate tngui-reverse-proxy` 通过；前端 `npx vue-tsc --noEmit`+`npx vitest run`；后端 `cargo fmt --check`+`cargo test -p tngui-core`；tng 实测 https 上游 Host 带端口推理成功（本地 dragon 大致同型）。— verify：退出码 0 且实测 200

@@ -232,10 +232,15 @@ fn inject_ingress_listen(entry: &mut Value, port: u16) {
     }
 }
 
-/// 读 ingress 的远端目标 host（转发给 tng 内部 ingress 时用作 Host 头，须为非本机地址
-/// 以避开 tng 的 recursion 检测）：`mapping` 取首条规则 `out.host`，`http_proxy` 取
-/// `dst_filters` 数组首元素 `dst_filters[0].domain`（兼容遗留对象 `{domain}`）。`mapping` 的 `out.host` 已由 `validate_required_remote` 保证非空
-/// IPv4；`http_proxy` 的 domain 可能为空（tng 接受），此时返回空串（由调用方回退）。
+/// 读 ingress 的远端目标 host[:port]（转发给 tng 内部 ingress 时用作 Host 头，
+/// 须为非本机地址以避开 tng 的 recursion 检测）：`mapping` 取首条规则 `out.host`
+/// （不带端口——mapping 转发目标是 `out.host:out.port`，不依赖 Host 头），`http_proxy`
+/// 取 `dst_filters` 数组首元素 `dst_filters[0].domain`（兼容遗留对象 `{domain}`），且其
+/// `port` 为有效 1..=65535 时拼为 `domain:port`——tng 的 `http_proxy` 上游目标
+/// **完全由请求 `Host` 头（含端口）决定**，`dst_filters.port` 仅参与 ingress 匹配；
+/// 不带端口会被 tng 归一为 `:80`，https 端口（443 / 30090 等）均不可达。
+/// `mapping` 的 `out.host` 已由 `validate_required_remote` 保证非空 IPv4；`http_proxy`
+/// 的 domain 可能为空（tng 接受），此时返回空串（由调用方回退）。
 fn read_remote_host(entry: &Value) -> String {
     if let Some(m) = entry.get("mapping").and_then(Value::as_object) {
         let host = m
@@ -255,21 +260,26 @@ fn read_remote_host(entry: &Value) -> String {
         return host.unwrap_or("").to_string();
     }
     if let Some(h) = entry.get("http_proxy").and_then(Value::as_object) {
-        // dst_filters 序列化为数组 [{domain, port}]；兼容遗留对象 {domain}
+        // dst_filters 序列化为数组 [{domain, port}]；兼容遗留对象 {domain}。
+        // Host 头须带 dst 端口（tng 以 Host 头 host:port 定上游）；端口
+        // 0 或越界视为未配端口，回退裸 domain（与前端 serialize 省略非法端口同口径）。
         if let Some(df) = h.get("dst_filters") {
-            let dom = df
+            let objf = df
                 .as_array()
                 .and_then(|arr| arr.first())
                 .and_then(Value::as_object)
-                .and_then(|d| d.get("domain"))
-                .and_then(Value::as_str)
-                .or_else(|| {
-                    df.as_object()
-                        .and_then(|d| d.get("domain"))
-                        .and_then(Value::as_str)
-                });
-            if let Some(d) = dom {
-                return d.to_string();
+                .or_else(|| df.as_object());
+            if let Some(d) = objf {
+                if let Some(dom) = d.get("domain").and_then(Value::as_str) {
+                    let port = d
+                        .get("port")
+                        .and_then(Value::as_u64)
+                        .filter(|p| (1..=65535).contains(p));
+                    return match port {
+                        Some(p) => format!("{dom}:{p}"),
+                        None => dom.to_string(),
+                    };
+                }
             }
         }
     }
@@ -438,18 +448,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_remote_host(&m2), "10.0.0.2");
-        // http_proxy：dst_filters 数组首元素 domain（序列化形态 [{domain, port}]）
+        // http_proxy：dst_filters 数组首元素 domain+port → Host 头带端口
         let h = serde_json::from_str::<Value>(
             r#"{"http_proxy":{"proxy_listen":{"port":1},"dst_filters":[{"domain":"inference.example","port":8443}]}}"#,
         )
         .unwrap();
-        assert_eq!(read_remote_host(&h), "inference.example");
-        // http_proxy 遗留对象形态 {domain}：仍兼容
+        assert_eq!(read_remote_host(&h), "inference.example:8443");
+        // 有效端口缺失/0/越界 → 裸 domain（与前端 serialize 省略非法端口同口径）
+        let hn = serde_json::from_str::<Value>(
+            r#"{"http_proxy":{"proxy_listen":{"port":1},"dst_filters":[{"domain":"inference.example"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_remote_host(&hn), "inference.example");
+        let h0 = serde_json::from_str::<Value>(
+            r#"{"http_proxy":{"proxy_listen":{"port":1},"dst_filters":[{"domain":"inference.example","port":0}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_remote_host(&h0), "inference.example");
+        let hbig = serde_json::from_str::<Value>(
+            r#"{"http_proxy":{"proxy_listen":{"port":1},"dst_filters":[{"domain":"inference.example","port":70000}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_remote_host(&hbig), "inference.example");
+        // http_proxy 遗留对象形态 {domain}：仍兼容（无端口 → 裸 domain）
         let h_obj = serde_json::from_str::<Value>(
             r#"{"http_proxy":{"proxy_listen":{"port":1},"dst_filters":{"domain":"legacy.example"}}}"#,
         )
         .unwrap();
         assert_eq!(read_remote_host(&h_obj), "legacy.example");
+        let h_obj_port = serde_json::from_str::<Value>(
+            r#"{"http_proxy":{"proxy_listen":{"port":1},"dst_filters":{"domain":"legacy.example","port":443}}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_remote_host(&h_obj_port), "legacy.example:443");
         // http_proxy 空 domain → 空串（调用方回退）
         let h2 = serde_json::from_str::<Value>(
             r#"{"http_proxy":{"proxy_listen":{"port":1},"dst_filters":{"domain":""}}}"#,
@@ -657,11 +688,13 @@ mod tests {
 
     #[test]
     fn prepare_launch_http_proxy_route() {
-        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"10.0.0.1","port":1},"dst_filters":{"domain":"x"}},"tngui_outward":{"host":"127.0.0.1","port":18443}}]}"#;
+        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"10.0.0.1","port":1},"dst_filters":{"domain":"x.example.com"}},"tngui_outward":{"host":"127.0.0.1","port":18443}}]}"#;
         let ports = pick_free_ports(1).unwrap();
         let (v, routes) = prepare_launch(src, 40101, &ports).unwrap();
         assert_eq!(routes[0].out_host, "127.0.0.1");
         assert_eq!(routes[0].out_port, 18443);
+        // http_proxy 无端口 → remote_host 裸 domain；有端口 → domain:port
+        assert_eq!(routes[0].remote_host, "x.example.com");
         assert_eq!(
             v["add_ingress"][0]["http_proxy"]["proxy_listen"]["host"],
             "127.0.0.1"

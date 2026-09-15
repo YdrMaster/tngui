@@ -19,7 +19,7 @@ const props = defineProps<{ fields: Record<string, any>; spec: FieldSpec }>();
 
     <!-- 远端域名端口：主机名(domain) + 端口，分两控件、主机名不含端口 -->
     <a-input-group v-else-if="spec.type === 'domainHostPort'" compact>
-      <a-input v-model:value="fields.domain" style="width: calc(100% - 130px)" placeholder="远端域名（主机名，如 inference.example.com）" />
+      <a-input v-model:value="fields.domain" style="width: calc(100% - 130px)" placeholder="如 https://inference.cloud.misuan.com（http:// 或 https:// 前缀决定 TLS）" />
       <a-input-number v-model:value="fields.port" style="width: 130px" placeholder="远端端口" />
     </a-input-group>
 

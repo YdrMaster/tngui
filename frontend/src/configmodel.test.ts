@@ -103,9 +103,54 @@ describe("ingress 锁定形态与互斥序列化", () => {
 
   it("http_proxy 端口为空时输出仅 domain（不把端口塞进 domain、不输出 port）", () => {
     const m = mk({ add_ingress: [{ mode: "http_proxy", fields: { proxy_listen: { host: LOCALHOST, port: 1 }, dst_filters: { domain: "x.example.com", port: 0 } }, no_ra: true, outward: { ...DEFAULT_OUTWARD }, extra: {} }] });
-    const o = JSON.parse(serialize(m)) as { add_ingress: { http_proxy: { dst_filters: { domain: string; port?: number }[] } }[] };
+    const o = JSON.parse(serialize(m)) as { add_ingress: { http_proxy: { dst_filters: { domain: string; port?: number }[] }; ohttp: Record<string, unknown> }[] };
     expect(o.add_ingress[0].http_proxy.dst_filters).toEqual([{ domain: "x.example.com" }]);
     expect(o.add_ingress[0].http_proxy.dst_filters[0].port).toBeUndefined();
+    expect(o.add_ingress[0].ohttp["tls"]).toBeUndefined();
+  });
+
+  it("http_proxy 前缀 https:// 派生 ohttp.tls=true 且序列化剥离前缀", () => {
+    const m = mk({ add_ingress: [{ mode: "http_proxy", fields: { proxy_listen: { host: LOCALHOST, port: 1 }, dst_filters: { domain: "https://inference.cloud.misuan.com", port: 443 } }, no_ra: true, outward: { ...DEFAULT_OUTWARD }, tls: true, extra: {} }] });
+    const o = JSON.parse(serialize(m)) as { add_ingress: { http_proxy: { dst_filters: { domain: string; port: number }[] }; ohttp: Record<string, unknown> }[] };
+    expect(o.add_ingress[0].ohttp["tls"]).toBe(true);
+    expect(o.add_ingress[0].http_proxy.dst_filters[0].domain).toBe("inference.cloud.misuan.com");
+    expect(o.add_ingress[0].http_proxy.dst_filters[0].port).toBe(443);
+    // 往返：导入后域名为无前缀且 tls 语义保留（通过 ohttp.tls 回填）
+    const r = parse(serialize(m));
+    expect(r.error).toBeUndefined();
+    expect((r.model!.add_ingress[0] as { tls?: boolean }).tls).toBe(true);
+  });
+
+  it("http_proxy 前缀 http:// 不派生 tls（ohttp 不含 tls）且序列化剥离前缀", () => {
+    const m = mk({ add_ingress: [{ mode: "http_proxy", fields: { proxy_listen: { host: LOCALHOST, port: 1 }, dst_filters: { domain: "http://x.example.com", port: 8080 } }, no_ra: true, outward: { ...DEFAULT_OUTWARD }, extra: {} }] });
+    const o = JSON.parse(serialize(m)) as { add_ingress: { http_proxy: { dst_filters: { domain: string; port: number }[] }; ohttp: Record<string, unknown> }[] };
+    expect(o.add_ingress[0].ohttp["tls"]).toBeUndefined();
+    expect(o.add_ingress[0].http_proxy.dst_filters[0].domain).toBe("x.example.com");
+  });
+
+  it("导入 ohttp.tls:true 回填 tls并在域名框以 https:// 前缀回显；序列化还原", () => {
+    const r = parse(JSON.stringify({ add_ingress: [{ http_proxy: { proxy_listen: { host: "127.0.0.1", port: 1 }, dst_filters: [{ domain: "a.example.com", port: 443 }] }, ohttp: { tls: true }, no_ra: true }] }));
+    expect(r.error).toBeUndefined();
+    const e = r.model!.add_ingress[0];
+    expect((e as { tls?: boolean }).tls).toBe(true);
+    // 域名框以 https:// 前缀回显
+    expect((e.fields.dst_filters as { domain: string }).domain).toBe("https://a.example.com");
+    // 序列化回到 tng 形态：tls:true + 无前缀 domain
+    const o = JSON.parse(serialize(r.model!)) as { add_ingress: { http_proxy: { dst_filters: { domain: string; port: number }[] }; ohttp: Record<string, unknown> }[] };
+    expect(o.add_ingress[0].ohttp["tls"]).toBe(true);
+    expect(o.add_ingress[0].http_proxy.dst_filters[0].domain).toBe("a.example.com");
+    expect(o.add_ingress[0].http_proxy.dst_filters[0].port).toBe(443);
+  });
+
+  it("导入 dst_filters.domain 携带 https:// 前缀（即便无 ohttp.tls）也派生 tls=true", () => {
+    const r = parse(JSON.stringify({ add_ingress: [{ http_proxy: { proxy_listen: { host: "127.0.0.1", port: 1 }, dst_filters: [{ domain: "https://b.example.com", port: 443 }] }, no_ra: true }] }));
+    expect(r.error).toBeUndefined();
+    const e = r.model!.add_ingress[0];
+    expect((e as { tls?: boolean }).tls).toBe(true);
+    expect((e.fields.dst_filters as { domain: string }).domain).toBe("https://b.example.com");
+    const o = JSON.parse(serialize(r.model!)) as { add_ingress: { http_proxy: { dst_filters: { domain: string }[] }; ohttp: Record<string, unknown> }[] };
+    expect(o.add_ingress[0].ohttp["tls"]).toBe(true);
+    expect(o.add_ingress[0].http_proxy.dst_filters[0].domain).toBe("b.example.com");
   });
 
   it("导入数组形态 dst_filters 回填为内部 {domain, port}", () => {

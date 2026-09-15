@@ -35,8 +35,10 @@ pub struct ProxyRoute {
     pub out_host: String,
     pub out_port: u16,
     pub internal_port: u16,
-    /// 远端目标 host（转发 tng 内部 ingress 时用作 Host 头）：mapping 的 out.host /
-    /// http_proxy 的 domain。须为非本机地址，避开 tng 的 recursion 检测。
+    /// 远端目标 host[:port]（转发 tng 内部 ingress 时用作 Host 头）：mapping 的
+    /// out.host、http_proxy 的 domain（dst_filters 配了有效端口时拼为 `domain:port`——
+    /// tng 的 http_proxy 上游目标跟随 Host 头 host 与端口，须带 dst 端口才能路由到
+    /// 非 `:80` 的上游，如 https 的 443/30090）。须为非本机地址，避开 recursion 检测。
     pub remote_host: String,
 }
 

@@ -13,6 +13,8 @@
 - **D3 设计（设计决策）**：反代以 tngui-app/tngui-core 内一个 proxy 模块承载，随 tng 生命周期启停，持有对内（`127.0.0.1:<空闲端口>`）与对外（bind host + port）两端点；通过一条 Tauri 命令把对外端点暴露给前端以渲染 `API Base URL`。
 - **D4 端口探测（设计决策）**：把内端口取号由单点 `pick_free_port`（取号即放）升级为批取 `pick_free_ports(n)`——顺序 bind n 个 `127.0.0.1:0` listener、同时持住收号、整批释放（保证 n 个互不相同），并对每条 ingress 的反代对外 `out_port` 先验避让、命中即整批重试（有界）。规避单点探测把对外端口（如默认 `18443`）当内部端口注入、tng 先占住导致反代绑对外 `10048` 的实测问题。
 - **密态推理调试门锁放宽 + model 迁页（扩展）**：密态推理视图的“可发”门锁由原“`tngReady`（readyz 全绿）+ model + apiKey + 反代端口”放宽为与概览“运行状态”卡相同口径（`deriveIngressStates().runtime === "running"`）AND api-key；`model` 从“设置”视图移除、改为密态推理视图请求面板内可编辑输入（会话内内存、不持久化、退出门锁）。前端新增共享 composable 复用概览同一 `deriveIngressStates` 判定，避免两处漂移。
+- **反代转发 Host 带 dst 端口（扩展）**：`read_remote_host` 升级——`http_proxy` 返回 `domain:port`（端口有效时）而非裸 `domain`，让 tng 按 Host 头（含端口）解析真实上游（否则 always `:80`，https 上游不可达）；`mapping` 不动。
+- **ohttp.tls 派生自域名 scheme 前缀（扩展）**：`http_proxy` 域名框接受 `http://` / `https://` 前缀——`https://` 派生 `ohttp.tls=true`、`http://` 或无前缀不写 `tls`；前缀剥离进 `dst_filters.domain`；`tls` 为前端内部字段（由前缀驱动，非用户控件），与写死的 `header_passthrough` 三头共存于同一 `ohttp` 对象。
 - **http_proxy 远端拆分主机名+端口并以数组序列化（扩展）**：`域名`（`http_proxy`）远端由单文本 `domain` 改为主机名 + 端口两个控件，`dst_filters` 序列化为 tng 实际接受的数组 `[{domain, port}]`（端口走独立 `port` 字段、不拼进 `domain`）；`proxy_listen` 仍固定 `127.0.0.1` + tngui 批探测注入的空闲端口，不动。反代对外默认端口由 `18443` 改为 `9443`。
 - **不在范围内**：不引入流式（SSE/chunked）转发（先非流式）；不改 `ohttp` 锁定协议与 `header_passthrough` 写死的 3 头集合；不改 `no_ra`/`verify` 与远端 `out` 配置语义；不改与 tng 的松耦合——反代是 tngui 自有进程内的 HTTP 服务，仍仅以“拉 tng CLI + 只读控制面 HTTP + 捕获 stdout”与 tng 互动，不链接任何 tng crate。
 
