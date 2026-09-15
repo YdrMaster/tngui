@@ -2,7 +2,7 @@
 
 - [x] 1.1 新增共享网关状态卡视图推导，输出“运行状态”“远端链路”“远端证明”的标题、状态文本、副标题和颜色枚举；为 stopped/running/error、remoteLink、remoteProof 组合补纯函数单元测试。— verify：`npm test -s` 新增用例通过
 - [x] 1.2 重构 `Overview.vue` 消费共享状态卡视图，保持概览第 1、3、4 卡渲染结果不变。— verify：`npm run typecheck` 通过，概览三卡状态仍随状态变化
-- [ ] 1.3 在 Tauri 后端新增导出 TNG 进程日志命令：锁取 supervisor 日志快照，lines 为空时导出空内容，否则按原始顺序连接写入指定路径；为日志内容拼接规则加单测。— verify：`cargo test -p tngui-app` 通过
+- [x] 1.3 在 Tauri 后端新增导出 TNG 进程日志命令：锁取 supervisor 日志快照，lines 为空时导出空内容，否则按原始顺序连接写入指定路径；为日志内容拼接规则加单测。— verify：`cargo test -p tngui-app` 通过
 - [x] 1.4 注册该命令，并在 `frontend/src/tauri.ts` 增加日志另存为路径选择和日志导出绑定；取消路径时前端不调用写盘命令。— verify：`npm run typecheck` 通过
 
 ## 2. 设置页重构
@@ -21,5 +21,5 @@
 ## 4. 文档与回归
 
 - [x] 4.1 更新 `docs/tngui-ui-guide.md`：设置页 Gateway 三卡、导出日志、密态推理卡、TNG 配置自动保存、客户端信息和传感器提示框的最新描述。— verify：文档与 delta spec 一致
-- [ ] 4.2 运行前端与后端回归：`npm run typecheck`、`npm test -s`、`cargo fmt --check --all`、`cargo test -p tngui-app` 全绿。— verify：全部命令退出码 0
+- [x] 4.2 运行前端与后端回归：`npm run typecheck`、`npm test -s`、`cargo fmt --check --all`、`cargo test -p tngui-app` 全绿。— verify：全部命令退出码 0
 - [x] 4.3 校验 OpenSpec 提案完整性。— verify：`openspec validate simplify-settings-ui --json` 通过
