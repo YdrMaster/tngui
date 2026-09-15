@@ -31,7 +31,7 @@ export function serialize(model: ConfigModel): string {
 }
 
 function serializeEntry(e: EntryModel): Record<string, unknown> {
-  const fields = sanitizeFields(e.mode, e.fields);
+  const fields = serializeFields(e.mode, e.fields);
   const obj: Record<string, unknown> = { [e.mode]: fields };
   if (e.no_ra) {
     obj.no_ra = true;
@@ -44,29 +44,56 @@ function serializeEntry(e: EntryModel): Record<string, unknown> {
   return obj;
 }
 
-/** 规整为锁定形态：剥除 tng 本地监听 host/port（输出 `in`/`proxy_listen` 为空对象，由 tngui 启动注入），
- *  保留远端字段（mapping 的 out、http_proxy 的 dst_filters）。 */
-function sanitizeFields(mode: IngressMode, fields: Record<string, unknown>): Record<string, unknown> {
-  if (mode === "mapping") {
-    const rules = Array.isArray(fields.rules) ? fields.rules : [];
-    const first = rules.find((r) => r && typeof r === "object") as
-      | { in?: Record<string, unknown>; out?: Record<string, unknown> }
-      | undefined;
-    const outEp = first?.out ?? {};
-    return {
-      rules: [
-        {
-          in: {},
-          out: { host: strOr(outEp.host, ""), port: numOr(outEp.port, DEFAULT_OUT_PORT) },
-        },
-      ],
-    };
-  }
-  const df = (fields.dst_filters ?? {}) as Record<string, unknown>;
+/** mapping 锁定字段：剥除 tng 本地监听 host/port（输出 `in` 为空对象，由 tngui 启动注入），
+ *  保留远端 `out`（host + port）。serialize 与 normalize 共用（两者 mapping 形状一致）。 */
+function mappingFields(fields: Record<string, unknown>): Record<string, unknown> {
+  const rules = Array.isArray(fields.rules) ? fields.rules : [];
+  const first = rules.find((r) => r && typeof r === "object") as
+    | { in?: Record<string, unknown>; out?: Record<string, unknown> }
+    | undefined;
+  const outEp = first?.out ?? {};
   return {
-    proxy_listen: {},
-    dst_filters: { domain: strOr(df.domain, "") },
+    rules: [
+      {
+        in: {},
+        out: { host: strOr(outEp.host, ""), port: numOr(outEp.port, DEFAULT_OUT_PORT) },
+      },
+    ],
   };
+}
+
+/** 序列化为 TNG 配置形状（内部模型 → 输出）：剥除 tng 本地监听 host/port（`in`/`proxy_listen`
+ *  输出为空对象，由 tngui 启动注入）；http_proxy 的 `dst_filters` 输出为 tng 实际接受的数组
+ *  `[{domain, port}]`——主机名仅含主机名、端口走独立 `port` 字段，绝不把端口拼进 `domain`；
+ *  端口为空（0/越界）时省略 `port`，tng 即 `port_match: None`（匹配任意端口）。 */
+function serializeFields(mode: IngressMode, fields: Record<string, unknown>): Record<string, unknown> {
+  if (mode === "mapping") return mappingFields(fields);
+  const df = (fields.dst_filters ?? {}) as Record<string, unknown>;
+  const dst: Record<string, unknown> = { domain: strOr(df.domain, "") };
+  const p = df.port;
+  if (typeof p === "number" && Number.isFinite(p) && p >= 1 && p <= 65535) dst.port = p;
+  return { proxy_listen: {}, dst_filters: [dst] };
+}
+
+/** 解析为内部模型形状（输入 → 内部）：兼容 tng 数组形态 `dst_filters: [{domain, port}]` 与遗留
+ *  对象形态 `{domain}`，统一回填为内部单一对象 `{domain, port}`（一条 dst，供 EntryEditor/
+ *  FieldRenderer 绑定）。`proxy_listen` 输出为空对象（由 tngui 启动注入）。 */
+function normalizeFields(mode: IngressMode, fields: Record<string, unknown>): Record<string, unknown> {
+  if (mode === "mapping") return mappingFields(fields);
+  const dfRaw = fields.dst_filters;
+  let domain = "";
+  let port = 0;
+  const readFrom = (d: Record<string, unknown>): void => {
+    domain = strOr(d.domain, "");
+    const pp = d.port;
+    if (typeof pp === "number" && Number.isFinite(pp)) port = pp;
+  };
+  if (Array.isArray(dfRaw) && dfRaw.length > 0 && typeof dfRaw[0] === "object" && dfRaw[0] !== null) {
+    readFrom(dfRaw[0] as Record<string, unknown>);
+  } else if (dfRaw && typeof dfRaw === "object") {
+    readFrom(dfRaw as Record<string, unknown>);
+  }
+  return { proxy_listen: {}, dst_filters: { domain, port } };
 }
 
 export interface ParseResult {
@@ -143,7 +170,7 @@ function parseEntry(
   }
 
   const fieldsRaw = (e[mode] ?? {}) as Record<string, unknown>;
-  const fields = sanitizeFields(mode, fieldsRaw);
+  const fields = normalizeFields(mode, fieldsRaw);
 
   let no_ra: boolean;
   let verify: VerifyConfig | undefined;

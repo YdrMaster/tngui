@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { message } from "ant-design-vue";
 import {
@@ -8,12 +8,14 @@ import {
   DownloadOutlined, ImportOutlined, ExportOutlined, GlobalOutlined,
 } from "@ant-design/icons-vue";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
-import { getStatus, proxyEndpoint } from "../tauri";
+import { useIngressState } from "../composables/useIngressState";
+import { proxyEndpoint } from "../tauri";
 import SecureFlow from "../components/SecureFlow.vue";
 import ArchitectureFlow from "../components/ArchitectureFlow.vue";
 import ProtectionItem from "../components/ProtectionItem.vue";
 
 const { model: inferenceModel, apiKey } = useInferenceConfig();
+const { tngRunning } = useIngressState();
 
 const activeTab = ref<"request" | "integration" | "security">("request");
 const prompt = ref("请用三点说明密态推理如何保护我的输入数据。");
@@ -22,10 +24,9 @@ const sending = ref(false);
 const phase = ref(4);
 const phaseTimer = ref<number | undefined>(undefined);
 const statusCode = ref(0);
-const tngReady = ref(false);
 // 反代对外端口（取自 proxy_endpoint[0].port）：tng 未启动时为 null。
 const proxyPort = ref<number | null>(null);
-let statusTimer: number | undefined;
+let proxyTimer: number | undefined;
 
 async function fetchProxy() {
   try {
@@ -35,30 +36,21 @@ async function fetchProxy() {
     proxyPort.value = null;
   }
 }
-
-async function checkTng() {
-  try {
-    const s = await getStatus();
-    tngReady.value = s.ready;
-    if (s.ready) await fetchProxy();
-    else proxyPort.value = null;
-  } catch {
-    tngReady.value = false;
-    proxyPort.value = null;
-  }
-}
-checkTng();
-statusTimer = window.setInterval(checkTng, 2000);
-if (typeof window !== "undefined" && statusTimer) window.onbeforeunload = () => clearInterval(statusTimer);
+onMounted(() => {
+  fetchProxy();
+  proxyTimer = window.setInterval(fetchProxy, 2000);
+});
+onBeforeUnmount(() => {
+  if (proxyTimer) window.clearInterval(proxyTimer);
+});
 
 const localEndpoint = computed(() =>
   proxyPort.value !== null
     ? `http://127.0.0.1:${proxyPort.value}/v1`
     : "未配置",
 );
-const usable = computed(
-  () => tngReady.value && !!inferenceModel.value && !!apiKey.value && proxyPort.value !== null,
-);
+// “可发”门锁：与概览左上角“运行状态”卡同口径（tngRunning）AND api-key 已配置；不再查 readyz/model/端口。
+const usable = computed(() => tngRunning.value && !!apiKey.value);
 
 const curlExample = computed(() => `curl http://127.0.0.1:${proxyPort.value ?? 8080}/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -74,9 +66,9 @@ API Key        <从 1 号节点控制台获取>
 Model ID       ${inferenceModel.value || "model"}`);
 
 async function onSend() {
-  if (!usable.value) { message.warning("请先在设置中配置 model/API Key 并启动 TNG 网关"); return; }
+  if (!usable.value) { message.warning("请先在「概览」启动 TNG 网关（显示运行）并在「设置」配置 API Key"); return; }
   if (!prompt.value.trim()) { message.warning("请输入测试内容"); return; }
-  if (proxyPort.value === null) return;
+  if (proxyPort.value === null) { message.warning("网关对外端口未就绪，无法发送"); return; }
   sending.value = true; output.value = ""; statusCode.value = 0; phase.value = 0;
   let step = 0;
   phaseTimer.value = window.setInterval(() => {
@@ -130,7 +122,7 @@ async function onSend() {
             <a-col :span="11">
               <a-card title="请求">
                 <a-form layout="vertical">
-                  <a-form-item label="模型"><a-input :value="inferenceModel || '（未配置）'" disabled /></a-form-item>
+                  <a-form-item label="模型"><a-input v-model:value="inferenceModel" placeholder="如 gpt-4 / vllm-model" /></a-form-item>
                   <a-form-item label="输入内容">
                     <a-textarea v-model:value="prompt" :rows="10" :maxlength="4000" showCount placeholder="输入一段用于连通性测试的内容" />
                   </a-form-item>
@@ -197,7 +189,7 @@ async function onSend() {
             <a-descriptions class="section-card" :column="2" bordered style="margin-top:16px">
               <a-descriptions-item label="API Base URL">{{ localEndpoint }}</a-descriptions-item>
               <a-descriptions-item label="网关状态">
-                <a-badge :status="tngReady ? 'success' : 'error'" :text="tngReady ? '运行中' : '未运行'" />
+                <a-badge :status="tngRunning ? 'success' : 'error'" :text="tngRunning ? '运行中' : '未运行'" />
               </a-descriptions-item>
               <a-descriptions-item label="监听范围"><a-tag color="blue">仅本机 127.0.0.1</a-tag></a-descriptions-item>
               <a-descriptions-item label="兼容协议">OpenAI-compatible API</a-descriptions-item>

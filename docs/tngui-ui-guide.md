@@ -18,7 +18,7 @@ tngui 是客户端侧工具：它启动并管理本机的 tng 进程，只配置
 | 客户端 ingress 形态 | 概念 | 用途 |
 |---|---|---|
 | mapping（地址端口） | 端口映射 | 把本地一个端口映射到远端 `<IP>:<端口>`（TNG 约束 host 须为 IP） |
-| http_proxy（域名） | HTTP 代理 | 应用经 HTTP 代理把流量交给 TNG，远端为单文本的完整域名（不限定 http/https） |
+| http_proxy（域名） | HTTP 代理 | 应用经 HTTP 代理把流量交给 TNG，远端为主机名 + 端口（主机名单文本、端口独立字段，序列化为 `dst_filters=[{domain,port}]`） |
 
 TNG 通用能力还提供其它入口模式（透明拦截 / 钩子等非推理用例形态），但 tngui 客户端不暴露、不配置。两种形态下 ingress 到 egress 的业务流量均走 OHTTP 封装（见 1.3）。 tngui 在本机只以一个内置反向代理对外暴露推理入口（默认 `127.0.0.1`、可切 `0.0.0.0`，见 5.3 行 1），tng 的 ingress 本地监听端口仅 `127.0.0.1` 可达、由 tngui 启动时注入、不由用户配置——客户端只连反代、不直连 tng ingress（见 3.3、4）。
 
@@ -154,7 +154,7 @@ tng 自身的 ingress 本地监听 `host`/`port` 由 tngui 在启动时选取空
 单次请求模式，不保留会话历史，适合做连通性和可信链路验证。
 
 - 左侧“请求”卡：
-  - 模型：只读显示设置页填写的模型名，发送时作为请求体里的 `model`。
+  - 模型：在本页内可编辑输入模型名（会话内不持久化，关闭 GUI 后不保留），发送时作为请求体里的 `model`。
   - 输入内容：可编辑的 prompt textarea，发送后不清空，可修改后重发。
   - 发送测试请求：满足可用条件时按 OpenAI 兼容格式，POST 到 tngui 反代对外端点 `http://<绑定地址（默认 127.0.0.1）>:<本机端口>/v1/chat/completions`；`x-model` 头由反代按 `body.model` 注入（请求已带 `x-model` 则覆盖），前端 / 发送逻辑不注入。
 - 右侧“响应”卡：
@@ -170,7 +170,7 @@ SecureFlow 五步对应密态推理的保护过程：
 4. 密态推理：请求仅在云端可信执行环境内解密和计算。
 5. 本地输出：响应以密文返回，由本地 TNG 网关解密。
 
-可用条件：tng 就绪、已填写 model 和 API Key、配置中至少有一条 ingress 且远端已配置（远端未配置时启动按钮不可用）。满足这些条件后才能真实发送。
+可用条件：概览“运行状态”卡显示“运行”且已填写 API Key，即满足可发门锁即可发送——与概览左上角运行状态卡同口径（`deriveIngressStates().runtime === "running"`）。不再要求 model 预填、readyz 单列或反代端口独立判定；model 留空时发送由下游报真实错误。
 
 ### 4.2 AI 客户端接入
 
@@ -223,10 +223,10 @@ SecureFlow 五步对应密态推理的保护过程：
 - 标题“功能配置”，标注已启用功能数量。
 - 密态推理功能卡：
   - API Key：可粘贴、可显隐；API Key 在中心侧管理，本机只保存使用凭据，申请/查看/重置在 1 号节点完成。
-  - Model：推理模型名，发送时使用，不持久化，关闭 GUI 后不保留。
+  - Model：已移至「密态推理调试」请求调试页内配置（见 4.1），设置页不再配置 Model。
   - 本地 URL 取自结构化 ingress 第一条的反代对外绑定（`http://<绑定地址（默认 127.0.0.1）>:<本机端口>/v1`）；提供保存并验证、复制本地 URL、导入配置、导出配置按钮。
   - 本机不在此配置本地端口 / 远端；本机端口（反代对外绑定）在下方"高级 TNG 配置"结构化 ingress 行 1、远端在行 2 配置。推理请求发往 tngui 反代对外端点，`x-model` 由反代按 `body.model` 注入（覆盖客带 `x-model`）。
-  - 清除本机凭据：移除本机 API Key 与 Model，不影响中心侧 Key。
+  - 清除本机凭据：移除本机 API Key，不影响中心侧 Key（Model 在「密态推理调试」页管理）。
 
 ### 5.3 高级 TNG 配置
 
@@ -235,7 +235,7 @@ SecureFlow 五步对应密态推理的保护过程：
 - 结构化（客户端 ingress 锁定 OHTTP 形态，不承载 egress）：
   - control_interface 的管控端口（restful 子段）由 tngui 在拉起 tng 时自动选取空闲回环端口并注入、对用户不暴露；配置页不提供其控件。
   - 行 1 反代对外绑定（本机端口）：`host` 在 `127.0.0.1`（仅本机，默认）/ `0.0.0.0`（对外网卡）间 toggle、`port` 可配；tng 本地监听 `host`/`port` 由 tngui 启动时自选空闲回环端口注入、对用户隐藏，不在此配置、不在结构化控件出现。
-  - 远端形态二选一：`地址端口`（`mapping`，`out = <IP>:<端口>`，host 须为 IP）/ `域名`（`http_proxy`，`dst_filters.domain` 单文本框、不限定 http/https、不拆分端口）。
+  - 远端形态二选一：`地址端口`（`mapping`，`out = <IP>:<端口>`，host 须为 IP）/ `域名`（`http_proxy`，`dst_filters = [{domain, port}]`，主机名 + 端口分两字段、序列化为数组、主机名不含端口）。
   - `ohttp` 常开且写死：每条 ingress 始终带 `ohttp`，`header_passthrough.request_headers` 固定为 `["x-model","x-api-key","authorization"]`，用户不可关闭、不可改这组 header。
   - ingress 编辑器按三行分组：行 1 反代对外绑定独占一行；行 2 远端类型与当前远端字段同一横排，远端类型切换即时生效、直接切换控件显示状态并把远端字段重置为该类型默认值，不弹窗确认；行 3 远程证明开关与 `verify` 同一横排。远程证明开关表示是否启用远程证明（ra）：开启（ra=on/`no_ra=false`）时显示 `verify`（`model` / `as_provider`，默认 `passport` / `tpm`），关闭（`no_ra=true`）时仅显示开关、不渲染 `verify`。
   - 不提供 `add_egress` 结构化控件——客户端不承载 egress。

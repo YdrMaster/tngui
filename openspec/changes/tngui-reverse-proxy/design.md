@@ -26,10 +26,10 @@
 
 ### D4 端口探测：批取 n 个回环端口（占住再放）并先验避让对外端口
 
-背景：既有 `pick_free_port()` 是「`bind 127.0.0.1:0` → 取号 → 立即 `drop`」的单点 TOCTOU 探测。本变更要同时注入「1 个管控端口 + 每条 ingress 内部端口」，若仍各自单点取号：多次取号之间无互斥保证、且不避让反代对外端口——实测在 Windows 上单点探测曾把对外端口（如默认 `18443`）当内部端口注入给 tng，tng 先占住该端口、反代再去绑对外 `18443` 即 `10048`/`ADDRINUSE`。
+背景：既有 `pick_free_port()` 是「`bind 127.0.0.1:0` → 取号 → 立即 `drop`」的单点 TOCTOU 探测。本变更要同时注入「1 个管控端口 + 每条 ingress 内部端口」，若仍各自单点取号：多次取号之间无互斥保证、且不避让反代对外端口——实测在 Windows 上单点探测曾把对外端口（如默认 `9443`）当内部端口注入给 tng，tng 先占住该端口、反代再去绑对外 `9443` 即 `10048`/`ADDRINUSE`。
 
 - 批取：新增 `pick_free_ports(n) -> io::Result<Vec<u16>>`——**顺序 `bind` n 个 `127.0.0.1:0` listener 并同时持住**（持住期间 OS 不会把同一端口分配给两个在用 listener，故 n 个必然互不相同），收集各自 `local_addr().port()` 后**统一 `drop` 整批释放**。即"顺序申请 n 个端口再一起释放"，从根上消除取号重复。
-- 先验避让对外端口：拉起前算出每条 ingress 的反代对外 `out_port`（用户"本机端口"，默认 `18443`）作为 forbidden 集合；对批取的 `1(管控)+N(内部)` 端口先验，任一 ∈ forbidden 即**整批丢弃重取**（有上限重试，避免死循环）；重试耗尽则启动失败并明示。
+- 先验避让对外端口：拉起前算出每条 ingress 的反代对外 `out_port`（用户"本机端口"，默认 `9443`）作为 forbidden 集合；对批取的 `1(管控)+N(内部)` 端口先验，任一 ∈ forbidden 即**整批丢弃重取**（有上限重试，避免死循环）；重试耗尽则启动失败并明示。
 - 接线：`launch_tng` 用批探测一次取齐 control + 各 ingress internal；`prepare_launch`接受这组端口注入（控制段 + 各 ingress 的 `in`/`proxy_listen`），不再在 `prepare_ingress_entry` 内各自 `pick_free_port`。最终管控端口与各内部端口两两不同、且无一个等于任一对外端口。
 - 取向：仍是回环、对用户隐藏、松耦合——与"控制面 host 强制走回环""管控端口自动选取""ingress 本地监听强制走回环"同向；只是取号方式由"单点取号即放"升级为"批取占住再放 + 先验避让对外 + 命中重试"。
 
@@ -51,6 +51,26 @@
 
 `send_inference` 与 InferenceView 改为发往 `proxy_endpoint()` 对外端点，不再自注 `x-model`（反代注入）；退化为普通 OpenAI 客户端。其签名由 `port` 改为取自 `proxy_endpoint`（或统一以端点 host:port）。
 
+### D5 密态推理调试门锁口径与 model 迁页（扩展）
+
+驱动：原 InferenceView 的 `usable = tngReady(s.ready，即 readyz 全绿) && !!model && !!apiKey && proxyPort!==null`，只要 readyz 未绿（远端链路/RA 未就绪）即永久锁死“当前无法发送测试请求”，api-key 怎么填都没用；且把 `model` 拆在设置页又作发送门锁，徒增摩擦。
+
+- 门锁口径改为“与概览左上角‘运行状态’卡同口径”：`usable = tngRunning.value && !!apiKey.value`，其中 `tngRunning = deriveIngressStates(observation).runtime === "running"`（控制面 reachable + `/livez` 与 `/readyz` 均 2xx + 无 attestation/hpke 结构性失败日志 + 无进程错误）。`readyz` 不再单独门控、`proxyPort` 不再独立判定、`model` 完全退出门锁。
+- 共享来源：新增 `composables/useIngressState.ts`（轮询 `getStatus` + `getOutput`、内部调纯函数 `deriveIngressStates`），`Overview.vue` 与 `InferenceView.vue` 均消费之，保证“密态推理可发判定”与“概览运行状态卡”为同一函数同一输入、不漂移。`ingressState.ts` / `ingressState.test.ts` 不动。
+- model 迁页：`model` 从“设置”视图移除、改为“密态推理”视图请求面板内可编辑输入（`v-model`，会话内内存、不持久化）。`apiKey` 仍在设置视图。`clearFeature` 改为只清 `apiKey` 并更新文案。空 `model` 发送不拦、由下游报真实错误（符合“不再检查其他条件”）。
+- 集成 tab“网关状态”badge 由 `tngReady` 改用 `tngRunning`，与表单门锁同源，消除“能发却显示未运行”的矛盾。
+- spec 尾随效应：model 迁页牵连多条只存于主 spec 的要求，在 delta 内新增 MODIFY——“带配置编辑器与启动控制的 GUI 窗口”（“设置视图不含启停控件” scenario 的 THEN 由“model/API Key”改为“API Key”；该要求正文末尾残留的旧两视图重复段落及同名重复 scenario 按 openspec “MODIFIED 须保留既有 scenario 名/块”的要求原样保留，不做清理）、“设置页离开时自动保存并自动重启 tng”（`model/apiKey`→`apiKey`）、“密态推理凭据只在 GUI 会话内”（model 由设置页填写/只读→推理页可编辑；按 openspec 须保留既有 scenario 名，故保留“推理页只读 model 且不展示明文 apiKey”这一 scenario 名、仅更新其正文以反映 model 现在推理页可编辑，名称中的“只读”为遗留标签）。
+
+### 反代转发 Host 修正（修 `recursion is detected`）
+
+实测经反代发送推理请求时 tng 回 `400 recursion is detected`：原 `proxy.rs::handle_conn` 把转发给 tng 内部 ingress 的 `Host` 改写为 `127.0.0.1:{internal_port}`——正是 tng 内部 ingress 自身监听地址，tng 据此判“请求发回自己”即递归。原注释假设“tng 按 Host 路由时须为内部端口”，且单测仅用 mock upstream（不触真 tng）掩盖了该问题，真实 tng 才暴露。
+
+修正：`ProxyRoute` 增 `remote_host`（`config.rs::read_remote_host` 取 `mapping` 首条规则 `out.host`、`http_proxy` 取 `dst_filters` 数组首元素 `dst_filters[0].domain`——`dst_filters` 现序列化为数组 `[{domain, port}]`；`mapping` 的 `out.host` 已由 `validate_required_remote` 保证非空 IPv4）；`handle_conn` 转发时 `Host` 设为该远端非本机地址（空串仅见于 http_proxy 未配 domain 的退化情形，退回原内部地址）。x-model 注入与原样转发不变。
+
+### http_proxy dst_filters 拆分主机名+端口并以数组序列化（扩展）
+
+`域名`（`http_proxy`）远端原为单文本 `domain`（`dst_filters` 序列化为对象 `{domain}`，与 tng 实际 `dst_filters` 数组 schema 不符、且端口无处放）。现改为：主机名 `domain` + 端口 `port` 两个控件；内部模型 `fields.dst_filters` 仍为单一对象 `{domain, port}`（一条 dst），`serialize` 输出为数组 `[{domain, port}]`（端口为空时省略 `port`，`port_match` 即匹配任意端口，tng 接受）；`parse` 同时兼容新数组 `[{domain, port}]` 与遗留对象 `{domain}` 两种输入、统一回填为内部对象。`proxy_listen`（tng 本地监听）仍固定 `127.0.0.1` + tngui 批探测注入的空闲端口，不动（不进用户可见控件、不序列化 host/port）。反代对外默认端口 `DEFAULT_LISTEN_PORT`/`DEFAULT_OUTWARD_PORT` 由 `18443` 改为 `9443`。
+
 ## Risks / Trade-offs
 
 - [反代绑定失败导致 tng 在跑却无对外入口] → 反代绑定失败时 `launch_tng` 返回明确错误、不写 tng 在跑状态。
@@ -67,4 +87,4 @@
 ## Open Questions
 
 - 多 ingress：当前假设单一/首个 ingress 被反代承接，对外只有一个反代端点。若需一条一反代/多端口，再加。可在实现前确认。
-- 对外 port 默认值是否沿用现本地监听默认（18443）或另取；现为沿用内置默认。可在实现前确认。
+- 对外 port 默认值已定为 `9443`（不再沿用旧值 `18443`）。

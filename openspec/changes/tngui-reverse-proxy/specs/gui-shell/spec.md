@@ -45,7 +45,7 @@ tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`
 
 #### Scenario: 注入端口避让对外端口
 
-- **WHEN** 批探测取到的某端口等于某条 ingress 的反代对外端口（如默认 `18443`）
+- **WHEN** 批探测取到的某端口等于某条 ingress 的反代对外端口（如默认 `9443`）
 - **THEN** 系统整批丢弃并重试批探测，最终注入的管控/内部端口无一等于任一对外端口
 
 #### Scenario: 占住再放避免取号重复
@@ -82,7 +82,7 @@ tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`
 ### Requirement: 结构化配置控件
 
 系统须（SHALL）在"设置"视图提供结构化控件，仅承载客户端 ingress（一条或多条 `add_ingress`），不承载 `add_egress`。每条 ingress 锁定为客户端 OHTTP 形态：
-- 远端类型二选一：`地址端口`（`mapping`，`out = {host:<IP>, port:<port>}`，`host` 须为 IP）或 `域名`（`http_proxy`，`dst_filters = {domain:<单文本框原样>}`，单文本框、不结构限定 http/https、不拆分端口）；`socks5`/`netfilter`/`hook`/`mapping_udp` 不作为 ingress 模式提供。
+- 远端类型二选一：`地址端口`（`mapping`，`out = {host:<IP>, port:<port>}`，`host` 须为 IP）或 `域名`（`http_proxy`，`dst_filters = [{domain:<主机名>, port:<端口号>}]`，主机名与端口分两个控件、主机名仅含主机名不含端口、端口走独立 `port` 字段）；`socks5`/`netfilter`/`hook`/`mapping_udp` 不作为 ingress 模式提供。
 - tng 本地监听 `host`/`port` 由 tngui 自动注入并对用户隐藏（见"ingress 本地监听强制走回环"）；ingress 编辑器行 1 改为呈现 tngui 反代对外绑定——`host` 在 `127.0.0.1`（仅本机）/`0.0.0.0`（对外网卡）间 toggle、`port` 可配（默认 `127.0.0.1`），作为 tngui 侧设置不进 tng 配置（见"tngui 反向代理对外暴露推理入口并注入 x-model 头"）。
 - `ohttp` 永远开、且 `ohttp.header_passthrough.request_headers` 写死为 `["x-model","x-api-key","authorization"]`（见"客户端 ingress 锁定 OHTTP 协议"），用户不可关闭、不可编辑。
 - 保留 `no_ra` 开关；其与 `verify` 的序列化语义见"ingress 的 no_ra 与 verify 互斥序列化"。
@@ -92,7 +92,7 @@ tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`
 #### Scenario: 新增条目并选模式
 
 - **WHEN** 用户在"设置"视图新增一条 ingress 并选择远端类型
-- **THEN** 系统仅提供"地址端口(mapping) / 域名(http_proxy)"两种远端类型，并在选定类型后展示该形态对应字段集（`地址端口` = `out` 的 IP+port；`域名` = 单文本框 `domain`），不出现 `socks5`/`netfilter`/`hook` 选择
+- **THEN** 系统仅提供"地址端口(mapping) / 域名(http_proxy)"两种远端类型，并在选定类型后展示该形态对应字段集（`地址端口` = `out` 的 IP+port；`域名` = 主机名 `domain` + 端口 `port` 两个控件），不出现 `socks5`/`netfilter`/`hook` 选择
 
 #### Scenario: 切换模式重置字段
 
@@ -107,21 +107,26 @@ tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`
 #### Scenario: 密态推理连接信息单一来源
 
 - **WHEN** 渲染"设置"视图的密态推理卡片
-- **THEN** 卡片只承载 API Key 与 Model；本机端口与远端一律取自结构化 ingress，不出现与结构化 ingress 断开的 `localPort`/`outboundAddress` 输入
+- **THEN** 卡片只承载 API Key（Model 已移至“密态推理”视图，见“密态推理页面发送并显示推理请求”）；本机端口与远端一律取自结构化 ingress，不出现与结构化 ingress 断开的 `localPort`/`outboundAddress` 输入
 
 #### Scenario: 启动时序列化为 TNG JSON
 
 - **WHEN** 用户触发启动/重启
 - **THEN** 系统将结构化控件状态序列化为符合 TNG 配置（外挂 tag 形式）的 JSON，其中不含 `control_interface.restful`（由启动流程注入，承接 `auto-manage-control-port`）、不含 `add_egress`、不含反代对外绑定字段（tngui 侧，由 tngui 用于反代绑定、不传给 tng），且每条 ingress 必含锁定 `ohttp`；tng ingress 本地监听 `host`/`port` 不出现在用户序列化的 ingress 里（由 tngui 在拉起 tng 前注入）
 
+#### Scenario: http_proxy dst_filters 序列化为带端口的数组
+
+- **WHEN** 用户以 `域名`（`http_proxy`）形态配置远端（主机名 + 端口）并触发序列化为 TNG JSON
+- **THEN** 该 ingress 的 `dst_filters` 序列化为数组 `[{ "domain": <主机名>, "port": <端口号> }]`——主机名仅含主机名（不含端口）、端口号走独立 `port` 字段；系统绝不（MUST NOT）把端口拼进 `domain` 字符串、绝不（MUST NOT）以 `{ "domain": "<host>:<port>" }` 单字段对象形式产出
+
 ### Requirement: ingress 控件按行分组呈现
 
-系统须（SHALL）在 ingress 的结构化编辑器中按以下三行分组呈现一条 ingress 的控件：第一行为本机端口/反代对外绑定（`host` 在 `127.0.0.1`（仅本机）/`0.0.0.0`（对外网卡）间 toggle + 对外 `port`，为 tngui 反代对外绑定、非 tng ingress 本地监听），独占一行；第二行为远端类型选择（`mapping`/`http_proxy`）与其当前远端类型对应的远端字段（`mapping` → 地址端口 IP+port，`http_proxy` → 域名单文本框），二者在同一横排依次出现，且远端类型切换须（SHALL）即时生效——直接切换控件显示状态与对应远端字段、将字段重置为该类型的默认值，绝不（MUST NOT）弹窗要求用户确认；第三行为远程证明开关（表示"ra"——是否启用远程证明，标签为"远程证明"）与其 verify 配置（model / as_provider，仅在开关开启即 `no_ra=false` 时出现），二者在同一横排依次出现；开关关闭即 `no_ra=true` 时该行仅显示开关，不渲染 verify。该分组不得改变锁定的字段集、不改变 ingress 仅为 `mapping`/`http_proxy` 两种形态、不改变 `no_ra`/`verify` 的互斥序列化语义——仅是呈现排布与切换交互的变化。窄屏下允许单一横排内换行，但不得把上述同一横排的两个控件错位到不相关行。
+系统须（SHALL）在 ingress 的结构化编辑器中按以下三行分组呈现一条 ingress 的控件：第一行为本机端口/反代对外绑定（`host` 在 `127.0.0.1`（仅本机）/`0.0.0.0`（对外网卡）间 toggle + 对外 `port`，为 tngui 反代对外绑定、非 tng ingress 本地监听），独占一行；第二行为远端类型选择（`mapping`/`http_proxy`）与其当前远端类型对应的远端字段（`mapping` → 地址端口 IP+port，`http_proxy` → 域名主机名 + 端口，分两控件），二者在同一横排依次出现，且远端类型切换须（SHALL）即时生效——直接切换控件显示状态与对应远端字段、将字段重置为该类型的默认值，绝不（MUST NOT）弹窗要求用户确认；第三行为远程证明开关（表示"ra"——是否启用远程证明，标签为"远程证明"）与其 verify 配置（model / as_provider，仅在开关开启即 `no_ra=false` 时出现），二者在同一横排依次出现；开关关闭即 `no_ra=true` 时该行仅显示开关，不渲染 verify。该分组不得改变锁定的字段集、不改变 ingress 仅为 `mapping`/`http_proxy` 两种形态、不改变 `no_ra`/`verify` 的互斥序列化语义——仅是呈现排布与切换交互的变化。窄屏下允许单一横排内换行，但不得把上述同一横排的两个控件错位到不相关行。
 
 #### Scenario: 远端类型与远端字段同行
 
 - **WHEN** 渲染一条 ingress 的远端配置
-- **THEN** 远端类型选择与当前类型对应的远端字段出现在同一横排（`mapping` → 地址端口，`http_proxy` → 域名）
+- **THEN** 远端类型选择与当前类型对应的远端字段出现在同一横排（`mapping` → 地址端口，`http_proxy` → 域名主机名 + 端口）
 
 #### Scenario: 远端类型切换即时生效无弹窗
 
@@ -159,17 +164,27 @@ tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`
 
 ### Requirement: 密态推理页面发送并显示推理请求
 
-系统须（SHALL）在密态推理视图提供单次作用的推理请求面板：用户在 prompt textarea 输入（发送后不清空、可改可重发）；发送时按 OpenAI 兼容格式 POST 到 tngui 反向代理对外端点 `http://<反代 bind host>:<对外 port>/v1/chat/completions`（携带 `Authorization: Bearer <apiKey>` 头、`{model, messages}` body）；`x-model` 头由 tngui 反代从 body 解析注入（见"tngui 反向代理对外暴露推理入口并注入 x-model 头"），而非前端或发送逻辑注入。输出区（只读）显示当次响应的 assistant 回复文本；不保留历史请求。RA 验证过程展示为 UI 占位（不接 stdout 数据）。
+系统须（SHALL）在密态推理视图提供单次作用的推理请求面板：用户在 prompt textarea 输入（发送后不清空、可改可重发）。面板的“可发”门锁只认两个条件——概览“运行状态”卡显示“运行”（即与概览左上角卡片相同的 `deriveIngressStates().runtime === "running"` 判定：控制面 reachable、`/livez` 与 `/readyz` 均 2xx、无 attestation/hpke 结构性失败日志、无进程错误）AND 本机已配置 api-key；满足即显示请求面板，否则显示“当前无法发送测试请求”占位。发送时按 OpenAI 兼容格式 POST 到 tngui 反向代理对外端点 `http://<反代 bind host>:<对外 port>/v1/chat/completions`（携带 `Authorization: Bearer <apiKey>` 头、`{model, messages}` body）；`x-model` 头由 tngui 反代从 body 解析注入（见“tngui 反向代理对外暴露推理入口并注入 x-model 头”），而非前端或发送逻辑注入。模型名 `model` 由用户在本面板内可编辑输入提供（会话内内存、不持久化、不入 tng 配置、不触发 tng 进程重启），不在“设置”视图配置、亦不作为可发门锁条件。输出区（只读）显示当次响应的 assistant 回复文本；不保留历史请求。RA 验证过程展示为 UI 占位（不接 stdout 数据）。
 
 #### Scenario: prompt 发送后不清空且可重发
 
 - **WHEN** 用户发送推理请求后
 - **THEN** prompt textarea 内容保持不变、可编辑后重新发送；输出区显示本次响应
 
+#### Scenario: 可发判定仅认概览运行态与 api-key
+
+- **WHEN** 渲染密态推理视图的请求面板
+- **THEN** 面板在且仅在概览“运行状态”卡显示“运行”（`deriveIngressStates().runtime === "running"`，与概览左上角同一判定，复用同一状态推导）AND api-key 已配置时可用；其余一律显示“当前无法发送测试请求”占位；`model` 是否填写、`readyz` 是否单列、反代对外端口是否独立判定，均不再作为可发门锁条件
+
 #### Scenario: 真发送经 tng 透明代理
 
-- **WHEN** 用户点击发送 AND tng 已启动且 TNG 配置至少含一个 ingress
-- **THEN** 系统向 tngui 反代对外端点（`http://<反代 bind host>:<对外 port>/v1/chat/completions`）发 POST，不直连 tng 内部 ingress 端口；反代注入 `x-model` 后转发至 tng 透明代理（ingress）；收到响应后输出区显示 `choices[0].message.content`
+- **WHEN** 用户点击发送 AND 概览显示“运行” AND api-key 已配置
+- **THEN** 系统向 tngui 反代对外端点（`http://<反代 bind host>:<对外 port>/v1/chat/completions`）发 POST，不直连 tng 内部 ingress 端口；反代按 body.model 注入 `x-model` 后转发至 tng 透明代理（ingress）；收到响应后输出区显示 `choices[0].message.content`
+
+#### Scenario: model 在推理页可编辑且不持久化
+
+- **WHEN** 用户在推理请求面板编辑模型名 `model`
+- **THEN** 该 `model` 作为 body.model 经反代注入 `x-model`；`model` 为会话内内存，关闭 GUI 不保留、不写入 tng-runtime.json、不触发 TNG 配置 dirty 或 tng 进程重启
 
 #### Scenario: 不保留历史请求
 
@@ -180,3 +195,97 @@ tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`
 
 - **WHEN** 渲染密态推理视图的 RA 过程区域
 - **THEN** 仅显示占位 UI，不从 tng stdout 读取 `attested=` 数据
+
+### Requirement: 带配置编辑器与启动控制的 GUI 窗口
+
+系统须（SHALL）渲染带左侧导航栏、含“概览”“密态推理”“设置”三视图的桌面 GUI 窗口；配置编辑控件位于“设置”视图，启动/停止控件位于“概览”视图；“设置”视图不含启动/停止控件。
+
+#### Scenario: 用户编写配置并启动 tng
+
+- **WHEN** 用户在“设置”视图编辑 TNG 配置后，通过“概览”视图点击启动 OR 在“设置”视图离开时触发自动保存并重启
+- **THEN** 系统将该配置写入文件并以该配置文件拉起 `tng launch`
+
+#### Scenario: 重启时先终止既有进程
+
+- **WHEN** GUI 启动的 tng 进程已在运行 AND 用户触发新启动/重启（概览启动按钮 或 设置页 dirty 时自动重启）
+- **THEN** 系统在以新配置拉起新进程之前先终止既有 tng 子进程
+
+#### Scenario: 三视图导航切换
+
+- **WHEN** 用户点击导航的“概览”/“密态推理”/“设置”
+- **THEN** 右侧视图区切换为对应视图
+
+#### Scenario: 启停控件位于概览
+
+- **WHEN** 用户在概览视图操作启动/停止
+- **THEN** 点击启动 = 以当前 TNG 配置写盘并拉起 `tng launch`；点击停止 = 终止 GUI 拉起的 tng 子进程
+
+#### Scenario: 设置视图不含启停控件
+
+- **WHEN** 用户处于设置视图
+- **THEN** 该视图不显示启动/重启按钮，仅显示配置编辑控件 + 原始 JSON + 导入导出 + 密态推理 API Key 输入框（模型名 `model` 不在“设置”视图配置，已移至“密态推理”视图的请求面板内编辑）
+
+#### Scenario: 离开设置时按需自动重启
+
+- **WHEN** 用户修改 TNG 配置后从设置视图切换到其他视图 AND tng 正在运行
+- **THEN** 系统在切走前写盘并自动重启 tng（kill 旧 + spawn 新）
+
+系统须（SHALL）渲染一个带左侧导航栏的桌面 GUI 窗口，提供“首页”与“配置”两个视图；配置编辑控件与启动/重启控件位于“配置”视图，“首页”视图不含配置编辑与启停控件。
+
+#### Scenario: 用户编写配置并启动 tng
+
+- **WHEN** 用户在“配置”视图编辑配置（结构化控件或原始 JSON）并触发启动/重启控件
+- **THEN** 系统将该配置写入文件并以该配置文件拉起 `tng launch`
+
+#### Scenario: 重启时先终止既有进程
+
+- **WHEN** GUI 启动的 tng 进程已在运行，且用户触发启动/重启控件
+- **THEN** 系统在以当前配置拉起新进程之前先终止既有 tng 子进程
+
+### Requirement: 设置页离开时自动保存并自动重启 tng
+
+系统须（SHALL）在用户从“设置”视图切换到其他视图时检测 TNG 配置是否变化（与最后一次已保存的序列化对比 dirty）；dirty 则写 tng-runtime.json；若 tng 当前正在运行 THEN 自动终止旧进程并拉起新配置下的 tng；未在运行 THEN 仅写盘不 spawn。修改 apiKey 不计入 dirty（模型名 `model` 现于“密态推理”视图编辑，不在“设置”视图，本身不构成设置页 dirty 因素）。
+
+#### Scenario: dirty 且 tng 在跑 → 自动重启
+
+- **WHEN** 用户改 TNG 配置并切出设置 AND tng 正在运行
+- **THEN** 系统写盘 + kill 旧进程 + spawn 新
+
+#### Scenario: dirty 且 tng 未在跑 → 仅写盘
+
+- **WHEN** 用户改 TNG 配置并切出设置 AND tng 未在运行
+- **THEN** 系统只写盘 tng-runtime.json 不 spawn
+
+#### Scenario: 未 dirty → 不动
+
+- **WHEN** 用户切出设置且 TNG 配置未变
+- **THEN** 系统不写盘、不重启
+
+#### Scenario: 推理凭据改动不触发 tng 重启
+
+- **WHEN** 用户仅改 apiKey 并切出设置，或仅改“密态推理”视图的 model
+- **THEN** 不触发 TNG 配置 dirty / tng 写盘/重启逻辑
+
+### Requirement: 密态推理凭据只在 GUI 会话内
+
+系统须（SHALL）将密态推理的 apiKey 与 model 作为仅 GUI 会话内的内存态（不写本地存储、不持久化、不入 tng 配置）：apiKey 在“设置”视图填写；model 在“密态推理”视图的请求面板内可编辑填写（不再于“设置”视图配置、亦非只读）；二者供密态推理视图发送使用；关闭 GUI 后这两个值不保留。
+
+#### Scenario: 不入 tng-runtime.json
+
+- **WHEN** 保存 TNG 配置时
+- **THEN** 写盘的 tng-runtime.json 不含 model 或 apiKey 字段
+
+#### Scenario: 不持久化跨会话
+
+- **WHEN** 用户填写 model/apiKey 并关闭后重新打开 GUI
+- **THEN** “设置”视图的 apiKey 与“密态推理”视图的 model 均为空
+
+#### Scenario: 推理页只读 model 且不展示明文 apiKey
+
+- **WHEN** 渲染密态推理视图
+- **THEN** model 以可编辑输入呈现于请求面板（会话内内存、发送时作为 body.model）；apiKey 不在“密态推理”视图 UI 上明文展示（明文输入只出现在“设置”视图），发送时仅作为 Authorization 头使用
+
+#### Scenario: model+apiKey 变动不影响 tng 进程
+
+- **WHEN** 用户修改 model（在“密态推理”视图）或 apiKey（在“设置”视图）
+- **THEN** 不触发 TNG 配置 dirty / tng 进程重启

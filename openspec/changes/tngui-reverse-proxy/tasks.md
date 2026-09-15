@@ -19,4 +19,27 @@
 - [x] 3.1 更新 `docs/tngui-ui-guide.md`：本机端口 = 反代对外绑定（host toggle + port）、tng 本地监听对用户隐藏、推理统一经反代、D1 toggle 语义、x-model 由反代按 body.model 注入且对已带 x-model 覆盖。— verify：描述与 spec 一致
 - [x] 3.2 前端 `npx vue-tsc --noEmit` / `npx vitest run` 绿；后端 `cargo fmt --check -p tngui-app` + `cargo test -p tngui-core` 绿（tngui-app GUI 编译在 Windows 验证）。— verify：退出码 0
 - [x] 3.3 `openspec validate tngui-reverse-proxy` 通过。— verify：退出码 0
-- [ ] 3.4 人工冒烟（Windows）：启动 tng → 反代对外端点可达；curl 反代 `/v1/chat/completions`（含 model + Authorization）→ 200、网关收到 `x-model`；客户端自带 `x-model`（与 body.model 不一致）被覆盖为 body.model；0.0.0.0 toggle 可对外、默认 127.0.0.1；外部客户端连接的是反代而非 tng 内部 ingress 端口；tng-runtime.json 中 `control_interface.restful.port` 与各 ingress 内部端口两两不同、且无一等于对外端口（不再复现单点探测占走对外 18443 的 10048）。— verify：观察到如述
+- [ ] 3.4 人工冒烟（Windows）：启动 tng → 反代对外端点可达；curl 反代 `/v1/chat/completions`（含 model + Authorization）→ 200、网关收到 `x-model`；客户端自带 `x-model`（与 body.model 不一致）被覆盖为 body.model；0.0.0.0 toggle 可对外、默认 127.0.0.1；外部客户端连接的是反代而非 tng 内部 ingress 端口；tng-runtime.json 中 `control_interface.restful.port` 与各 ingress 内部端口两两不同、且无一等于对外端口（不再复现单点探测占走对外 9443 的 10048）。— verify：观察到如述
+
+
+## 4. 密态推理调试门锁放宽 + model 迁页（扩展）
+
+- [x] 4.1 新增共享 composable `frontend/src/composables/useIngressState.ts`：轮询 `getStatus()` + `getOutput()`，内部调 `deriveIngressStates`（复用 `frontend/src/ingressState.ts` 纯函数），暴露 `tngRunning`（`runtime === "running"`）、`states`、`statusReport`、`outputLines`；即与概览左上角“运行状态”卡同一判定。— verify：`npx vue-tsc --noEmit` 0 错误
+- [x] 4.2 `frontend/src/views/Overview.vue` 改用 `useIngressState()`，替换内联 `poll`/`states`/`tngRunning`/`statusReport`/`outputLines` 相关逻辑（行为不变，仅收敛为单一来源）。— verify：概览四卡与运行状态卡表现与改前一致；`npx vue-tsc --noEmit` 0 错误
+- [x] 4.3 `frontend/src/views/InferenceView.vue`：`usable` 改为 `tngRunning.value && !!apiKey.value`（去掉 `tngReady`/`model`/`proxyPort!==null` 门控）；状态轮询改用 `useIngressState()` 的 `tngRunning`、并始终拉 `proxyEndpoint()`（不再以 `s.ready` 为 `fetchProxy()` 前提）；Model 输入由 `disabled` 只读改为可编辑 `v-model="inferenceModel"`；集成 tab“网关状态”badge 改用 `tngRunning`。— verify：概览显示“运行”+填 api-key → 表单可见可发；未运行或未填 api-key → 占位；`npx vue-tsc --noEmit` 0 错误
+- [x] 4.4 `frontend/src/views/SettingsView.vue`：删除 Model（`inferenceModel`）输入控件；`clearFeature` 只清 `apiKey` 并改文案“已清除本机 API Key（中心侧 Key 不受影响）”。— verify：设置页密态推理卡无 Model 字段；`npx vue-tsc --noEmit` 0 错误
+- [x] 4.5 更新 spec delta `openspec/changes/tngui-reverse-proxy/specs/gui-shell/spec.md`（门锁放宽 + model 迁页的 MODIFY/新增要求，见 design D5）。— verify：`openspec validate tngui-reverse-proxy` 退出码 0
+- [x] 4.6 更新 `docs/tngui-ui-guide.md`：密态推理卡只含 API Key、Model 已移至推理调试页可编辑；可用条件改为“概览显示运行 + api-key 已配”（不再要求 model 预填/readyz 单列/反代端口独立判定）；空 model 发送报真实错误。— verify：描述与 spec 一致
+- [x] 4.7 前端 `npx vue-tsc --noEmit`（及 `npx vitest run`，含既有 `ingressState.test.ts`）绿。— verify：退出码 0
+- [x] 4.8 修 `tngui-core/src/proxy.rs` 转发 Host 递归：原 `handle_conn` 把转发给 tng 内部 ingress 的 Host 改写为 `127.0.0.1:{internal_port}`（即 tng 自身监听地址），触发 tng `400 recursion is detected`。改为经 `ProxyRoute.remote_host` 携带远端目标（`mapping` 的 `out.host` / `http_proxy` 的 `domain`，由 `config.rs::read_remote_host` 提取），转发时 Host 设为该非本机地址。— verify：`cargo test -p tngui-core` 绿（含新增 `read_remote_host` 测试）、`cargo fmt --check -p tngui-core` 绿
+
+
+## 5. http_proxy dst_filters 拆分主机名+端口并以数组序列化 + 反代默认端口改 9443（扩展）
+
+- [x] 5.1 `frontend/src/formspec.ts`：`DstFilters` 增 `port`；新增 `FieldType="domainHostPort"`；`INGGRESS_FIELDS.http_proxy` 远端由 `domainText` 改为 `domainHostPort`（主机名+端口）；`defaultFields("http_proxy")` 产出 `dst_filters:{domain:"",port:0}`；`DEFAULT_LISTEN_PORT` 由 `18443` 改为 `9443`。— verify：`npx vue-tsc --noEmit` 0 错误
+- [x] 5.2 `frontend/src/components/FieldRenderer.vue`：新增 `domainHostPort` 分支（主机名输入 + 端口输入），移除已弃用的 `domainText` 分支。— verify：`npx vue-tsc --noEmit` 0 错误
+- [x] 5.3 `frontend/src/components/EntryEditor.vue`：`ensureDstFilters` 兜底为 `{domain:"",port:0}`；内部监听兜默认端口改用 `DEFAULT_LISTEN_PORT`（去硬编码 `18443`）。— verify：`npx vue-tsc --noEmit` 0 错误
+- [x] 5.4 `frontend/src/configmodel.ts`：`serialize`（http_proxy）输出 `dst_filters:[{domain,port}]` 数组（端口空省略 `port`）；`parse`（http_proxy）兼容数组 `[{domain,port}]` 与遗留对象 `{domain}`、统一回填内部对象 `{domain,port}`。— verify：`npx vitest run` configmodel 全绿（含数组序列化断言、数组/对象回填、verified config 导入）
+- [x] 5.5 `tngui-core/src/config.rs`：`DEFAULT_OUTWARD_PORT` 由 `18443` 改 `9443`；`read_remote_host`（http_proxy）改为读 `dst_filters` 数组首元素 `dst_filters[0].domain`，并兼容遗留对象 `{domain}`；更新 `prepare_launch_default_outward_when_missing` 断言为 `9443`、新增数组 `dst_filters` passthrough 与 `read_remote_host` 数组读取测试。— verify：`cargo test -p tngui-core` 绿、`cargo fmt --check -p tngui-core` 绿
+- [x] 5.6 更新 `docs/tngui-ui-guide.md`：http_proxy 远端由单文本域名改为主机名+端口两字段、`dst_filters=[{domain,port}]`。— verify：描述与 spec 一致
+- [x] 5.7 `openspec validate tngui-reverse-proxy` 通过；前端 `npx vue-tsc --noEmit` + `npx vitest run` 绿。— verify：退出码 0

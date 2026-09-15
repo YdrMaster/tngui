@@ -4,6 +4,7 @@ import {
   INGRESS_FIELDS,
   defaultFields,
   DEFAULT_VERIFY,
+  DEFAULT_LISTEN_PORT,
   LOCALHOST,
   type EntryModel,
   type IngressMode,
@@ -25,17 +26,25 @@ function ensureMappingRule() {
   const ok = rules.some((r) => r && typeof r.in === "object" && typeof r.out === "object");
   if (!ok) {
     props.entry.fields.rules = [
-      { in: { host: LOCALHOST, port: 18443 }, out: { host: "", port: 10000 } },
+      { in: { host: LOCALHOST, port: DEFAULT_LISTEN_PORT }, out: { host: "", port: 10000 } },
     ];
   }
 }
 function ensureProxyListen() {
   const pl = props.entry.fields.proxy_listen;
-  if (typeof pl !== "object" || pl === null) props.entry.fields.proxy_listen = { host: LOCALHOST, port: 18443 };
+  if (typeof pl !== "object" || pl === null) props.entry.fields.proxy_listen = { host: LOCALHOST, port: DEFAULT_LISTEN_PORT };
 }
 function ensureDstFilters() {
   const df = props.entry.fields.dst_filters;
-  if (typeof df !== "object" || df === null) props.entry.fields.dst_filters = { domain: "" };
+  if (Array.isArray(df)) {
+    const d0 = typeof df[0] === "object" && df[0] !== null ? (df[0] as Record<string, any>) : {};
+    props.entry.fields.dst_filters = {
+      domain: typeof d0.domain === "string" ? d0.domain : "",
+      port: typeof d0.port === "number" ? d0.port : 0,
+    };
+    return;
+  }
+  if (typeof df !== "object" || df === null) props.entry.fields.dst_filters = { domain: "", port: 0 };
 }
 
 // 锁定形态的嵌套子对象（供 FieldRenderer 绑定 remote / verify）

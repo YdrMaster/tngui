@@ -1,14 +1,13 @@
 <script setup lang="ts">
-import { ref, computed, inject, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, inject } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { message } from "ant-design-vue";
-import { getStatus, getOutput, launchTng } from "../tauri";
+import { launchTng } from "../tauri";
 import { useTngConfig } from "../composables/useTngConfig";
+import { useIngressState } from "../composables/useIngressState";
 import { isRemoteConfigured } from "../formspec";
 import {
-  deriveIngressStates,
   deriveIngressInfo,
-  type IngressObservation,
   type RuntimeState,
   type RemoteLinkState,
   type RemoteProofState,
@@ -17,12 +16,8 @@ import IngressStateCard from "../components/IngressStateCard.vue";
 import IngressInfoCard from "../components/IngressInfoCard.vue";
 
 const { serializeCurrent, model } = useTngConfig();
-
-const statusReport = ref<Awaited<ReturnType<typeof getStatus>> | null>(null);
-const outputLines = ref<string[]>([]);
-const statusJsonText = ref("（暂无数据）");
+const { statusReport, outputLines, states, tngRunning, pollError } = useIngressState();
 const launching = ref(false);
-let timer: number | undefined;
 
 const ingressInfo = computed(() => {
   const entries = model.value.add_ingress || [];
@@ -35,22 +30,15 @@ const entryOutward = computed(() => {
   return e?.outward ?? null;
 });
 
-const states = computed(() => {
-  const report = statusReport.value;
-  const observation: IngressObservation = {
-    reachable: report?.reachable ?? false,
-    livezOk: report?.livez_ok ?? false,
-    ready: report?.ready ?? false,
-    statusJson: report?.status_json ?? null,
-    ingressKeys: report?.ingress_keys ?? null,
-    ingressKeysError: report?.ingress_keys_error ?? null,
-    processError: report?.process_error ?? null,
-    outputLines: outputLines.value,
-  };
-  return deriveIngressStates(observation);
+const statusJsonText = computed(() => {
+  const r = statusReport.value;
+  if (!r) return pollError.value ? `查询失败: ${pollError.value}` : "（暂无数据）";
+  let txt = r.status_json ? JSON.stringify(r.status_json, null, 2) : "（暂无数据）";
+  if (r.ingress_keys) txt += "\n// ingress ohttp keys\n" + JSON.stringify(r.ingress_keys, null, 2);
+  if (r.ingress_keys_error) txt += "\n// keys 采集: " + r.ingress_keys_error;
+  if (r.error) txt += "\n// " + r.error;
+  return txt;
 });
-
-const tngRunning = computed(() => states.value.runtime === "running");
 
 const navigate = inject<(target: "overview" | "inference" | "settings") => void>(
   "navigate",
@@ -87,34 +75,6 @@ const remoteProofView = computed<{ state: "ok" | "warn" | "err" | "neutral"; tex
   return map[states.value.remoteProof];
 });
 
-async function poll() {
-  try {
-    const r = await getStatus();
-    statusReport.value = r;
-    statusJsonText.value = r.status_json
-      ? JSON.stringify(r.status_json, null, 2)
-      : "（暂无数据）";
-    if (r.ingress_keys) {
-      statusJsonText.value += "\n// ingress ohttp keys\n" + JSON.stringify(r.ingress_keys, null, 2);
-    }
-    if (r.ingress_keys_error) {
-      statusJsonText.value += "\n// keys 采集: " + r.ingress_keys_error;
-    }
-    if (r.error) {
-      statusJsonText.value += "\n// " + r.error;
-    }
-  } catch (e) {
-    statusReport.value = null;
-    statusJsonText.value = "查询失败: " + String(e);
-  }
-  try {
-    const lines = await getOutput();
-    outputLines.value = lines?.length ? lines : [];
-  } catch {
-    outputLines.value = [];
-  }
-}
-
 async function onToggle() {
   launching.value = true;
   if (tngRunning.value) {
@@ -135,13 +95,7 @@ async function onToggle() {
   launching.value = false;
 }
 
-onMounted(() => {
-  poll();
-  timer = window.setInterval(poll, 1500);
-});
-onBeforeUnmount(() => {
-  if (timer) window.clearInterval(timer);
-});
+
 </script>
 
 <template>

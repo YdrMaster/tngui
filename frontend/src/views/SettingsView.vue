@@ -14,7 +14,7 @@ import { useTngConfig } from "../composables/useTngConfig";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
 
 const { model, isDirty, markSaved, serializeCurrent } = useTngConfig();
-const { model: inferenceModel, apiKey } = useInferenceConfig();
+const { apiKey } = useInferenceConfig();
 const activeTab = ref<"form" | "raw">("form");
 const rawEditing = ref(serializeCurrent());
 const showKey = ref(false);
@@ -109,8 +109,7 @@ function copyLocal() {
 }
 function clearFeature() {
   apiKey.value = "";
-  inferenceModel.value = "";
-  message.success("已清除本机推理凭据（model / API Key），中心侧 Key 不受影响");
+  message.success("已清除本机 API Key（中心侧 Key 不受影响）");
 }
 
 watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { deep: true });
@@ -155,7 +154,7 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
       <a-tag color="blue">已启用 1 个功能</a-tag>
     </div>
 
-    <!-- 密态推理 Feature Card：只保留 API Key / Model；本地端口与远端取自结构化 ingress -->
+    <!-- 密态推理 Feature Card：只保留 API Key（Model 已移至密态推理视图）；本地端口与远端取自结构化 ingress -->
     <a-card class="feature-card">
       <template #title>
         <div style="display:flex;align-items:center;gap:12px">
@@ -188,15 +187,10 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
             </span>
           </div>
         </a-form>
-        <a-form layout="vertical" style="margin-top:16px">
-          <a-form-item label="Model（推理模型名，发送时用，不持久化）">
-            <a-input v-model:value="inferenceModel" placeholder="如 gpt-4 / vllm-model" />
-          </a-form-item>
-        </a-form>
       </div>
       <a-divider />
       <div class="feature-danger" style="display:flex;justify-content:space-between;align-items:center;padding:2px 0 4px">
-        <div><strong>清除本机推理凭据</strong><br><span style="color:var(--text-secondary)">移除本机 API Key 与 Model，中心侧 Key 不会被删除。</span></div>
+        <div><strong>清除本机推理凭据</strong><br><span style="color:var(--text-secondary)">移除本机 API Key，中心侧 Key 不会被删除。</span></div>
         <a-button danger @click="clearFeature">清除本机凭据</a-button>
       </div>
     </a-card>

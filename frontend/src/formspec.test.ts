@@ -55,7 +55,7 @@ describe("isRemoteConfigured（镜像后端 validate_ingress_for_launch）", () 
       add_ingress: [
         {
           mode: "http_proxy",
-          fields: { proxy_listen: { host: "127.0.0.1", port: 18443 }, dst_filters: { domain: "" } },
+          fields: { proxy_listen: { host: "127.0.0.1", port: 18443 }, dst_filters: { domain: "", port: 0 } },
           no_ra: true,
           outward: { host: "127.0.0.1", port: 18443 },
           extra: {},

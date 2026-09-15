@@ -11,8 +11,8 @@ export const INGRESS_MODES: IngressMode[] = ["mapping", "http_proxy"];
 /** parse 识别的 ingress 模式 tag（其余 tag 视为不支持，见 configmodel.parseEntry）。 */
 export const ALL_MODES: IngressMode[] = ["mapping", "http_proxy"];
 
-/** 内置默认监听口（默认开局模板用）。 */
-export const DEFAULT_LISTEN_PORT = 18443;
+/** 反代对外绑定默认端口（亦作隐藏内部监听占位，启动时由批探测覆盖）。 */
+export const DEFAULT_LISTEN_PORT = 9443;
 /** 内置默认远端口（mapping 占位）。 */
 export const DEFAULT_OUT_PORT = 10000;
 
@@ -54,6 +54,7 @@ export interface ProxyListen {
 }
 export interface DstFilters {
   domain: string;
+  port: number;
 }
 
 /** 一条 ingress 条目的模型。fields 为各模式的嵌套字段；verify 仅在 no_ra=false 时有效；
@@ -75,7 +76,7 @@ export interface ConfigModel {
 }
 
 // —— form-spec：驱动 EntryEditor/FieldRenderer 渲染 ——
-export type FieldType = "listenHostPort" | "outHostPort" | "domainText" | "verifyFields";
+export type FieldType = "listenHostPort" | "outHostPort" | "domainHostPort" | "verifyFields";
 
 export interface FieldSpec {
   key: string;
@@ -91,7 +92,7 @@ export const INGRESS_FIELDS: Record<IngressMode, FieldSpec[]> = {
   ],
   http_proxy: [
     { key: "listen", label: "本地监听（host 锁定 127.0.0.1）", type: "listenHostPort", required: true },
-    { key: "remote", label: "远端域名（完整域名，不限 http/https）", type: "domainText", required: true },
+    { key: "remote", label: "远端域名端口（domain 主机名 + 端口）", type: "domainHostPort", required: true },
   ],
 };
 
@@ -107,7 +108,7 @@ export function defaultFields(mode: string): Record<string, unknown> {
   if (mode === "http_proxy") {
     return {
       proxy_listen: { host: LOCALHOST, port: DEFAULT_LISTEN_PORT },
-      dst_filters: { domain: "" },
+      dst_filters: { domain: "", port: 0 },
     };
   }
   return {};

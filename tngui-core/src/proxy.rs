@@ -35,6 +35,9 @@ pub struct ProxyRoute {
     pub out_host: String,
     pub out_port: u16,
     pub internal_port: u16,
+    /// 远端目标 host（转发 tng 内部 ingress 时用作 Host 头）：mapping 的 out.host /
+    /// http_proxy 的 domain。须为非本机地址，避开 tng 的 recursion 检测。
+    pub remote_host: String,
 }
 
 /// 一个对外监听器的运行句柄；`stop` 即停该监听。
@@ -100,6 +103,7 @@ async fn start_one(route: ProxyRoute) -> Result<ProxyListener, String> {
         .await
         .map_err(|e| format!("反代绑定 {bind} 失败: {e}"))?;
     let internal_port = route.internal_port;
+    let remote_host = route.remote_host.clone();
     let (abort_tx, mut abort_rx) = oneshot::channel::<()>();
     let join = tokio::spawn(async move {
         loop {
@@ -112,8 +116,9 @@ async fn start_one(route: ProxyRoute) -> Result<ProxyListener, String> {
                         Err(_) => continue, // 单次 accept 失败不终止监听
                     };
                     let port = internal_port;
+                    let rh = remote_host.clone();
                     tokio::spawn(async move {
-                        let _ = handle_conn(stream, port).await;
+                        let _ = handle_conn(stream, port, rh).await;
                     });
                 }
             }
@@ -130,7 +135,11 @@ const BODY_LIMIT: usize = 10 * 1024 * 1024; // 10 MiB（与 inference.rs 对齐�
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 处理一条客户端连接：读请求 → 注入/覆盖 `x-model` → 转发内部 ingress → 原样回传响应。
-async fn handle_conn(mut client: TcpStream, internal_port: u16) -> std::io::Result<()> {
+async fn handle_conn(
+    mut client: TcpStream,
+    internal_port: u16,
+    remote_host: String,
+) -> std::io::Result<()> {
     // 1. 读请求头（到 \r\n\r\n）
     let (buf, body_off) = match read_until_double_crlf(&mut client).await? {
         Some(x) => x,
@@ -161,10 +170,18 @@ async fn handle_conn(mut client: TcpStream, internal_port: u16) -> std::io::Resu
         set_header(&mut headers, "x-model", &m);
     }
 
-    // 4. 剥离 hop-by-hop 头；对 upstream 设 Connection: close、Host 改写为内部 ingress 地址
-    //    （与可工作的 inference::send_inference 同法——tng 按 Host 路由时须为内部端口）。
+    // 4. 剥离 hop-by-hop 头；对 upstream 设 Connection: close。
+    //    Host 须为远端目标（mapping 的 out.host / http_proxy 的 domain）：tng 内部 ingress
+    //    把命中本机监听（如 127.0.0.1:internal_port）的 Host 判为递归、回 400
+    //    "recursion is detected"。故改用非本机远端地址；remote_host 缺省（http_proxy 未配
+    //    domain 的退化情形）退回原内部地址。
     strip_hop_by_hop(&mut headers);
-    set_header(&mut headers, "host", &format!("127.0.0.1:{internal_port}"));
+    let host_value = if remote_host.is_empty() {
+        format!("127.0.0.1:{internal_port}")
+    } else {
+        remote_host
+    };
+    set_header(&mut headers, "host", &host_value);
     set_header(&mut headers, "connection", "close");
     set_header(&mut headers, "content-length", &body.len().to_string());
 
@@ -406,6 +423,7 @@ mod tests {
             out_host: BIND_LOCALHOST.to_string(),
             out_port,
             internal_port: up_port,
+            remote_host: "10.0.0.1".to_string(),
         }])
         .await
         .unwrap();

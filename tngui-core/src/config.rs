@@ -16,7 +16,7 @@ const LOCALHOST: &str = "127.0.0.1";
 
 /// 反代对外绑定端口的默认值（前端 `formspec.DEFAULT_LISTEN_PORT` 的后端镜像；仅当用户配置
 /// 不含 `tngui_outward.port` 时回退——正常路径前端总会显式写入）。
-const DEFAULT_OUTWARD_PORT: u16 = 18443;
+const DEFAULT_OUTWARD_PORT: u16 = 9443;
 
 /// 管控面由 tngui 自管、端口不对用户暴露：端口由 `pick_free_ports` 批取（绑定
 /// `127.0.0.1:0` 占住再放）后交给启动流程注入传给 tng 的配置。该端口随后由 `PortCell`
@@ -178,10 +178,14 @@ fn prepare_ingress_entry(
     // 注入内部本地监听 host（127.0.0.1）+ port（由调用方批探测供给，覆盖用户）。
     inject_ingress_listen(entry, internal_port);
 
+    // 远端目标 host（转发 tng 时作 Host 头，避开 recursion 检测）。
+    let remote_host = read_remote_host(entry);
+
     Ok(crate::proxy::ProxyRoute {
         out_host: out_host.to_string(),
         out_port,
         internal_port,
+        remote_host,
     })
 }
 
@@ -228,10 +232,54 @@ fn inject_ingress_listen(entry: &mut Value, port: u16) {
     }
 }
 
+/// 读 ingress 的远端目标 host（转发给 tng 内部 ingress 时用作 Host 头，须为非本机地址
+/// 以避开 tng 的 recursion 检测）：`mapping` 取首条规则 `out.host`，`http_proxy` 取
+/// `dst_filters` 数组首元素 `dst_filters[0].domain`（兼容遗留对象 `{domain}`）。`mapping` 的 `out.host` 已由 `validate_required_remote` 保证非空
+/// IPv4；`http_proxy` 的 domain 可能为空（tng 接受），此时返回空串（由调用方回退）。
+fn read_remote_host(entry: &Value) -> String {
+    if let Some(m) = entry.get("mapping").and_then(Value::as_object) {
+        let host = m
+            .get("rules")
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.first())
+            .and_then(|r| r.get("out"))
+            .and_then(Value::as_object)
+            .and_then(|o| o.get("host"))
+            .and_then(Value::as_str)
+            .or_else(|| {
+                m.get("out")
+                    .and_then(Value::as_object)
+                    .and_then(|o| o.get("host"))
+                    .and_then(Value::as_str)
+            });
+        return host.unwrap_or("").to_string();
+    }
+    if let Some(h) = entry.get("http_proxy").and_then(Value::as_object) {
+        // dst_filters 序列化为数组 [{domain, port}]；兼容遗留对象 {domain}
+        if let Some(df) = h.get("dst_filters") {
+            let dom = df
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(Value::as_object)
+                .and_then(|d| d.get("domain"))
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    df.as_object()
+                        .and_then(|d| d.get("domain"))
+                        .and_then(Value::as_str)
+                });
+            if let Some(d) = dom {
+                return d.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
 /// 拦截 tng 加载期必然拒绝的 ingress 远端配置：`mapping` 每条规则（序列化形态
 /// `{ rules: [{ in, out }] }`，也兼容遗留 `{ in, out }`）的 `out.host` 须为非空 IPv4——
 /// 与 tng `mapping_rule::RuleEndpoint.host: Option<Ipv4Addr>` 一致，空串/非 IP 会被
-/// `untagged enum MappingDe` 整体拒掉。`http_proxy` 的 `dst_filters.domain` 即便为空 tng 也
+/// `untagged enum MappingDe` 整体拒掉。`http_proxy` 的 `dst_filters` 即便 domain 为空 tng 也
 /// 加载（仅匹配不到），故不拦。
 fn validate_ingress_for_launch(root: &serde_json::Map<String, Value>) -> Result<(), PrepareError> {
     let Some(entries) = root.get("add_ingress").and_then(Value::as_array) else {
@@ -377,6 +425,40 @@ mod tests {
     }
 
     #[test]
+    fn read_remote_host_picks_mapping_out_or_http_proxy_domain() {
+        // mapping：首条规则 out.host
+        let m = serde_json::from_str::<Value>(
+            r#"{"mapping":{"rules":[{"in":{"port":1},"out":{"host":"10.0.0.1","port":2}}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_remote_host(&m), "10.0.0.1");
+        // mapping 遗留 {in,out} 形态
+        let m2 = serde_json::from_str::<Value>(
+            r#"{"mapping":{"in":{"port":1},"out":{"host":"10.0.0.2","port":2}}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_remote_host(&m2), "10.0.0.2");
+        // http_proxy：dst_filters 数组首元素 domain（序列化形态 [{domain, port}]）
+        let h = serde_json::from_str::<Value>(
+            r#"{"http_proxy":{"proxy_listen":{"port":1},"dst_filters":[{"domain":"inference.example","port":8443}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_remote_host(&h), "inference.example");
+        // http_proxy 遗留对象形态 {domain}：仍兼容
+        let h_obj = serde_json::from_str::<Value>(
+            r#"{"http_proxy":{"proxy_listen":{"port":1},"dst_filters":{"domain":"legacy.example"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_remote_host(&h_obj), "legacy.example");
+        // http_proxy 空 domain → 空串（调用方回退）
+        let h2 = serde_json::from_str::<Value>(
+            r#"{"http_proxy":{"proxy_listen":{"port":1},"dst_filters":{"domain":""}}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_remote_host(&h2), "");
+    }
+
+    #[test]
     fn prepare_creates_control_interface_when_absent() {
         // 无 control_interface → 注入 host=127.0.0.1、port=注入值
         let v = prepare_config(r#"{"add_ingress":[]}"#, 40001).unwrap();
@@ -477,15 +559,20 @@ mod tests {
 
     #[test]
     fn prepare_forces_http_proxy_listen_host_loopback() {
-        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"10.0.0.1","port":18443},"dst_filters":{"domain":"x.example.com"}},"no_ra":true}]}"#;
+        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"10.0.0.1","port":18443},"dst_filters":[{"domain":"x.example.com","port":8443}]},"no_ra":true}]}"#;
         let v = prepare_config(src, 40032).unwrap();
         assert_eq!(
             v["add_ingress"][0]["http_proxy"]["proxy_listen"]["host"],
             "127.0.0.1"
         );
+        // dst_filters 数组形态原样透传（host + port 分字段）
         assert_eq!(
-            v["add_ingress"][0]["http_proxy"]["dst_filters"]["domain"],
+            v["add_ingress"][0]["http_proxy"]["dst_filters"][0]["domain"],
             "x.example.com"
+        );
+        assert_eq!(
+            v["add_ingress"][0]["http_proxy"]["dst_filters"][0]["port"],
+            8443
         );
     }
 
@@ -536,7 +623,7 @@ mod tests {
     #[test]
     fn prepare_accepts_http_proxy_empty_domain() {
         // http_proxy 空 domain 也能加载（tng 接受）→ 不拦
-        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"127.0.0.1","port":18443},"dst_filters":{"domain":""}}}]}"#;
+        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"127.0.0.1","port":18443},"dst_filters":[{"domain":""}]}}]}"#;
         assert!(prepare_config(src, 40055).is_ok());
     }
 
@@ -598,12 +685,12 @@ mod tests {
 
     #[test]
     fn prepare_launch_default_outward_when_missing() {
-        // 用户配置不含 tngui_outward → 默认 (127.0.0.1, DEFAULT_OUTWARD_PORT=18443)
+        // 用户配置不含 tngui_outward → 默认 (127.0.0.1, DEFAULT_OUTWARD_PORT=9443)
         let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]}}]}"#;
         let ports = pick_free_ports(1).unwrap();
         let (_v, routes) = prepare_launch(src, 40103, &ports).unwrap();
         assert_eq!(routes[0].out_host, "127.0.0.1");
-        assert_eq!(routes[0].out_port, 18443);
+        assert_eq!(routes[0].out_port, 9443);
     }
 
     #[test]

@@ -53,7 +53,7 @@ describe("ingress 锁定形态与互斥序列化", () => {
       entry.mode = mode;
       entry.fields = (mode === "mapping"
         ? { rules: [{ in: { host: LOCALHOST, port: 12345 }, out: { host: "10.0.0.1", port: 9999 } }] }
-        : { proxy_listen: { host: LOCALHOST, port: 12345 }, dst_filters: { domain: "inference.example.com:8443" } });
+        : { proxy_listen: { host: LOCALHOST, port: 12345 }, dst_filters: { domain: "inference.example.com", port: 8443 } });
       const m = mk({ add_ingress: [entry] });
       const r = parse(serialize(m));
       expect(r.error, `mode=${mode}`).toBeUndefined();
@@ -90,11 +90,36 @@ describe("ingress 锁定形态与互斥序列化", () => {
     expect(r.model!.add_ingress[0].outward).toEqual({ host: "127.0.0.1", port: 18443 });
   });
 
-  it("http_proxy dst_filters.domain 单文本往返（不结构限定）", () => {
-    const m = mk({ add_ingress: [{ mode: "http_proxy", fields: { proxy_listen: { host: LOCALHOST, port: 1 }, dst_filters: { domain: "https://x.example.com/v1" } }, no_ra: true, outward: { ...DEFAULT_OUTWARD }, extra: {} }] });
+  it("http_proxy dst_filters 序列化为带端口的数组并往返", () => {
+    const m = mk({ add_ingress: [{ mode: "http_proxy", fields: { proxy_listen: { host: LOCALHOST, port: 1 }, dst_filters: { domain: "inference-test.cloud.misuan.com", port: 30090 } }, no_ra: true, outward: { ...DEFAULT_OUTWARD }, extra: {} }] });
+    const o = JSON.parse(serialize(m)) as { add_ingress: { http_proxy: { dst_filters: { domain: string; port?: number }[] } }[] };
+    // 输出为数组 [{domain, port}]，端口走独立字段、不拼进 domain
+    expect(o.add_ingress[0].http_proxy.dst_filters).toEqual([{ domain: "inference-test.cloud.misuan.com", port: 30090 }]);
     const r = parse(serialize(m));
-    const df = r.model!.add_ingress[0].fields.dst_filters as { domain: string };
-    expect(df.domain).toBe("https://x.example.com/v1");
+    expect(r.error).toBeUndefined();
+    const df = r.model!.add_ingress[0].fields.dst_filters as { domain: string; port: number };
+    expect(df).toEqual({ domain: "inference-test.cloud.misuan.com", port: 30090 });
+  });
+
+  it("http_proxy 端口为空时输出仅 domain（不把端口塞进 domain、不输出 port）", () => {
+    const m = mk({ add_ingress: [{ mode: "http_proxy", fields: { proxy_listen: { host: LOCALHOST, port: 1 }, dst_filters: { domain: "x.example.com", port: 0 } }, no_ra: true, outward: { ...DEFAULT_OUTWARD }, extra: {} }] });
+    const o = JSON.parse(serialize(m)) as { add_ingress: { http_proxy: { dst_filters: { domain: string; port?: number }[] } }[] };
+    expect(o.add_ingress[0].http_proxy.dst_filters).toEqual([{ domain: "x.example.com" }]);
+    expect(o.add_ingress[0].http_proxy.dst_filters[0].port).toBeUndefined();
+  });
+
+  it("导入数组形态 dst_filters 回填为内部 {domain, port}", () => {
+    const r = parse(JSON.stringify({ add_ingress: [{ http_proxy: { proxy_listen: { host: "127.0.0.1", port: 1 }, dst_filters: [{ domain: "inference-test.cloud.misuan.com", port: 30090 }] }, no_ra: true }] }));
+    expect(r.error).toBeUndefined();
+    const df = r.model!.add_ingress[0].fields.dst_filters as { domain: string; port: number };
+    expect(df).toEqual({ domain: "inference-test.cloud.misuan.com", port: 30090 });
+  });
+
+  it("导入遗留对象形态 dst_filters 仍可回填（向后兼容）", () => {
+    const r = parse(JSON.stringify({ add_ingress: [{ http_proxy: { proxy_listen: { host: "127.0.0.1", port: 1 }, dst_filters: { domain: "x.example.com" } }, no_ra: true }] }));
+    expect(r.error).toBeUndefined();
+    const df = r.model!.add_ingress[0].fields.dst_filters as { domain: string; port: number };
+    expect(df).toEqual({ domain: "x.example.com", port: 0 });
   });
 
   it("import 中自定义 ingress ohttp 被丢弃并用锁定值替代", () => {

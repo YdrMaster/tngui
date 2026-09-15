@@ -12,6 +12,8 @@
 - **D2 框架（设计决策，实现期由 axum 调整为原生 tokio TCP）**：反代以原生 `tokio::net` TCP 实现（无新增依赖、与 `inference.rs` 同向、沙箱离线可编译/可测），随 Tauri 现有 tokio 运行态以 spawned task 托管；评估 `pingora` 后弃用——其面向高并发多上游生产代理、自带连接池/缓存/LB，对本机单跳桌面代理过重；评估 `axum`/`hyper` 后未取——非流式单跳收益不足以抵消新增依赖树。
 - **D3 设计（设计决策）**：反代以 tngui-app/tngui-core 内一个 proxy 模块承载，随 tng 生命周期启停，持有对内（`127.0.0.1:<空闲端口>`）与对外（bind host + port）两端点；通过一条 Tauri 命令把对外端点暴露给前端以渲染 `API Base URL`。
 - **D4 端口探测（设计决策）**：把内端口取号由单点 `pick_free_port`（取号即放）升级为批取 `pick_free_ports(n)`——顺序 bind n 个 `127.0.0.1:0` listener、同时持住收号、整批释放（保证 n 个互不相同），并对每条 ingress 的反代对外 `out_port` 先验避让、命中即整批重试（有界）。规避单点探测把对外端口（如默认 `18443`）当内部端口注入、tng 先占住导致反代绑对外 `10048` 的实测问题。
+- **密态推理调试门锁放宽 + model 迁页（扩展）**：密态推理视图的“可发”门锁由原“`tngReady`（readyz 全绿）+ model + apiKey + 反代端口”放宽为与概览“运行状态”卡相同口径（`deriveIngressStates().runtime === "running"`）AND api-key；`model` 从“设置”视图移除、改为密态推理视图请求面板内可编辑输入（会话内内存、不持久化、退出门锁）。前端新增共享 composable 复用概览同一 `deriveIngressStates` 判定，避免两处漂移。
+- **http_proxy 远端拆分主机名+端口并以数组序列化（扩展）**：`域名`（`http_proxy`）远端由单文本 `domain` 改为主机名 + 端口两个控件，`dst_filters` 序列化为 tng 实际接受的数组 `[{domain, port}]`（端口走独立 `port` 字段、不拼进 `domain`）；`proxy_listen` 仍固定 `127.0.0.1` + tngui 批探测注入的空闲端口，不动。反代对外默认端口由 `18443` 改为 `9443`。
 - **不在范围内**：不引入流式（SSE/chunked）转发（先非流式）；不改 `ohttp` 锁定协议与 `header_passthrough` 写死的 3 头集合；不改 `no_ra`/`verify` 与远端 `out` 配置语义；不改与 tng 的松耦合——反代是 tngui 自有进程内的 HTTP 服务，仍仅以“拉 tng CLI + 只读控制面 HTTP + 捕获 stdout”与 tng 互动，不链接任何 tng crate。
 
 ## Capabilities
@@ -20,7 +22,7 @@
 （无）
 
 ### Modified Capabilities
-- `gui-shell`：新增“tngui 反向代理对外暴露推理入口并注入 x-model 头”要求；新增“注入端口批探测并避让对外端口”要求；并修改若干既有要求以承接“tng ingress 本地监听内部化（端口经批探测 `pick_free_ports` 空闲探测注入、先验避让对外端口、不外配）”“本机端口语义转为反代对外绑定”“推理发送经反代”——涉及“ingress 本地监听强制走回环”“结构化配置控件”“ingress 控件按行分组呈现”“默认开局模板”“密态推理页面发送并显示推理请求”。
+- `gui-shell`：新增“tngui 反向代理对外暴露推理入口并注入 x-model 头”要求；新增“注入端口批探测并避让对外端口”要求；并修改若干既有要求以承接“tng ingress 本地监听内部化（端口经批探测 `pick_free_ports` 空闲探测注入、先验避让对外端口、不外配）”“本机端口语义转为反代对外绑定”“推理发送经反代”——涉及“ingress 本地监听强制走回环”“结构化配置控件”“ingress 控件按行分组呈现”“默认开局模板”“密态推理页面发送并显示推理请求”。；并额外新增 MODIFY——“带配置编辑器与启动控制的 GUI 窗口”“设置页离开时自动保存并自动重启 tng”“密态推理凭据只在 GUI 会话内”，以承接 model 迁出“设置”视图、并在“密态推理页面发送并显示推理请求”中放宽门锁口径为“概览运行态 + api-key”（同步新增“可发判定仅认概览运行态与 api-key”“model 在推理页可编辑且不持久化”等 scenario）。
 
 ## Impact
 
@@ -31,3 +33,5 @@
 - 前端：`frontend/src/formspec.ts`/`configmodel.ts`（`EntryModel` 行 1 由“本地监听 host+port”改为“本机端口 host-toggle + 对外 port”；`serialize` 剥离 tng ingress 本地监听、保留反代绑定作为 tngui 侧字段；`parse` 回填相应调整）；`frontend/src/components/EntryEditor.vue`（行 1 控件为 host toggle `127.0.0.1`/`0.0.0.0` + 对外 port）；`frontend/src/views/InferenceView.vue`（`inferencePort`/`localEndpoint` 取自反代对外端点而非 tng 内部 ingress；`onSend`/`send_inference` 经反代）；`frontend/src/tauri.ts`（新增 `proxyEndpoint()` 包装）。
 - 文档：`docs/tngui-ui-guide.md`（本机端口现为 tngui 反代对外绑定、tng ingress 本地监听隐藏、推理对外入口经反代、D1 绑定 toggle）。
 - 归档序后置依赖：本变更承接 `auto-manage-control-port`（复用回环端口探测、升级为 `pick_free_ports` 批取）与 `lock-ingress-ohttp-drop-egress`/`block-launch-unconfigured-remote`（ingress 锁定形态与按行分组），归档时 spec sync 须在其之后。
+
+- **门锁放宽 + model 迁页（扩展）影响**：`frontend/src/composables/useIngressState.ts`（新增，共享 `deriveIngressStates` 轮询，`Overview.vue` 与 `InferenceView.vue` 同源消费）；`frontend/src/views/Overview.vue`（改用共享 composable，行为不变）；`frontend/src/views/InferenceView.vue`（`usable=tngRunning&&!!apiKey`、model 可编辑、badge 用 `tngRunning`、`fetchProxy` 不再以 ready 为前提）；`frontend/src/views/SettingsView.vue`（删 Model 输入、`clearFeature` 只清 apiKey）。

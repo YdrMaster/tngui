@@ -17,8 +17,11 @@ const props = defineProps<{ fields: Record<string, any>; spec: FieldSpec }>();
       <a-input-number v-model:value="fields.port" style="width: 130px" placeholder="远端端口" />
     </a-input-group>
 
-    <!-- 远端域名：单文本框，不结构限定 http/https、不拆分端口 -->
-    <a-input v-else-if="spec.type === 'domainText'" v-model:value="fields.domain" placeholder="如 inference.example.com 或 example.com:8443（完整域名）" />
+    <!-- 远端域名端口：主机名(domain) + 端口，分两控件、主机名不含端口 -->
+    <a-input-group v-else-if="spec.type === 'domainHostPort'" compact>
+      <a-input v-model:value="fields.domain" style="width: calc(100% - 130px)" placeholder="远端域名（主机名，如 inference.example.com）" />
+      <a-input-number v-model:value="fields.port" style="width: 130px" placeholder="远端端口" />
+    </a-input-group>
 
     <!-- verify：model + as_provider -->
     <a-space v-else-if="spec.type === 'verifyFields'" wrap>
