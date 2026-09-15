@@ -176,6 +176,38 @@ async fn get_output(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     Ok(sup.log_snapshot())
 }
 
+/// 把进程日志快照按原始顺序连接，不追加展示型占位文本。
+fn format_process_log_lines(lines: &[String]) -> String {
+    lines.join("\n")
+}
+
+/// 导出当前 TNG 子进程日志快照到用户所选路径。
+#[tauri::command]
+async fn export_tng_log(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    let lines = {
+        let sup = state.supervisor.lock().await;
+        sup.log_snapshot()
+    };
+    std::fs::write(&path, format_process_log_lines(&lines))
+        .map_err(|e| format!("写入日志失败 {path}: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_process_log_lines;
+
+    #[test]
+    fn empty_process_log_exports_empty_content() {
+        assert_eq!(format_process_log_lines(&[]), "");
+    }
+
+    #[test]
+    fn process_log_lines_keep_original_order_without_placeholder() {
+        let lines = vec!["INFO first".to_string(), "ERROR second".to_string()];
+        assert_eq!(format_process_log_lines(&lines), "INFO first\nERROR second");
+    }
+}
+
 /// 导入配置：读用户所选文件路径，返回 JSON 字符串。
 #[tauri::command]
 fn import_config(path: String) -> Result<String, String> {
@@ -257,6 +289,7 @@ pub fn run() {
             proxy_endpoint,
             get_status,
             get_output,
+            export_tng_log,
             import_config,
             export_config,
             save_config,

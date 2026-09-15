@@ -126,16 +126,20 @@ async function onSend() {
                 <a-form layout="vertical">
                   <a-form-item label="模型"><a-input v-model:value="inferenceModel" placeholder="如 gpt-4 / vllm-model" /></a-form-item>
                   <a-form-item label="输入内容">
-                    <a-textarea v-model:value="prompt" :rows="10" :maxlength="4000" showCount placeholder="输入一段用于连通性测试的内容" />
+                    <a-textarea
+                      v-model:value="prompt"
+                      class="prompt-textarea"
+                      :auto-size="{ minRows: 4, maxRows: 16 }"
+                      :maxlength="4000"
+                      showCount
+                      placeholder="输入一段用于连通性测试的内容"
+                    />
                   </a-form-item>
-                  <a-button block size="large" type="primary" :loading="sending" @click="onSend">
-                    <SendOutlined /> {{ sending ? "正在安全发送" : "发送测试请求" }}
+                  <a-button block size="large" type="primary" class="send-button" :loading="sending" @click="onSend">
+                    <SendOutlined />
+                    <span>{{ sending ? "正在安全发送" : "发送测试请求" }}</span>
                   </a-button>
                 </a-form>
-                <a-alert type="info" showIcon style="margin-top:12px">
-                  <template #icon><LockOutlined /></template>
-                  发送前将再次确认可信会话；验证失败时请求会在本地阻断。
-                </a-alert>
               </a-card>
             </a-col>
             <a-col :span="13">

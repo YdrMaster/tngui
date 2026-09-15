@@ -57,6 +57,7 @@ async function beforeLeaveSettings() {
   const json = serializeCurrent();
   try {
     await invoke("save_config", { configJson: json });
+    markSaved();
   } catch (e) {
     message.error("保存配置失败: " + String(e));
     return;
@@ -65,12 +66,10 @@ async function beforeLeaveSettings() {
     const status = await invoke<{ reachable: boolean }>("get_status");
     if (status.reachable) {
       await invoke("launch_tng", { configJson: json });
-      message.success("配置已保存并自动重启 tng");
-    } else {
-      message.success("配置已保存");
     }
-  } catch { /* ignore */ }
-  markSaved();
+  } catch (e) {
+    message.error("自动重启 tng 失败: " + String(e));
+  }
 }
 
 async function goTo(target: View) {

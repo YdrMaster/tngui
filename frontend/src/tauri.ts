@@ -44,6 +44,20 @@ export async function appInfo(): Promise<AppInfo> {
   return invoke<AppInfo>("app_info");
 }
 
+/** 原生"另存为"对话框，返回 TNG 日志目标路径或 null（取消）。 */
+export async function pickLogPath(): Promise<string | null> {
+  const p = await saveDialog({
+    filters: [{ name: "Log", extensions: ["log", "txt"] }],
+    defaultPath: "tng-gateway.log",
+  });
+  return p ?? null;
+}
+
+/** 把当前 TNG 进程日志快照写入所选路径。 */
+export async function exportTngLog(path: string): Promise<void> {
+  return invoke<void>("export_tng_log", { path });
+}
+
 /** 原生"打开文件"对话框，返回所选路径或 null（取消）。 */
 export async function pickImportPath(): Promise<string | null> {
   const p = await openDialog({

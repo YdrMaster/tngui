@@ -1,34 +1,29 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
-import { invoke } from "@tauri-apps/api/core";
 import { message } from "ant-design-vue";
 import {
-  ApiOutlined, ExperimentOutlined, EyeOutlined, EyeInvisibleOutlined,
-  ImportOutlined, ExportOutlined, CopyOutlined,
+  ApiOutlined, ExperimentOutlined, ImportOutlined, ExportOutlined,
 } from "@ant-design/icons-vue";
 import { defaultFields, DEFAULT_OUTWARD } from "../formspec";
 import { parse } from "../configmodel";
-import { launchTng, pickImportPath, pickExportPath, importConfig, exportConfig, appInfo } from "../tauri";
+import {
+  pickLogPath, exportTngLog, pickImportPath, pickExportPath,
+  importConfig, exportConfig, appInfo,
+} from "../tauri";
 import EntryEditor from "../components/EntryEditor.vue";
+import IngressStateCard from "../components/IngressStateCard.vue";
 import { useTngConfig } from "../composables/useTngConfig";
+import { useIngressState } from "../composables/useIngressState";
+import { deriveGatewayStateViews } from "../ingressStateViews";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
 
 const { model, isDirty, markSaved, serializeCurrent } = useTngConfig();
 const { apiKey } = useInferenceConfig();
+const { states } = useIngressState();
+const gatewayViews = computed(() => deriveGatewayStateViews(states.value));
 const activeTab = ref<"form" | "raw">("form");
 const rawEditing = ref(serializeCurrent());
-const showKey = ref(false);
-const tngReady = ref(true);
-let statusTimer: number | undefined;
-
-// 轮询 tng 状态
-async function pollStatus() {
-  try { const s = await invoke<{ ready: boolean }>("get_status"); tngReady.value = s.ready; }
-  catch { tngReady.value = false; }
-}
-pollStatus();
-statusTimer = window.setInterval(pollStatus, 2000);
-if (typeof window !== "undefined") window.addEventListener("beforeunload", () => clearInterval(statusTimer));
+const exportingLog = ref(false);
 
 // 客户端信息：版本/操作系统取自后端编译期变量（app_info），不写死
 const clientVersion = ref("…");
@@ -44,13 +39,6 @@ async function fetchAppInfo() {
   }
 }
 fetchAppInfo();
-
-// 本地 URL 取自结构化 ingress 的第一条监听端口（与 InferenceView 同源）
-const localUrl = computed(() => {
-  const e = model.value.add_ingress[0];
-  if (!e) return "未配置 ingress";
-  return `http://127.0.0.1:${e.outward.port}/v1`;
-});
 
 function syncRaw() { rawEditing.value = serializeCurrent(); }
 function onTabChange(key: string | number) { if (key === "raw") syncRaw(); activeTab.value = key as "form" | "raw"; }
@@ -73,15 +61,15 @@ function addIngress() {
 }
 function removeIngress(i: number) { model.value.add_ingress.splice(i, 1); }
 
-async function onSaveConfig() {
-  if (!isDirty()) { message.info("配置未变"); return; }
-  const json = serializeCurrent();
+async function onExportLog() {
+  exportingLog.value = true;
   try {
-    const status = await invoke<{ reachable: boolean }>("get_status");
-    if (status.reachable) { await invoke("launch_tng", { configJson: json }); message.success("已保存并重启 tng"); }
-    else { await invoke("save_config", { configJson: json }); message.success("已保存"); }
-    markSaved();
-  } catch (e) { message.error("保存失败: " + String(e)); }
+    const path = await pickLogPath(); if (!path) return;
+    await exportTngLog(path);
+    message.success("已导出: " + path);
+  } catch (e) {
+    message.error("导出日志失败: " + String(e));
+  } finally { exportingLog.value = false; }
 }
 async function onImport() {
   try {
@@ -99,18 +87,6 @@ async function onExport() {
     await exportConfig(path, serializeCurrent()); message.success("已导出: " + path);
   } catch (e) { message.error("导出失败: " + String(e)); }
 }
-async function onRestart() {
-  try { await invoke("launch_tng", { configJson: serializeCurrent() }); message.success("已重启并检测"); }
-  catch (e) { message.error("重启失败: " + String(e)); }
-}
-function copyLocal() {
-  navigator.clipboard?.writeText(localUrl.value);
-  message.success("已复制 " + localUrl.value);
-}
-function clearFeature() {
-  apiKey.value = "";
-  message.success("已清除本机 API Key（中心侧 Key 不受影响）");
-}
 
 watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { deep: true });
 </script>
@@ -124,28 +100,32 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
 
     <!-- TNG Gateway Card -->
     <a-card class="gateway-settings-card" title="TNG Gateway">
-      <a-row :gutter="[24, 16]" align="middle">
-        <a-col :span="14">
-          <a-row :gutter="[16, 16]">
-            <a-col :span="8">
-              <div class="gateway-state">
-                <a-badge :status="tngReady ? 'success' : 'error'" />
-                <div><strong>{{ tngReady ? "运行中" : "未运行" }}</strong><div style="color:var(--text-secondary)">TNG v0.2.1</div></div>
-              </div>
-            </a-col>
-            <a-col :span="8">
-              <div class="gateway-state">
-                <a-badge :status="tngReady ? 'success' : 'error'" />
-                <div><strong>{{ tngReady ? "已连接" : "已断开" }}</strong><div style="color:var(--text-secondary)">控制信道</div></div>
-              </div>
-            </a-col>
-          </a-row>
-        </a-col>
-        <a-col :span="10" style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end">
-          <a-button @click="message.info('Mock: tng-gateway.log 已导出')">导出日志</a-button>
-          <a-button @click="message.info('Mock: 诊断包 已导出')">导出诊断包</a-button>
-        </a-col>
-      </a-row>
+      <div class="gateway-status-strip">
+        <IngressStateCard
+          :key="gatewayViews.runtime.key"
+          :title="gatewayViews.runtime.title"
+          :state="gatewayViews.runtime.state"
+          :state-text="gatewayViews.runtime.stateText"
+          :subtitle="gatewayViews.runtime.subtitle"
+        />
+        <IngressStateCard
+          :key="gatewayViews.remoteLink.key"
+          :title="gatewayViews.remoteLink.title"
+          :state="gatewayViews.remoteLink.state"
+          :state-text="gatewayViews.remoteLink.stateText"
+          :subtitle="gatewayViews.remoteLink.subtitle"
+        />
+        <IngressStateCard
+          :key="gatewayViews.remoteProof.key"
+          :title="gatewayViews.remoteProof.title"
+          :state="gatewayViews.remoteProof.state"
+          :state-text="gatewayViews.remoteProof.stateText"
+          :subtitle="gatewayViews.remoteProof.subtitle"
+        />
+      </div>
+      <div class="gateway-actions">
+        <a-button :loading="exportingLog" @click="onExportLog">导出日志</a-button>
+      </div>
     </a-card>
 
     <!-- 功能配置 -->
@@ -162,44 +142,19 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
           <div><div style="font-weight:600">密态推理</div><div class="small-text" style="color:var(--text-secondary)">通过可信网关访问密态大模型服务</div></div>
         </div>
       </template>
-      <template #extra><a-tag color="success">已启用</a-tag></template>
-      <a-alert type="info" showIcon message="API Key 在中心侧管理，本机只保存使用凭据" description="申请、查看和重置在 1 号节点完成；重置后旧 Key 立即失效。本地端口与远端在下方「高级 TNG 配置」的结构化 ingress 中配置。" />
-      <div class="connection-form" style="margin-top:24px">
-        <a-form layout="vertical">
-          <a-form-item label="API Key" required :validateStatus="apiKey ? 'success' : 'error'" :help="apiKey ? '凭据有效' : '请粘贴有效的 API Key'">
-            <a-input size="large" v-model:value="apiKey" :type="showKey ? 'text' : 'password'">
-              <template #prefix><ApiOutlined /></template>
-              <template #suffix>
-                <a-button type="text" size="small" @click="showKey = !showKey">
-                  <EyeInvisibleOutlined v-if="showKey" /><EyeOutlined v-else />
-                </a-button>
-              </template>
-            </a-input>
-          </a-form-item>
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-            <span style="display:flex;gap:8px">
-              <a-button type="primary" @click="onSaveConfig">保存并验证</a-button>
-              <a-button @click="copyLocal"><CopyOutlined /> 复制本地 URL</a-button>
-            </span>
-            <span style="display:flex;gap:8px">
-              <a-button @click="onImport"><ImportOutlined /> 导入配置</a-button>
-              <a-button @click="onExport"><ExportOutlined /> 导出配置</a-button>
-            </span>
-          </div>
-        </a-form>
-      </div>
-      <a-divider />
-      <div class="feature-danger" style="display:flex;justify-content:space-between;align-items:center;padding:2px 0 4px">
-        <div><strong>清除本机推理凭据</strong><br><span style="color:var(--text-secondary)">移除本机 API Key，中心侧 Key 不会被删除。</span></div>
-        <a-button danger @click="clearFeature">清除本机凭据</a-button>
-      </div>
+      <a-form layout="vertical" style="margin-top:12px">
+        <a-form-item label="API Key">
+          <a-input size="large" v-model:value="apiKey" placeholder="请输入 API Key">
+            <template #prefix><ApiOutlined /></template>
+          </a-input>
+        </a-form-item>
+      </a-form>
     </a-card>
 
-    <!-- 高级 TNG 配置 -->
+    <!-- TNG 配置 -->
     <div class="settings-section-heading" style="margin-top:24px">
-      <div><h4 style="margin:0 0 3px;font-size:16px;font-weight:600">高级 TNG 配置</h4><span style="color:var(--text-secondary)">结构化编辑客户端 ingress（锁定 OHTTP 形态）；本机不承载 egress。</span></div>
+      <div><h4 style="margin:0 0 3px;font-size:16px;font-weight:600">TNG 配置</h4><span style="color:var(--text-secondary)">结构化编辑客户端 ingress（锁定 OHTTP 形态）；本机不承载 egress。</span></div>
       <span style="display:flex;gap:8px">
-        <a-button type="primary" @click="onSaveConfig">保存</a-button>
         <a-button @click="onImport"><ImportOutlined /> 导入 JSON</a-button>
         <a-button @click="onExport"><ExportOutlined /> 导出 JSON</a-button>
       </span>
@@ -225,10 +180,9 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
 
     <!-- 客户端信息 -->
     <a-card title="客户端信息" class="client-info-card">
-      <a-descriptions :column="3" bordered>
+      <a-descriptions :column="2" bordered>
         <a-descriptions-item label="客户端版本">{{ clientVersion }}</a-descriptions-item>
         <a-descriptions-item label="操作系统">{{ clientOs }}</a-descriptions-item>
-        <a-descriptions-item label="更新通道">稳定版(OTA)</a-descriptions-item>
       </a-descriptions>
     </a-card>
   </div>

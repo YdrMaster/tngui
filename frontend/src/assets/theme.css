@@ -174,6 +174,9 @@ button, input, textarea { font: inherit; }
 .compare-grid .compare-head { background: #f7f8fa; font-weight: 650; }
 .compare-grid .rats { background: #f0f7ff; color: #0958d9; }
 .compare-grid .negative { color: var(--error); }
+.prompt-textarea { resize: none; }
+.send-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.send-button .anticon { display: inline-flex; align-items: center; line-height: 1; }
 .response-panel { min-height: 440px; }
 .sending-state, .empty-response { min-height: 400px; padding: 40px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; text-align: center; }
 .sending-state .ant-progress { max-width: 360px; }
@@ -182,9 +185,8 @@ button, input, textarea { font: inherit; }
 .response-text { white-space: pre-line; font-size: 15px; line-height: 1.85; }
 .history-notice { margin-top: 16px; }
 .gateway-settings-card { margin-bottom: 24px; }
-.gateway-state { min-height: 64px; padding: 12px 14px; display: flex; align-items: flex-start; gap: 10px; border-radius: 10px; background: #f7f9fc; }
-.gateway-state > .anticon, .gateway-state > svg { margin-top: 3px; color: var(--primary); }
-.gateway-state > div { display: flex; flex-direction: column; gap: 3px; }
+.gateway-status-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.gateway-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
 .settings-section-heading { margin: 4px 0 14px; display: flex; align-items: flex-end; justify-content: space-between; }
 .settings-section-heading h4 { margin: 0 0 3px !important; }
 .feature-card { margin-bottom: 16px; border-color: rgba(22,119,255,.18); }

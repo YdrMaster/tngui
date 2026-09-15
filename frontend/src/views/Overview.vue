@@ -6,17 +6,14 @@ import { launchTng } from "../tauri";
 import { useTngConfig } from "../composables/useTngConfig";
 import { useIngressState } from "../composables/useIngressState";
 import { isRemoteConfigured } from "../formspec";
-import {
-  deriveIngressInfo,
-  type RuntimeState,
-  type RemoteLinkState,
-  type RemoteProofState,
-} from "../ingressState";
+import { deriveIngressInfo } from "../ingressState";
+import { deriveGatewayStateViews } from "../ingressStateViews";
 import IngressStateCard from "../components/IngressStateCard.vue";
 import IngressInfoCard from "../components/IngressInfoCard.vue";
 
 const { serializeCurrent, model } = useTngConfig();
 const { statusReport, outputLines, states, tngRunning, pollError } = useIngressState();
+const gatewayViews = computed(() => deriveGatewayStateViews(states.value));
 const launching = ref(false);
 
 const ingressInfo = computed(() => {
@@ -46,34 +43,6 @@ const navigate = inject<(target: "overview" | "inference" | "settings") => void>
 );
 const remoteConfigured = computed(() => isRemoteConfigured(model.value));
 const startDisabled = computed(() => !tngRunning.value && !remoteConfigured.value);
-
-const runtimeView = computed<{ state: "ok" | "warn" | "err"; text: string; subtitle: string }>(() => {
-  const map: Record<RuntimeState, { state: "ok" | "warn" | "err"; text: string; subtitle: string }> = {
-    stopped: { state: "warn", text: "关停", subtitle: "进程未运行" },
-    running: { state: "ok", text: "运行", subtitle: "就绪探针通过" },
-    error: { state: "err", text: "错误", subtitle: "服务失败或进程异常" },
-  };
-  return map[states.value.runtime];
-});
-
-const remoteLinkView = computed<{ state: "ok" | "warn" | "err" | "neutral"; text: string; subtitle: string }>(() => {
-  const map: Record<RemoteLinkState, { state: "ok" | "warn" | "err" | "neutral"; text: string; subtitle: string }> = {
-    uninit: { state: "neutral", text: "未初始化", subtitle: "尚无成功的远端密钥配置" },
-    established: { state: "ok", text: "已建联", subtitle: "已有远端公钥" },
-    failed: { state: "err", text: "失败", subtitle: "密钥配置或隧道失败" },
-  };
-  return map[states.value.remoteLink];
-});
-
-const remoteProofView = computed<{ state: "ok" | "warn" | "err" | "neutral"; text: string; subtitle: string }>(() => {
-  const map: Record<RemoteProofState, { state: "ok" | "warn" | "err" | "neutral"; text: string; subtitle: string }> = {
-    "not-obtained": { state: "neutral", text: "未获取", subtitle: "无缓存的校验凭据" },
-    verified: { state: "ok", text: "已验证", subtitle: "已缓存校验凭据" },
-    "refresh-due": { state: "warn", text: "待刷新", subtitle: "凭据接近过期" },
-    failed: { state: "err", text: "失败", subtitle: "校验、刷新或取证失败" },
-  };
-  return map[states.value.remoteProof];
-});
 
 async function onToggle() {
   launching.value = true;
@@ -131,10 +100,11 @@ async function onToggle() {
 
     <div class="ingress-top-strip">
       <IngressStateCard
-        title="运行状态"
-        :state="runtimeView.state"
-        :state-text="runtimeView.text"
-        :subtitle="runtimeView.subtitle"
+        :key="gatewayViews.runtime.key"
+        :title="gatewayViews.runtime.title"
+        :state="gatewayViews.runtime.state"
+        :state-text="gatewayViews.runtime.stateText"
+        :subtitle="gatewayViews.runtime.subtitle"
       />
       <IngressInfoCard title="入口信息">
         <template #rows>
@@ -144,16 +114,18 @@ async function onToggle() {
         </template>
       </IngressInfoCard>
       <IngressStateCard
-        title="远端链路"
-        :state="remoteLinkView.state"
-        :state-text="remoteLinkView.text"
-        :subtitle="remoteLinkView.subtitle"
+        :key="gatewayViews.remoteLink.key"
+        :title="gatewayViews.remoteLink.title"
+        :state="gatewayViews.remoteLink.state"
+        :state-text="gatewayViews.remoteLink.stateText"
+        :subtitle="gatewayViews.remoteLink.subtitle"
       />
       <IngressStateCard
-        title="远端证明"
-        :state="remoteProofView.state"
-        :state-text="remoteProofView.text"
-        :subtitle="remoteProofView.subtitle"
+        :key="gatewayViews.remoteProof.key"
+        :title="gatewayViews.remoteProof.title"
+        :state="gatewayViews.remoteProof.state"
+        :state-text="gatewayViews.remoteProof.stateText"
+        :subtitle="gatewayViews.remoteProof.subtitle"
       />
     </div>
 
