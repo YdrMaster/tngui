@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, inject, onMounted, onBeforeUnmount } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { message } from "ant-design-vue";
 import {
@@ -16,6 +16,10 @@ import ProtectionItem from "../components/ProtectionItem.vue";
 
 const { model: inferenceModel, apiKey } = useInferenceConfig();
 const { tngRunning } = useIngressState();
+const navigate = inject<(target: "overview" | "inference" | "settings") => void>(
+  "navigate",
+  () => {},
+);
 
 const activeTab = ref<"request" | "integration" | "security">("request");
 const prompt = ref("请用三点说明密态推理如何保护我的输入数据。");
@@ -117,7 +121,7 @@ async function onSend() {
             subTitle="请先恢复网关、API Key 与可信通道状态。"
           >
             <template #extra>
-              <a-button type="primary" @click="message.info('请点击左侧导航「设置」')">前往设置</a-button>
+              <a-button type="primary" @click="navigate('settings')">前往设置</a-button>
             </template>
           </a-result>
           <a-row v-else :gutter="[16, 16]">
@@ -175,7 +179,7 @@ async function onSend() {
                     <SecureFlow :activeIndex="phase" style="width:100%;transform:scale(.9)" />
                   </div>
                   <div v-else-if="output" style="padding:8px">
-                    <pre v-if="failed" class="code-block response-debug" style="white-space:pre-wrap;overflow:auto;max-height:650px;margin:0">{{ output }}</pre>
+                    <pre v-if="failed" class="code-block response-debug" style="white-space:pre-wrap;overflow:auto;max-height:560px;margin:0">{{ output }}</pre>
                     <p v-else class="response-text" style="white-space:pre-line;font-size:15px;line-height:1.85">{{ output }}</p>
                   </div>
                   <div v-else class="empty-response">

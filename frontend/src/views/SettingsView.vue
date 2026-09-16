@@ -144,15 +144,15 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
       </template>
       <a-form layout="vertical" style="margin-top:12px">
         <a-form-item label="API Key">
-          <a-input size="large" v-model:value="apiKey" placeholder="请输入 API Key">
+          <a-input-password size="large" v-model:value="apiKey" placeholder="请输入 API Key">
             <template #prefix><ApiOutlined /></template>
-          </a-input>
+          </a-input-password>
         </a-form-item>
       </a-form>
     </a-card>
 
     <!-- TNG 配置 -->
-    <div class="settings-section-heading" style="margin-top:24px">
+    <div class="settings-section-heading" style="margin-top:20px">
       <div><h4 style="margin:0 0 3px;font-size:16px;font-weight:600">TNG 配置</h4><span style="color:var(--text-secondary)">结构化编辑客户端 ingress（锁定 OHTTP 形态）；本机不承载 egress。</span></div>
       <span style="display:flex;gap:8px">
         <a-button @click="onImport"><ImportOutlined /> 导入 JSON</a-button>
@@ -174,7 +174,7 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
           <a-button type="primary" @click="applyRaw">应用回填表单</a-button>
           <span style="color:var(--text-secondary)">编辑后点"应用"回填；未结构化字段（RA 等）在此编辑不丢；add_egress 与 ohttp 会被丢弃并由锁定值替代。</span>
         </a-space>
-        <a-textarea v-model:value="rawEditing" :rows="24" class="json-editor" />
+        <a-textarea v-model:value="rawEditing" :rows="18" class="json-editor" />
       </a-tab-pane>
     </a-tabs>
 

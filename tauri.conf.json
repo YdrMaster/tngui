@@ -5,17 +5,25 @@
   "build": {
     "frontendDist": "./frontend/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": { "script": "npm run dev", "cwd": "frontend" },
-    "beforeBuildCommand": { "script": "npm run build", "cwd": "frontend" }
+    "beforeDevCommand": {
+      "script": "npm run dev",
+      "cwd": "frontend"
+    },
+    "beforeBuildCommand": {
+      "script": "npm run build",
+      "cwd": "frontend"
+    }
   },
   "app": {
     "withGlobalTauri": false,
     "windows": [
       {
         "title": "TNG GUI",
-        "width": 900,
-        "height": 720,
-        "resizable": true
+        "width": 1440,
+        "height": 960,
+        "resizable": true,
+        "minWidth": 1120,
+        "minHeight": 720
       }
     ],
     "security": {
@@ -25,7 +33,13 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.ico", "icons/icon.icns", "icons/icon.png"],
-    "resources": ["resources/tng*"]
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
+    "resources": [
+      "resources/tng*"
+    ]
   }
 }

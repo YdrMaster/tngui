@@ -104,7 +104,7 @@ function onRemTypeChange(val: string | number) {
             v-model:value="entry.outward.port"
             :min="1"
             :max="65535"
-            style="width:130px"
+            style="width:112px"
             placeholder="端口"
           />
           <span style="color:var(--text-secondary);font-size:12px">{{
@@ -115,7 +115,7 @@ function onRemTypeChange(val: string | number) {
 
       <!-- 行2：远端类型 + 当前远端字段 同一横排 -->
       <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start">
-        <div style="flex:0 0 180px;max-width:180px">
+        <div style="flex:0 0 150px;max-width:150px">
           <a-form-item label="远端类型">
             <a-select
               :value="entry.mode"
@@ -125,19 +125,19 @@ function onRemTypeChange(val: string | number) {
             />
           </a-form-item>
         </div>
-        <div style="flex:1;min-width:240px">
+        <div style="flex:1;min-width:220px">
           <FieldRenderer :fields="remoteFields" :spec="remoteSpec" />
         </div>
       </div>
 
       <!-- 行3：远程证明开关（表示 ra）+ verify 配置 同一横排（开关开=no_ra=false 渲染 verify） -->
       <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start">
-        <div style="flex:0 0 140px;max-width:140px">
+        <div style="flex:0 0 118px;max-width:118px">
           <a-form-item label="远程证明">
             <a-switch v-model:checked="raEnabled" />
           </a-form-item>
         </div>
-        <div v-if="raEnabled" style="flex:1;min-width:340px">
+        <div v-if="raEnabled" style="flex:1;min-width:220px">
           <FieldRenderer
             :fields="verifyFields"
             :spec="{ key: 'verify', label: 'verify（model / as_provider，默认 passport / tpm）', type: 'verifyFields' }"

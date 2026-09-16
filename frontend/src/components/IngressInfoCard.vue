@@ -10,10 +10,6 @@ defineProps<{
       <div class="ingress-card-title">
         <b>{{ title }}</b>
       </div>
-      <div class="ingress-state-line">
-        <span class="ingress-state-dot ingress-dot-neutral" />
-        <b class="ingress-state-text">仅配置摘要</b>
-      </div>
       <div class="ingress-info-list">
         <slot name="rows" />
       </div>

@@ -91,7 +91,7 @@ onBeforeUnmount(() => {
 <template>
   <a-config-provider :theme="themeConfig">
     <a-layout class="h-screen" style="background:var(--bg-layout)">
-      <a-layout-sider width="216" theme="light" class="sidebar">
+      <a-layout-sider width="196" theme="light" class="sidebar">
         <div class="brand">
           <div class="brand-mark"><SafetyCertificateOutlined /></div>
           <div>
@@ -124,7 +124,7 @@ onBeforeUnmount(() => {
       </a-layout-sider>
       <a-layout style="background:var(--bg-layout)">
         <a-layout-content
-          class="p-6 overflow-auto"
+          class="p-4 overflow-auto"
           style="background:linear-gradient(145deg,#ffffff 0%,#f3f8ff 52%,#f8fbff 100%)"
         >
           <Overview v-if="view === 'overview'" />

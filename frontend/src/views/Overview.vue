@@ -131,10 +131,10 @@ async function onToggle() {
 
     <div class="ingress-debug-grid">
       <a-card size="small" title="原始状态数据">
-        <pre class="mono" style="font-size:12px;white-space:pre-wrap;word-break:break-all;min-height:80px;max-height:320px;overflow:auto">{{ statusJsonText }}</pre>
+        <pre class="mono" style="font-size:12px;white-space:pre-wrap;word-break:break-all;min-height:64px;max-height:260px;overflow:auto">{{ statusJsonText }}</pre>
       </a-card>
       <a-card size="small" title="进程日志">
-        <pre class="mono" style="color:#6abf6a;font-size:12px;white-space:pre-wrap;word-break:break-all;min-height:80px;max-height:320px;overflow:auto">{{ outputLines.length ? outputLines.join("\n") : "（暂无输出）" }}</pre>
+        <pre class="mono" style="color:#6abf6a;font-size:12px;white-space:pre-wrap;word-break:break-all;min-height:64px;max-height:260px;overflow:auto">{{ outputLines.length ? outputLines.join("\n") : "（暂无输出）" }}</pre>
       </a-card>
     </div>
   </div>
