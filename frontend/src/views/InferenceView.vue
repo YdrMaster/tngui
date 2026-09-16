@@ -128,7 +128,7 @@ async function onSend() {
             <a-col :span="11">
               <a-card title="请求">
                 <a-form layout="vertical">
-                  <a-form-item label="模型"><a-input v-model:value="inferenceModel" placeholder="如 gpt-4 / vllm-model" /></a-form-item>
+                  <a-form-item label="模型"><a-input v-model:value="inferenceModel" placeholder="如 gpt-4 / vllm-model" autocapitalize="off" autocorrect="off" spellcheck="false" /></a-form-item>
                   <a-form-item label="输入内容">
                     <a-textarea
                       v-model:value="prompt"
@@ -136,6 +136,9 @@ async function onSend() {
                       :auto-size="{ minRows: 4, maxRows: 16 }"
                       :maxlength="4000"
                       showCount
+                      autocapitalize="off"
+                      autocorrect="off"
+                      spellcheck="false"
                       placeholder="输入一段用于连通性测试的内容"
                     />
                   </a-form-item>

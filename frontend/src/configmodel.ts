@@ -9,7 +9,8 @@
 import {
   ALL_MODES,
   DEFAULT_LISTEN_PORT,
-  DEFAULT_OUT_PORT,
+  DEFAULT_HTTP_PROXY_DST_PORT,
+  DEFAULT_MAPPING_OUT_PORT,
   DEFAULT_OUTWARD,
   DEFAULT_VERIFY,
   LOCKED_OHTTP,
@@ -63,7 +64,7 @@ function mappingFields(fields: Record<string, unknown>): Record<string, unknown>
     rules: [
       {
         in: {},
-        out: { host: strOr(outEp.host, ""), port: numOr(outEp.port, DEFAULT_OUT_PORT) },
+        out: { host: strOr(outEp.host, ""), port: numOr(outEp.port, DEFAULT_MAPPING_OUT_PORT) },
       },
     ],
   };
@@ -110,7 +111,7 @@ function normalizeFields(mode: IngressMode, fields: Record<string, unknown>): Re
   if (mode === "mapping") return mappingFields(fields);
   const dfRaw = fields.dst_filters;
   let domain = "";
-  let port = 0;
+  let port = DEFAULT_HTTP_PROXY_DST_PORT;
   const readFrom = (d: Record<string, unknown>): void => {
     domain = strOr(d.domain, "");
     const pp = d.port;

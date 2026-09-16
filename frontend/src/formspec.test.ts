@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { defaultModel, isRemoteConfigured, type ConfigModel, type EntryModel } from "./formspec";
+import { defaultFields, defaultModel, isRemoteConfigured, DEFAULT_HTTP_PROXY_DST_PORT, DEFAULT_MAPPING_OUT_PORT, type ConfigModel, type EntryModel } from "./formspec";
 
 function setOutHost(m: ConfigModel, host: string): void {
   const e = m.add_ingress[0];
@@ -76,5 +76,23 @@ describe("isRemoteConfigured（镜像后端 validate_ingress_for_launch）", () 
     };
     m.add_ingress.push(e2);
     expect(isRemoteConfigured(m)).toBe(false);
+  });
+});
+
+describe("ingress 默认远端端口", () => {
+  it("默认模板使用 mapping 远端端口 80，反代对外绑定仍为 9443", () => {
+    const m = defaultModel();
+    const rules = m.add_ingress[0].fields["rules"] as Array<{ out: { port: number } }>;
+    expect(rules[0].out.port).toBe(DEFAULT_MAPPING_OUT_PORT);
+    expect(rules[0].out.port).toBe(80);
+    expect(m.add_ingress[0].outward.port).toBe(9443);
+  });
+
+  it("远端类型切换默认字段分别使用 80/443", () => {
+    const mapping = defaultFields("mapping") as { rules: [{ out: { port: number } }] };
+    const proxy = defaultFields("http_proxy") as { dst_filters: { port: number } };
+    expect(mapping.rules[0].out.port).toBe(80);
+    expect(proxy.dst_filters.port).toBe(443);
+    expect(DEFAULT_HTTP_PROXY_DST_PORT).toBe(443);
   });
 });

@@ -162,11 +162,32 @@ describe("ingress 锁定形态与互斥序列化", () => {
     expect(df).toEqual({ domain: "inference-test.cloud.misuan.com", port: 30090 });
   });
 
-  it("导入遗留对象形态 dst_filters 仍可回填（向后兼容）", () => {
+  it("导入遗留对象形态 dst_filters 缺省端口回填 443", () => {
     const r = parse(JSON.stringify({ add_ingress: [{ http_proxy: { proxy_listen: { host: "127.0.0.1", port: 1 }, dst_filters: { domain: "x.example.com" } }, no_ra: true }] }));
     expect(r.error).toBeUndefined();
     const df = r.model!.add_ingress[0].fields.dst_filters as { domain: string; port: number };
-    expect(df).toEqual({ domain: "x.example.com", port: 0 });
+    expect(df).toEqual({ domain: "x.example.com", port: 443 });
+  });
+
+  it("导入显式端口保持不变，包括 http_proxy 显式 0", () => {
+    const r = parse(JSON.stringify({
+      add_ingress: [
+        { mapping: { rules: [{ in: {}, out: { host: "10.0.0.1", port: 40000 } }] }, no_ra: true },
+        { http_proxy: { proxy_listen: {}, dst_filters: [{ domain: "x.example.com", port: 0 }] }, no_ra: true },
+      ],
+    }));
+    expect(r.error).toBeUndefined();
+    const m = r.model!.add_ingress[0].fields["rules"] as Array<{ out: { port: number } }>;
+    const d = r.model!.add_ingress[1].fields.dst_filters as { port: number };
+    expect(m[0].out.port).toBe(40000);
+    expect(d.port).toBe(0);
+  });
+
+  it("导入 mapping out 对象缺失端口时回填 80", () => {
+    const r = parse(JSON.stringify({ add_ingress: [{ mapping: { rules: [{ in: {}, out: { host: "10.0.0.1" } }] }, no_ra: true }] }));
+    expect(r.error).toBeUndefined();
+    const rules = r.model!.add_ingress[0].fields["rules"] as Array<{ out: { port: number } }>;
+    expect(rules[0].out.port).toBe(80);
   });
 
   it("import 中自定义 ingress ohttp 被丢弃并用锁定值替代", () => {

@@ -142,9 +142,9 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
           <div><div style="font-weight:600">密态推理</div><div class="small-text" style="color:var(--text-secondary)">通过可信网关访问密态大模型服务</div></div>
         </div>
       </template>
-      <a-form layout="vertical" style="margin-top:12px">
+      <a-form layout="vertical">
         <a-form-item label="API Key">
-          <a-input-password size="large" v-model:value="apiKey" placeholder="请输入 API Key">
+          <a-input-password v-model:value="apiKey" placeholder="请输入 API Key" autocapitalize="off" autocorrect="off" spellcheck="false">
             <template #prefix><ApiOutlined /></template>
           </a-input-password>
         </a-form-item>
@@ -174,7 +174,7 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
           <a-button type="primary" @click="applyRaw">应用回填表单</a-button>
           <span style="color:var(--text-secondary)">编辑后点"应用"回填；未结构化字段（RA 等）在此编辑不丢；add_egress 与 ohttp 会被丢弃并由锁定值替代。</span>
         </a-space>
-        <a-textarea v-model:value="rawEditing" :rows="18" class="json-editor" />
+        <a-textarea v-model:value="rawEditing" :rows="18" class="json-editor" autocapitalize="off" autocorrect="off" spellcheck="false" />
       </a-tab-pane>
     </a-tabs>
 

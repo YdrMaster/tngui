@@ -14,8 +14,10 @@ export const ALL_MODES: IngressMode[] = ["mapping", "http_proxy"];
 
 /** 反代对外绑定默认端口（亦作隐藏内部监听占位，启动时由批探测覆盖）。 */
 export const DEFAULT_LISTEN_PORT = 9443;
-/** 内置默认远端口（mapping 占位）。 */
-export const DEFAULT_OUT_PORT = 10000;
+/** mapping 内置默认远端目标端口。 */
+export const DEFAULT_MAPPING_OUT_PORT = 80;
+/** http_proxy 内置默认远端目标端口。 */
+export const DEFAULT_HTTP_PROXY_DST_PORT = 443;
 
 /** 客户端走 OHTTP 时透传的 credential 请求头——写死，用户不可改。 */
 export const HEADER_PASSTHROUGH = ["authorization", "x-api-key"] as const;
@@ -113,14 +115,14 @@ export function defaultFields(mode: string): Record<string, unknown> {
   if (mode === "mapping") {
     return {
       rules: [
-        { in: { host: LOCALHOST, port: DEFAULT_LISTEN_PORT }, out: { host: "", port: DEFAULT_OUT_PORT } },
+        { in: { host: LOCALHOST, port: DEFAULT_LISTEN_PORT }, out: { host: "", port: DEFAULT_MAPPING_OUT_PORT } },
       ],
     };
   }
   if (mode === "http_proxy") {
     return {
       proxy_listen: { host: LOCALHOST, port: DEFAULT_LISTEN_PORT },
-      dst_filters: { domain: "https://", port: 0 },
+      dst_filters: { domain: "https://", port: DEFAULT_HTTP_PROXY_DST_PORT },
     };
   }
   return {};

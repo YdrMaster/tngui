@@ -4,6 +4,7 @@ import {
   INGRESS_FIELDS,
   defaultFields,
   DEFAULT_VERIFY,
+  DEFAULT_MAPPING_OUT_PORT,
   DEFAULT_LISTEN_PORT,
   LOCALHOST,
   type EntryModel,
@@ -26,7 +27,7 @@ function ensureMappingRule() {
   const ok = rules.some((r) => r && typeof r.in === "object" && typeof r.out === "object");
   if (!ok) {
     props.entry.fields.rules = [
-      { in: { host: LOCALHOST, port: DEFAULT_LISTEN_PORT }, out: { host: "", port: 10000 } },
+      { in: { host: LOCALHOST, port: DEFAULT_LISTEN_PORT }, out: { host: "", port: DEFAULT_MAPPING_OUT_PORT } },
     ];
   }
 }
