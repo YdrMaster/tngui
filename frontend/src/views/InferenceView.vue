@@ -161,22 +161,8 @@ async function onSend() {
                 <div class="response-panel">
                   <div v-if="sending" class="sending-state">
                     <Spin size="large" />
-                    <a-progress :percent="(phase + 1) * 20" :showInfo="false" style="max-width:360px" />
-                    <h4 style="margin:6px 0 0;font-size:16px">{{
-                      phase === 0 ? "本地接收请求" :
-                      phase === 1 ? "验证云端可信环境" :
-                      phase === 2 ? "建立加密通道" :
-                      phase === 3 ? "可信区内推理" :
-                      "等待响应…"
-                    }}</h4>
-                    <span style="color:var(--text-secondary);font-size:13px">
-                      {{ phase === 0 ? "请求明文不离开本机。"
-                        : phase === 1 ? "校验硬件证明、软件度量和服务身份。"
-                        : phase === 2 ? "OHTTP 加密并绑定网关证明后再发送。"
-                        : phase === 3 ? "请求仅在云端可信执行环境内解密和计算。"
-                        : "等待响应返回…" }}
-                    </span>
-                    <SecureFlow :activeIndex="phase" style="width:100%;transform:scale(.9)" />
+                    <a-progress :percent="(phase + 1) * 20" :showInfo="false" style="width:min(360px,100%)" />
+                    <SecureFlow :active-index="phase" />
                   </div>
                   <div v-else-if="output" style="padding:8px">
                     <pre v-if="failed" class="code-block response-debug" style="white-space:pre-wrap;overflow:auto;max-height:560px;margin:0">{{ output }}</pre>

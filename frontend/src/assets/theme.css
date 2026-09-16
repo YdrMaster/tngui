@@ -95,22 +95,21 @@ button, input, textarea { font: inherit; }
 .pulse-ring { position: absolute; inset: -15px; border-radius: 50%; border: 1px solid rgba(22,119,255,.28); animation: pulse 2.4s ease-in-out infinite; }
 .secure-badge.error .pulse-ring { border-color: rgba(220,38,38,.3); }
 @keyframes pulse { 50% { transform: scale(1.06); opacity: .35; } }
-.secure-flow { width: 100%; display: flex; align-items: center; padding: 18px 4px 12px; overflow: hidden; }
-.flow-fragment { display: contents; }
-.flow-node { width: 116px; min-width: 116px; height: 118px; padding: 12px 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; text-align: center; border: 1px solid var(--border); border-radius: 12px; background: #fafafa; color: var(--text-tertiary); }
-.flow-node-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; background: #eee; font-size: 16px; }
-.flow-node b { font-size: 13px; color: var(--text-secondary); }
-.flow-node small { font-size: 10px; line-height: 14px; }
-.flow-node.active { color: var(--primary); border-color: rgba(22,119,255,.45); background: var(--primary-soft); }
-.flow-node.active b { color: var(--text); }
-.flow-node.active .flow-node-icon { color: white; background: var(--primary); }
-.flow-node.failed { color: var(--error); border-color: rgba(220,38,38,.45); background: #fff1f0; }
-.flow-node.failed .flow-node-icon { background: var(--error); }
-.flow-line { flex: 1; min-width: 45px; height: 2px; position: relative; background: #d9d9d9; }
-.flow-line:after { content: ""; position: absolute; right: 0; top: -3px; border-left: 7px solid #d9d9d9; border-top: 4px solid transparent; border-bottom: 4px solid transparent; }
-.flow-line.encrypted { background: repeating-linear-gradient(90deg, var(--primary) 0 7px, transparent 7px 11px); }
-.flow-line.encrypted:after { border-left-color: var(--primary); }
-.flow-line span { position: absolute; top: -22px; width: 100%; text-align: center; color: var(--primary); font-size: 10px; }
+.secure-flow { width: 100%; text-align: center; }
+.stage-dots { display: flex; justify-content: center; align-items: center; gap: 7px; width: min(260px, 100%); margin: 0 auto; }
+.stage-dot { width: 7px; height: 7px; border-radius: 999px; background: rgba(22,119,255,.22); transition-property: width, background-color, opacity; transition-duration: .22s; transition-timing-function: ease; }
+.stage-dot.done { background: var(--primary); opacity: .48; }
+.stage-dot.active { width: 20px; background: var(--primary); opacity: 1; }
+.stage-viewport { position: relative; height: 148px; margin-top: 16px; }
+.stage-card { position: absolute; inset: 0; min-width: 0; padding: 8px 18px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; border: 1px solid rgba(22,119,255,.2); border-radius: 12px; background: var(--primary-soft); overflow: hidden; }
+.stage-card-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; background: var(--primary); color: #fff; font-size: 16px; }
+.stage-card-title { font-size: 16px; font-weight: 650; color: var(--text); }
+.stage-card-desc { max-width: 460px; margin: 0; font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
+.stage-slide-enter-active, .stage-slide-leave-active { transition: opacity .22s ease, transform .24s ease; }
+.stage-slide-enter-from { opacity: 0; transform: translateY(26px); }
+.stage-slide-enter-to { opacity: 1; transform: translateY(0); }
+.stage-slide-leave-from { opacity: 1; transform: translateY(0); }
+.stage-slide-leave-to { opacity: 0; transform: translateY(-26px); }
 .architecture-flow { display: grid; grid-template-columns: minmax(190px,1fr) minmax(145px,.7fr) minmax(200px,1fr) minmax(145px,.7fr) minmax(210px,1fr); align-items: stretch; gap: 10px; padding: 12px 0; }
 .trust-zone { min-height: 178px; padding: 16px; border-radius: 12px; border: 1px solid rgba(22,119,255,.22); background: linear-gradient(155deg, #f7fbff, #eef6ff); }
 .gateway-zone, .inference-zone { border-color: rgba(22,163,74,.24); background: linear-gradient(155deg, #f7fff9, #edfbf1); }
@@ -198,11 +197,17 @@ button, input, textarea { font: inherit; }
 .gateway-logs { min-height: 240px; margin: 18px 0 0; padding: 18px; overflow: auto; border-radius: 9px; color: #d6e4ff; background: #15181e; font: 12px/1.8 "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; }
 .json-editor { margin-top: 12px; font-family: "SFMono-Regular", Consolas, monospace; line-height: 1.65; }
 @media (max-width: 1280px) {
-  .secure-flow { transform: scale(.9); transform-origin: center; margin-inline: -3%; width: 106%; }
   .architecture-flow { grid-template-columns: minmax(175px,1fr) 120px minmax(185px,1fr) 120px minmax(190px,1fr); gap: 7px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *:before, *:after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+  .stage-dot { transition: none !important; }
+  .stage-slide-enter-active, .stage-slide-leave-active { transition: none !important; }
+  .stage-slide-enter-from, .stage-slide-enter-to,
+  .stage-slide-leave-from, .stage-slide-leave-to {
+    opacity: 1 !important;
+    transform: none !important;
+  }
 }
 /* ================================================================
  * Ingress state home cards
