@@ -1,19 +1,17 @@
-//! tngui 反向代理：对外暴露推理入口，在转发前注入 `x-model` 头。
+//! tngui pre-TNG 反向代理：对外暴露推理入口，在转发前按 `body.model` 注入模型 path。
 //!
 //! 形态——tng 全包在内部：
 //! - tng 的 ingress 本地监听端口由 tngui 在启动时选取空闲回环端口注入（见
 //!   `config::prepare_config`），仅 `127.0.0.1` 可达、对用户隐藏不外配；
-//! - tngui 自此进程内起 HTTP 反代对外（host 由 D1 toggle 在 `127.0.0.1`/`0.0.0.0` 间
-//!   切换、port 用户可配），把推理请求透传到 tng 内部 ingress，并在转发前按 `body.model`
-//!   设置/覆盖 `x-model` 头，使任意 OpenAI 兼容客户端经反代即可走 api-key 鉴权。
+//! - tngui 自此进程内起 HTTP 反代对外（host 由 UI toggle 在 `127.0.0.1`/`0.0.0.0` 间
+//!   切换、port 用户可配），把推理请求透传到 tng 内部 ingress，并把可用模型请求改写为
+//!   `/models/{model-segment}{original-path}`（capi path 模型鉴权契约）。
 //!
 //! 行为：
-//! - 完整反代（先非流式）：透传 method / path / 头 / body，响应原样回传。
-//! - `x-model`：解析 JSON body 取 `model`；含 `model` 字段则在转发前设
-//!   `x-model: <model>`——若请求已带 `x-model` 则**覆盖**之（不沿用客户端发来的值），
-//!   且不改写 body；无 `model` 或 body 非 JSON 时不设/覆盖 `x-model`、原样转发
-//!   （既有的客户端 `x-model` 头原样透传）。例外：JSON body 前的 UTF-8 BOM
-//!   会在转发前剥离（PowerShell 5 写出的 JSON 文件常见且不是合法 JSON）。
+//! - 完整反代：透传 method / query / 头 / body，响应原样回传。
+//! - 对 `POST /v1/chat/completions` 与 `POST /v1/messages`，解析 UTF-8 JSON object
+//!   顶层字符串 `model` 后生成单一路径 model segment。非法/缺失 model fail-closed。
+//! - 不注入、不生成、不读取 `x-model`；body 字节原样保留。
 //!
 //! 实现：原生 tokio TCP（无额外依赖，与 `inference.rs` 同向；design D2 由 axum 调整为
 //! 原生 TCP：本沙箱网络受限、避免拉新依赖、与 codebase 风格一致，且非流式单跳足够）。
@@ -137,7 +135,7 @@ async fn start_one(route: ProxyRoute) -> Result<ProxyListener, String> {
 const BODY_LIMIT: usize = 10 * 1024 * 1024; // 10 MiB（与 inference.rs 对齐）
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// 处理一条客户端连接：读请求 → 注入/覆盖 `x-model` → 转发内部 ingress → 原样回传响应。
+/// 处理一条客户端连接：读请求 → 注入模型 path → 转发内部 ingress → 原样回传响应。
 async fn handle_conn(
     mut client: TcpStream,
     internal_port: u16,
@@ -154,10 +152,18 @@ async fn handle_conn(
     let content_length: Option<usize> =
         header_get(&headers, "content-length").and_then(|v| v.trim().parse().ok());
 
-    // 2. 读 body（按 Content-Length；缺失则取已读到的；超限 413）
+    // 2. 读 body（按 Content-Length；缺失则取已读到的；超限时先丢弃声明长度——
+    //    不建立 upstream，也避免关闭套接字时未读数据触发 RST 掩盖 413）
     let mut body: Vec<u8> = buf[body_off..].to_vec();
     if let Some(n) = content_length {
         if n > BODY_LIMIT {
+            let mut remaining = n.saturating_sub(body.len());
+            let mut discard = [0u8; 8192];
+            while remaining > 0 {
+                let take = remaining.min(discard.len());
+                client.read_exact(&mut discard[..take]).await?;
+                remaining -= take;
+            }
             return write_simple_response(&mut client, 413, "Payload Too Large").await;
         }
         if body.len() < n {
@@ -168,17 +174,15 @@ async fn handle_conn(
         body.truncate(n);
     }
 
-    // 3. JSON body 对非 JSON Content-Type 不动；对 JSON Content-Type 剥离
-    //    UTF-8 BOM（PowerShell 5 的 Out-File -Encoding utf8 会写入 BOM），
-    //    否则客户端合法 JSON 会被反代判为非 JSON，body 也会被上游拒绝。
-    if is_json_content_type(&headers) && body.starts_with(UTF8_BOM) {
-        body.drain(0..UTF8_BOM.len());
-    }
-
-    // x-model：解析 body.model；含 model（字符串）则设/覆盖 x-model；无则不设
-    if let Some(m) = parse_body_model(&body) {
-        set_header(&mut headers, "x-model", &m);
-    }
+    // 3. pre-TNG 模型 path：只从 supported endpoint 的原始 body 语义决定 path。
+    //    body 本身永不改写；`x-model` 与模型身份解耦，不做读取、覆盖或删除决策。
+    let path = match resolve_model_path(&method, &path, &body) {
+        ModelOverride::Unsupported => path,
+        ModelOverride::Invalid => {
+            return write_simple_response(&mut client, 400, "Bad Request").await;
+        }
+        ModelOverride::Path(v) => v,
+    };
 
     // 4. 剥离 hop-by-hop 头；对 upstream 设 Connection: close。
     //    Host 须为远端目标（mapping 的 out.host / http_proxy 的 domain）：tng 内部 ingress
@@ -322,24 +326,73 @@ fn strip_hop_by_hop(h: &mut Headers) {
     });
 }
 
-/// UTF-8 BOM 字节；Windows PowerShell 5 的 `-Encoding utf8` 会加入。
-const UTF8_BOM: &[u8; 3] = b"\xEF\xBB\xBF";
-
-/// 仅把 `application/json`（可含 media 参数）识别为 JSON body。
-fn is_json_content_type(headers: &Headers) -> bool {
-    header_get(headers, "content-type")
-        .and_then(|v| v.split(';').next())
-        .map(|v| v.trim().eq_ignore_ascii_case("application/json"))
-        .unwrap_or(false)
+/// 支持模型 path 注入的 endpoint。只匹配去掉 query 后的完整请求 path——
+/// `/v1/chat/completions/foo` 等非精确匹配不注入模型前缀。
+fn is_supported_model_path(path_with_query: &str) -> bool {
+    let path = path_with_query
+        .split_once('?')
+        .map(|(p, _)| p)
+        .unwrap_or(path_with_query);
+    matches!(path, "/v1/chat/completions" | "/v1/messages")
 }
 
-fn parse_body_model(body: &[u8]) -> Option<String> {
-    if body.is_empty() {
+fn is_supported_model_method(method: &str) -> bool {
+    method == "POST"
+}
+
+/// 上层 path 注入决定：supported endpoint 上的任何无效 model 语义都阻断；
+/// 非 supported endpoint 保持原 path。
+#[derive(Debug, PartialEq, Eq)]
+enum ModelOverride {
+    Unsupported,
+    Invalid,
+    Path(String),
+}
+
+/// `body.model` → pre-TNG path。supported endpoint 必须产出有效路径；其余路径
+/// 不产生模型语义。
+fn resolve_model_path(method: &str, path_with_query: &str, body: &[u8]) -> ModelOverride {
+    if !is_supported_model_method(method) || !is_supported_model_path(path_with_query) {
+        return ModelOverride::Unsupported;
+    }
+    let model = match extract_body_model(body) {
+        Some(v) => v,
+        None => return ModelOverride::Invalid,
+    };
+    let (raw_path, query) = path_with_query
+        .split_once('?')
+        .map(|(p, q)| (p, q))
+        .unwrap_or((path_with_query, ""));
+    let prefix = format!("/models/{}", encode_model_segment(&model));
+    ModelOverride::Path(if query.is_empty() {
+        prefix + raw_path
+    } else {
+        prefix + raw_path + "?" + query
+    })
+}
+
+/// 解析 UTF-8 JSON object 顶层字符串 `model`，trim 后合格才返回。
+fn extract_body_model(body: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    if !v.is_object() {
         return None;
     }
-    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    // 仅当 model 是字符串（OpenAI 兼容形态）才注入；其余形态不设/覆盖。
-    v.get("model")?.as_str().map(|s| s.to_string())
+    let model = v.get("model")?.as_str()?.trim().to_string();
+    if model.is_empty() { None } else { Some(model) }
+}
+
+/// 模型名作为**单一路径 segment** 编码：只保留 RFC3986 unreserved
+/// 字母数字与 `-._~`，其余 UTF-8 字节（含 `/`、`%`、空格、控制字符、多字节）转成 `%XX`。
+fn encode_model_segment(model: &str) -> String {
+    let mut encoded = String::new();
+    for &b in model.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(b as char);
+        } else {
+            encoded.extend(format!("%{b:02X}").chars());
+        }
+    }
+    encoded
 }
 
 fn build_request_bytes(method: &str, path: &str, headers: &Headers, body: &[u8]) -> Vec<u8> {
@@ -377,12 +430,12 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct MockReceived {
-        x_model: Option<String>,
+        method: String,
+        path: String,
         body: Vec<u8>,
     }
 
-    /// 起 mock upstream：读一行请求（到 \r\n\r\n + body），取出 `x-model` 头值、
-    /// 收到的 body，回 200 + JSON，其 content 标注收到的 x-model。
+    /// 起 mock upstream：记录请求行与 body，回应插件式稳定响应以验证透传。
     async fn mock_upstream(
         port: u16,
         received: Arc<Mutex<Option<MockReceived>>>,
@@ -393,17 +446,14 @@ mod tests {
         let (mut s, _) = l.accept().await.unwrap();
         let (buf, body_off) = read_until_double_crlf(&mut s).await.unwrap().unwrap();
         let head = String::from_utf8_lossy(&buf[..body_off]);
-        let x_model = parse_headers(&head)
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("x-model"))
-            .map(|(_, v)| v.clone());
+        let (method, path) = parse_request_line(&head).unwrap();
         let body_recvd = buf[body_off..].to_vec();
         *received.lock().await = Some(MockReceived {
-            x_model: x_model.clone(),
+            method,
+            path: path.clone(),
             body: body_recvd,
         });
-        let echoed = x_model.unwrap_or_else(|| "<none>".to_string());
-        let body = format!("{{\"got_x_model\":\"{echoed}\"}}");
+        let body = r#"{"ok":true,"path":"PATH_PLACEHOLDER"}"#.replace("PATH_PLACEHOLDER", &path);
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
@@ -412,12 +462,16 @@ mod tests {
         s.flush().await.unwrap();
     }
 
-    async fn run_once(client_headers: &[(&str, &str)], body: &str) -> (String, Option<String>) {
-        let (resp, received) = run_once_full(client_headers, body.as_bytes().to_vec()).await;
-        (resp, received.and_then(|x| x.x_model))
+    async fn run_once_full(
+        client_headers: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> (String, Option<MockReceived>) {
+        run_once_at("POST", "/v1/chat/completions", client_headers, body).await
     }
 
-    async fn run_once_full(
+    async fn run_once_at(
+        method: &str,
+        path: &str,
         client_headers: &[(&str, &str)],
         body: Vec<u8>,
     ) -> (String, Option<MockReceived>) {
@@ -441,16 +495,22 @@ mod tests {
         }])
         .await
         .unwrap();
-        let resp = send_request_bytes(out_port, client_headers, body).await;
+        let resp = send_request_bytes(out_port, method, path, client_headers, body).await;
         handle.stop().await;
         let got = received.lock().await.clone();
         (resp, got)
     }
 
-    async fn send_request_bytes(out_port: u16, headers: &[(&str, &str)], body: Vec<u8>) -> String {
-        let mut s = TcpStream::connect(("127.0.0.1", out_port)).await.unwrap();
+    async fn send_request_bytes(
+        out_port: u16,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> String {
+        let s = TcpStream::connect(("127.0.0.1", out_port)).await.unwrap();
         let req_head = format!(
-            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{out_port}\r\nContent-Length: {}\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{out_port}\r\nContent-Length: {}\r\n",
             body.len()
         );
         let mut req = req_head.into_bytes();
@@ -459,12 +519,18 @@ mod tests {
         }
         req.extend_from_slice(b"\r\n");
         req.extend_from_slice(&body);
-        s.write_all(&req).await.unwrap();
-        s.flush().await.unwrap();
+        // fail-closed 响应可能在请求 body 写完前发出（尤其是超限时）。
+        // 分离读写，模拟普通 HTTP client 可收到 early response 的行为。
+        let (mut rd, mut wr) = s.into_split();
+        let write_task = tokio::spawn(async move {
+            wr.write_all(&req).await?;
+            wr.flush().await?;
+            Ok::<(), std::io::Error>(())
+        });
         let mut out = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
-            let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf))
+            let n = tokio::time::timeout(Duration::from_secs(5), rd.read(&mut buf))
                 .await
                 .unwrap()
                 .unwrap();
@@ -473,6 +539,7 @@ mod tests {
             }
             out.extend_from_slice(&buf[..n]);
         }
+        write_task.await.unwrap().unwrap();
         String::from_utf8_lossy(&out).to_string()
     }
 
@@ -480,95 +547,184 @@ mod tests {
         crate::config::pick_free_port().unwrap()
     }
 
-    #[tokio::test]
-    async fn strips_utf8_bom_from_json_body_and_injects_model() {
-        let json = br#"{"model":"ps5", "messages":[]}"#;
-        let mut body = b"\xEF\xBB\xBF".to_vec();
-        body.extend_from_slice(json);
-        let (resp, got) = run_once_full(
-            &[
-                ("Authorization", "Bearer key"),
-                ("Content-Type", "application/json"),
-            ],
-            body,
-        )
-        .await;
-        assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
-        assert_eq!(
-            got.as_ref().map(|x| x.x_model.as_deref()),
-            Some(Some("ps5"))
+    #[test]
+    fn encode_model_segment_preserves_unreserved() {
+        assert_eq!(encode_model_segment("model-a.b_c~1"), "model-a.b_c~1");
+    }
+
+    #[test]
+    fn encode_model_segment_encodes_single_segment_characters_and_unicode() {
+        assert_eq!(encode_model_segment("provider/model"), "provider%2Fmodel");
+        assert_eq!(encode_model_segment("100%"), "100%25");
+        assert_eq!(encode_model_segment("模型 A"), "%E6%A8%A1%E5%9E%8B%20A");
+        assert_eq!(encode_model_segment("a\t?&"), "a%09%3F%26");
+    }
+
+    #[test]
+    fn resolve_model_path_trims_and_preserves_query() {
+        let got = resolve_model_path(
+            "POST",
+            "/v1/chat/completions?trace=1",
+            br#"{"model":" model-a ","messages":[]}"#,
         );
-        assert_eq!(got.map(|x| x.body), Some(json.to_vec()));
+        assert_eq!(
+            got,
+            ModelOverride::Path("/models/model-a/v1/chat/completions?trace=1".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_model_path_encodes_provider_slash() {
+        let got = resolve_model_path("POST", "/v1/messages", br#"{"model":"provider/model"}"#);
+        assert_eq!(
+            got,
+            ModelOverride::Path("/models/provider%2Fmodel/v1/messages".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_model_path_rejects_model_semantics_without_forward() {
+        for body in [
+            b"{}".as_slice(),
+            br#"{"model":""}"#,
+            br#"{"model":"   "}"#,
+            br#"{"model":1}"#,
+            b"[1,2]",
+            b"not-json",
+            b"\xEF\xBB\xBF {\"model\":\"m\"}",
+        ] {
+            assert_eq!(
+                resolve_model_path("POST", "/v1/chat/completions", body),
+                ModelOverride::Invalid
+            );
+        }
+        for target in [
+            "/v1/completions",
+            "/v1/chat/completions/extra",
+            "/models/m/v1/messages",
+        ] {
+            assert_eq!(
+                resolve_model_path("POST", target, br#"{"model":"m"}"#),
+                ModelOverride::Unsupported
+            );
+        }
+        assert_eq!(
+            resolve_model_path("GET", "/v1/chat/completions", br#"{"model":"m"}"#),
+            ModelOverride::Unsupported
+        );
     }
 
     #[tokio::test]
-    async fn injects_x_model_from_body_model() {
-        let (resp, got) = run_once(
+    async fn injects_model_path_and_preserves_query_body_credentials() {
+        let json = br#"{"model":" model-a ", "messages":[]}"#;
+        let (resp, got) = run_once_at(
+            "POST",
+            "/v1/chat/completions?trace=1",
             &[
                 ("Authorization", "Bearer key"),
+                ("x-api-key", "another-key"),
                 ("Content-Type", "application/json"),
             ],
-            r#"{"model":"gpt-x","messages":[]}"#,
+            json.to_vec(),
         )
         .await;
         assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
-        assert_eq!(got.as_deref(), Some("gpt-x"));
+        assert!(resp.contains(r#""ok":true"#), "resp={resp}");
+        let got = got.expect("upstream should receive request");
+        assert_eq!(got.method, "POST");
+        assert_eq!(got.path, "/models/model-a/v1/chat/completions?trace=1");
+        assert_eq!(got.body, json);
     }
 
     #[tokio::test]
-    async fn overwrites_client_supplied_x_model_with_body_model() {
-        let (resp, got) = run_once(
+    async fn injects_anthropic_model_path_and_keeps_x_api_key() {
+        let json = br#"{"model":"provider/model"}"#;
+        let (resp, got) = run_once_at(
+            "POST",
+            "/v1/messages",
+            &[("x-api-key", "another-key")],
+            json.to_vec(),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
+        let got = got.unwrap();
+        assert_eq!(got.path, "/models/provider%2Fmodel/v1/messages");
+        assert_eq!(got.body, json);
+    }
+
+    #[tokio::test]
+    async fn client_x_model_does_not_affect_model_path() {
+        let json = br#"{"model":"real-model","messages":[]}"#;
+        let (resp, got) = run_once_full(
             &[
                 ("Authorization", "Bearer key"),
                 ("x-model", "spoof-by-client"),
             ],
-            r#"{"model":"real-model","messages":[]}"#,
+            json.to_vec(),
         )
         .await;
         assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
-        assert_eq!(got.as_deref(), Some("real-model"), "应被 body.model 覆盖");
+        let got = got.unwrap();
+        assert_eq!(got.path, "/models/real-model/v1/chat/completions");
+        assert_eq!(got.body, json);
     }
 
     #[tokio::test]
-    async fn no_model_passes_through_existing_x_model_unchanged() {
-        let (resp, got) = run_once(
-            &[("Authorization", "Bearer key"), ("x-model", "client-value")],
-            r#"{"messages":[]}"#,
+    async fn unsupported_path_has_no_model_semantics() {
+        let (resp, got) = run_once_at(
+            "POST",
+            "/v1/completions",
+            &[("Authorization", "Bearer key")],
+            br#"{"model":"m"}"#.to_vec(),
         )
         .await;
         assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
-        assert_eq!(got.as_deref(), Some("client-value"));
+        let got = got.unwrap();
+        assert_eq!(got.path, "/v1/completions");
     }
 
     #[tokio::test]
-    async fn no_model_and_no_x_model_passes_through_none() {
-        let (resp, got) = run_once(&[("Authorization", "Bearer key")], r#"{"messages":[]}"#).await;
-        assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
-        assert_eq!(got, None);
+    async fn invalid_model_fails_closed_with_400() {
+        for body in [
+            b"{}".as_slice(),
+            b"{\"messages\":[]}",
+            b"{\"model\":\"   \"}",
+            b"{\"model\":1}",
+            b"[1,2,3]",
+            b"not-json",
+            b"\xEF\xBB\xBF {\"model\":\"m\"}",
+        ] {
+            let (resp, got) = run_once_full(
+                &[("Authorization", "Bearer key"), ("x-api-key", "key")],
+                body.to_vec(),
+            )
+            .await;
+            assert!(
+                resp.starts_with("HTTP/1.1 400"),
+                "body={:?} resp={resp}",
+                body
+            );
+            assert!(got.is_none(), "invalid request must not reach upstream");
+        }
     }
 
     #[tokio::test]
-    async fn non_json_body_no_model_passes_through() {
-        let (resp, got) = run_once(
-            &[("Authorization", "Bearer key"), ("x-model", "keep-me")],
-            "not-json-at-all",
-        )
-        .await;
-        assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
-        assert_eq!(got.as_deref(), Some("keep-me"));
+    async fn oversized_body_fails_closed_with_413() {
+        let body = vec![b' '; BODY_LIMIT + 1];
+        let (resp, got) = run_once_full(&[("Authorization", "Bearer key")], body).await;
+        assert!(resp.starts_with("HTTP/1.1 413"), "resp={resp}");
+        assert!(got.is_none());
     }
 
     #[tokio::test]
     async fn response_relayed_verbatim() {
-        let (resp, _) = run_once(
+        let (resp, _) = run_once_full(
             &[("Authorization", "Bearer key")],
-            r#"{"model":"m","messages":[]}"#,
+            br#"{"model":"m","messages":[]}"#.to_vec(),
         )
         .await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
         assert!(resp.contains("Connection: close"));
-        assert!(
-            resp.contains(r#""got_x_model":"m""#),
-            "应原样回传 body: {resp}"
-        );
+        assert!(resp.contains(r#""ok":true"#), "resp={resp}");
     }
 }

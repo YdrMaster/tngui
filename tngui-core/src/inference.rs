@@ -2,8 +2,8 @@
 //!
 //! `send_inference` 是普通 OpenAI 客户端：仅带 `Authorization: Bearer` + JSON body
 //! （`{model, messages}`）POST 到 `127.0.0.1:<port>`——`port` 调用方传的是 tngui 反代对外
-//! 端口（`launch_tng` 启动反代、`proxy_endpoint` 命令暴露）；`x-model` 头由反代按
-//! `body.model` 注入/覆盖，此处不注。反代透传到 tng 透明代理（ingress）。非流式：POST
+//! 端口（`launch_tng` 启动反代、`proxy_endpoint` 命令暴露）；`body.model` 交给反代解析，
+//! 并由 pre-TNG proxy 改写模型 path，此处不改写 path。反代透传到 tng 透明代理（ingress）。非流式：POST
 //! /v1/chat/completions，响应一次性返回。
 
 use std::time::Duration;
@@ -341,7 +341,7 @@ mod tests {
         assert!(!e.contains("Bearer key"), "{e}");
     }
 
-    /// send_inference 退化为普通客户端：不注 x-model（由反代注入），并解析 choices。
+    /// send_inference 退化为普通客户端：模型身份只在 body 中，由反代转成 path。
     #[tokio::test]
     async fn send_inference_posts_without_x_model_and_returns_content() {
         use std::sync::{Arc, Mutex};
@@ -377,7 +377,7 @@ mod tests {
         assert_eq!(r, "hi-from-model");
         assert!(
             seen.lock().unwrap().is_none(),
-            "send_inference 不应自注 x-model（由反代注入）"
+            "send_inference 不应注入 x-model；模型身份留在 body.model"
         );
     }
 

@@ -157,7 +157,7 @@ tng 自身的 ingress 本地监听 `host`/`port` 由 tngui 在启动时选取空
   - 模型：在本页内可编辑输入模型名（会话内不持久化，关闭 GUI 后不保留），发送时作为请求体里的 `model`。
   - 输入内容：可编辑的 prompt textarea，发送后不清空，可修改后重发；高度按内容自动调整（4–16 行），不能手动拖拽。
   - 发送测试请求按钮内图标与文字垂直居中；按钮下方不保留额外锁形提示条。
-  - 发送测试请求：满足可用条件时按 OpenAI 兼容格式，POST 到 tngui 反代对外端点 `http://<绑定地址（默认 127.0.0.1）>:<本机端口>/v1/chat/completions`；`x-model` 头由反代按 `body.model` 注入（请求已带 `x-model` 则覆盖），前端 / 发送逻辑不注入。
+  - 发送测试请求：满足可用条件时按 OpenAI 兼容格式，POST 到 tngui 反代对外端点 `http://<绑定地址（默认 127.0.0.1）>:<本机端口>/v1/chat/completions`；模型身份只来自请求体顶层 `body.model`；前端 / 发送逻辑不注入模型身份头，tngui pre-TNG proxy 会按 `body.model` 改写为 `/models/{模型名}/v1/chat/completions`。
 - 右侧“响应”卡：
   - 发送过程中显示 5 步 SecureFlow 动画和阶段文案，表示请求当前处于哪一阶段。
   - 成功时显示 `200 OK` 标签和 assistant 响应文本。
@@ -233,7 +233,10 @@ SecureFlow 五步对应密态推理的保护过程：
   - 行 1 反代对外绑定（本机端口）：`host` 在 `127.0.0.1`（仅本机，默认）/ `0.0.0.0`（对外网卡）间 toggle、`port` 可配；tng 本地监听 `host`/`port` 由 tngui 启动时自选空闲回环端口注入、对用户隐藏，不在此配置、不在结构化控件出现。
   - 远端形态二选一：`地址端口`（`mapping`，`out = <IP>:<端口>`，host 须为 IP）/ `域名`（`http_proxy`，`dst_filters = [{domain, port}]`，主机名 + 端口分两字段、序列化为数组、主机名不含端口；域名框可写 `http://` 或 `https://` 前缀——`https://` 前缀会在序列化时派生 `ohttp.tls: true`（tng 以 TLS 连上游）、`http://` 或无前缀则不写 `tls`，前缀本身会被剥离不进 `dst_filters.domain`）。
 - tng 的 `http_proxy` 上游目标跟随请求 `Host` 头的 host 与端口（`dst_filters.port` 仅参与 ingress 匹配）；tngui 反代转发时 `Host` 头填 `domain:port`（配置了端口时），非 80 端口如 https 的 443/30090 由此可达。
-  - `ohttp` 常开且写死：每条 ingress 始终带 `ohttp`，`header_passthrough.request_headers` 固定为 `["x-model","x-api-key","authorization"]`，用户不可关闭、不可改这组 header。
+  - `ohttp` 常开且写死：每条 ingress 始终带 capi path 模型鉴权契约，
+`path_rewrites` 固定为 `[{ match_regex: "^/models/([^/]+)(?:/.*)?$", substitution: "/models/$1" }]`，
+`header_passthrough.request_headers` 固定为 `["authorization","x-api-key"]`。用户不可关闭，
+也不可改写 path 规则或这组 credential header。
   - ingress 编辑器按三行分组：行 1 反代对外绑定独占一行；行 2 远端类型与当前远端字段同一横排，远端类型切换即时生效、直接切换控件显示状态并把远端字段重置为该类型默认值，不弹窗确认；行 3 远程证明开关与 `verify` 同一横排。远程证明开关表示是否启用远程证明（ra）：开启（ra=on/`no_ra=false`）时显示 `verify`（`model` / `as_provider`，默认 `passport` / `tpm`），关闭（`no_ra=true`）时仅显示开关、不渲染 `verify`。
   - 不提供 `add_egress` 结构化控件——客户端不承载 egress。
   - 未结构化字段（RA `attest` 等）由全局原始 JSON 视图兜底。

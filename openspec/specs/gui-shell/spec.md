@@ -130,119 +130,96 @@
 
 系统须（SHALL）在"设置"视图提供结构化控件，仅承载客户端 ingress（一条或多条 `add_ingress`），不承载 `add_egress`。每条 ingress 锁定为客户端 OHTTP 形态：
 - 远端类型二选一：`地址端口`（`mapping`，`out = {host:<IP>, port:<port>}`，`host` 须为 IP）或 `域名`（`http_proxy`，`dst_filters = [{domain:<主机名>, port:<端口号>}]`，主机名与端口分两个控件、主机名仅含主机名不含端口、端口走独立 `port` 字段；域名框接受可选 `http://` / `https://` 前缀，前缀触发 `ohttp.tls` 派生并剥离进 `domain`——`https://` 派生 `tls: true`，`http://` 或无前缀不派生）；`socks5`/`netfilter`/`hook`/`mapping_udp` 不作为 ingress 模式提供。
-- tng 本地监听 `host`/`port` 由 tngui 自动注入并对用户隐藏（见"ingress 本地监听强制走回环"）；ingress 编辑器行 1 改为呈现 tngui 反代对外绑定——`host` 在 `127.0.0.1`（仅本机）/`0.0.0.0`（对外网卡）间 toggle、`port` 可配（默认 `127.0.0.1`），作为 tngui 侧设置不进 tng 配置（见"tngui 反向代理对外暴露推理入口并注入 x-model 头"）。
-- `ohttp` 永远开、且 `ohttp.header_passthrough.request_headers` 写死为 `["x-model","x-api-key","authorization"]`（见"客户端 ingress 锁定 OHTTP 协议"），用户不可关闭、不可编辑。
+- tng 本地监听 `host`/`port` 由 tngui 自动注入并对用户隐藏；ingress 编辑器行 1 改为呈现 tngui 反代对外绑定——`host` 在 `127.0.0.1`（仅本机）/`0.0.0.0`（对外网卡）间 toggle、`port` 可配（默认 `127.0.0.1`），作为 tngui 侧设置不进 tng 配置（见"tngui 反向代理作为 pre-TNG path 注入代理"）。
+- `ohttp` 永远开，且每条 ingress 的 `ohttp.path_rewrites` 与 `ohttp.header_passthrough.request_headers` 写死为 capi path 模型鉴权契约（见"客户端 ingress 锁定 OHTTP 协议"），用户不可关闭、不可编辑。
 - 保留 `no_ra` 开关；其与 `verify` 的序列化语义见"ingress 的 no_ra 与 verify 互斥序列化"。
 
-系统绝不（MUST NOT）提供 `control_interface.restful`（host 或 port）的任何结构化控件——管控面由 tngui 在启动时自行注入（承接"控制面 host 强制走回环地址"与"管控端口自动选取"）。系统绝不（MUST NOT）提供 `add_egress` 的任何结构化控件——客户端侧不承载 egress。系统绝不（MUST NOT）提供 tng ingress 本地监听 `host`/`port` 的任何结构化控件或可编辑字段（由 tngui 启动时注入）。
+系统绝不（MUST NOT）提供 `control_interface.restful`（host 或 port）、`path_rewrites`、`header_passthrough.request_headers` 的任何结构化控件。系统绝不（MUST NOT）提供 `add_egress` 的任何结构化控件——客户端侧不承载 egress。系统绝不（MUST NOT）提供 tng ingress 本地监听 `host`/`port` 的任何结构化控件或可编辑字段（由 tngui 启动时注入）。
 
 #### Scenario: 新增条目并选模式
-
 - **WHEN** 用户在"设置"视图新增一条 ingress 并选择远端类型
-- **THEN** 系统仅提供"地址端口(mapping) / 域名(http_proxy)"两种远端类型，并在选定类型后展示该形态对应字段集（`地址端口` = `out` 的 IP+port；`域名` = 主机名 `domain` + 端口 `port` 两个控件），不出现 `socks5`/`netfilter`/`hook` 选择
+- **THEN** 系统仅提供"地址端口(mapping) / 域名(http_proxy)"两种远端类型，并在选定类型后展示该形态对应字段集，不出现 `socks5`/`netfilter`/`hook` 选择
 
 #### Scenario: 切换模式重置字段
-
 - **WHEN** 用户切换某条 ingress 的远端类型
-- **THEN** 系统以新形态的字段集替换该条原有字段，`ohttp`（常开、写死 header_passthrough）与 `no_ra` 保持不变
+- **THEN** 系统以新形态的字段集替换该条原有字段，`ohttp`（常开且写死 path rewrite 与 credential passthrough）与 `no_ra` 保持不变
 
 #### Scenario: 本地监听 host 锁死回环
-
 - **WHEN** 用户编辑 ingress 的本机端口
-- **THEN** 行 1 以 tngui 反代对外绑定呈现：`host` 在 `127.0.0.1`/`0.0.0.0` 间 toggle、`port` 可配（默认 `127.0.0.1`）；tng ingress 本地监听 `host`/`port` 不出现、不可编辑（由 tngui 注入，见"ingress 本地监听强制走回环"）
+- **THEN** 行 1 以 tngui 反代对外绑定呈现：`host` 在 `127.0.0.1`/`0.0.0.0` 间 toggle、`port` 可配；tng ingress 本地监听 `host`/`port` 不出现、不可编辑
 
 #### Scenario: 密态推理连接信息单一来源
-
 - **WHEN** 渲染"设置"视图的密态推理卡片
-- **THEN** 卡片只承载 API Key（Model 已移至“密态推理”视图，见“密态推理页面发送并显示推理请求”）；本机端口与远端一律取自结构化 ingress，不出现与结构化 ingress 断开的 `localPort`/`outboundAddress` 输入
+- **THEN** 卡片只承载 API Key；本机端口与远端一律取自结构化 ingress，不出现与结构化 ingress 断开的 `localPort`/`outboundAddress` 输入
 
 #### Scenario: 启动时序列化为 TNG JSON
-
 - **WHEN** 用户触发启动/重启
-- **THEN** 系统将结构化控件状态序列化为符合 TNG 配置（外挂 tag 形式）的 JSON，其中不含 `control_interface.restful`（由启动流程注入，承接 `auto-manage-control-port`）、不含 `add_egress`、不含反代对外绑定字段（tngui 侧，由 tngui 用于反代绑定、不传给 tng），且每条 ingress 必含锁定 `ohttp`；tng ingress 本地监听 `host`/`port` 不出现在用户序列化的 ingress 里（由 tngui 在拉起 tng 前注入）
+- **THEN** 系统将结构化控件状态序列化为 TNG JSON，不含 `control_interface.restful`、不含 `add_egress`、不含反代对外绑定字段，且每条 ingress 必含锁定 `ohttp.path_rewrites` 和请求头透传白名单；tng ingress 本地监听 `host`/`port` 不出现在用户序列化的 ingress 里
 
 #### Scenario: http_proxy dst_filters 序列化为带端口的数组
-
-- **WHEN** 用户以 `域名`（`http_proxy`）形态配置远端（主机名 + 端口）并触发序列化为 TNG JSON
-- **THEN** 该 ingress 的 `dst_filters` 序列化为数组 `[{ "domain": <主机名>, "port": <端口号> }]`——主机名仅含主机名（不含端口）、端口号走独立 `port` 字段；系统绝不（MUST NOT）把端口拼进 `domain` 字符串、绝不（MUST NOT）以 `{ "domain": "<host>:<port>" }` 单字段对象形式产出
+- **WHEN** 用户以 `域名`（`http_proxy`）形态配置远端并触发序列化为 TNG JSON
+- **THEN** 该 ingress 的 `dst_filters` 序列化为数组 `[{ "domain": <主机名>, "port": <端口号> }]`，主机名不含端口，端口写入独立字段
 
 #### Scenario: http_proxy 域名前缀决定 ohttp.tls
-
-- **WHEN** 用户在 `域名`（`http_proxy`）的域名框输入 `https://host` 或 `http://host` 或无前缀的 `host` 并触发序列化为 TNG JSON
-- **THEN** 输入为 `https://host` 时该 ingress 的 `ohttp` 带 `tls: true`；输入为 `http://host` 或无前缀时 `ohttp` 不含 `tls` 字段；三种输入下 `dst_filters[0].domain` 均不含 scheme 前缀（前缀被剥离）；`header_passthrough` 三头写死语义不变
+- **WHEN** 用户在 `域名`（`http_proxy`）的域名框输入 `https://host` 或 `http://host` 或无前缀的 `host`
+- **THEN** `https://` 派生 `ohttp.tls: true`；`http://` 或无前缀不派生 `tls`；三种输入下 `dst_filters[0].domain` 均不含 scheme 前缀；锁定的 `path_rewrites` 与 credential passthrough 语义不变
 
 #### Scenario: 导入含 ohttp.tls 的配置回填 tls
-
 - **WHEN** 用户导入的 JSON 中某 `http_proxy` ingress 的 `ohttp` 含 `tls: true`
 - **THEN** 该 ingress 回填前端内部 `tls=true` 并在域名框以 `https://` 前缀回显；`ohttp.tls` 在下次序列化时按前缀派生语义回写
 
 #### Scenario: 反代转发 Host 含 dst 端口
-
 - **WHEN** tngui 反代把请求转发给 tng 内部 `http_proxy` ingress
-- **THEN** 请求 `Host` 头使用 tngui 远端目标——`dst_filters` 配了有效端口时为 `<domain>:<port>`，未配有效端口时为 `<domain>`（tng 据此 `Host` 头的 host 与端口解析其上游目标；`dst_filters.port` 不决定上游端口）
+- **THEN** 请求 `Host` 头使用 tngui 远端目标；`dst_filters` 配了有效端口时为 `<domain>:<port>`，未配有效端口时为 `<domain>`
 
 #### Scenario: 推理响应按 Content-Length 或 chunked 成帧均可解析
-
-- **WHEN** tng/上游以 `Transfer-Encoding: chunked` 或 `Content-Length` 成帧返回非流式推理响应（实测 tng 2.9.2 成功响应走 chunked）
-- **THEN** 密态推理发送逻辑剥除 chunk 帧（或按长度读取）后解析 `choices[0].message.content`，输出区显示真实回复文本——绝不（MUST NOT）把 chunk 尺寸/帧分隔符混进 JSON 而报"解析失败"
+- **WHEN** tng/上游以 `Transfer-Encoding: chunked` 或 `Content-Length` 成帧返回非流式推理响应
+- **THEN** 密态推理发送逻辑剥除 chunk 帧（或按长度读取）后解析 `choices[0].message.content`，输出区显示真实回复文本
 
 #### Scenario: 非 JSON/非 2xx 响应报可读调试详情
-
-- **WHEN** 密态推理发送链路收到 2xx 但响应体非 JSON（如上游 WAF 拦截页 HTML）或非 2xx（如 tng 网关 `HttpCipherTextBadResponse` 502/403）
-- **THEN** 输出区显示失败摘要、脱敏请求与响应原文（正文截断上限 8000 字符）；绝不（MUST NOT）只报"JSON 解析失败"而不带任何上下文
+- **WHEN** 密态推理发送链路收到 2xx 但响应体非 JSON，或非 2xx
+- **THEN** 输出区显示失败摘要、脱敏请求与响应原文；绝不（MUST NOT）只报"JSON 解析失败"而不带任何上下文
 
 #### Scenario: https 上游经反代加密可达
-
-- **WHEN** 用户以 `域名` 框输入 `https://<域名>` + 端口 `<TLS/HTTPS 端口>` 配置远端并启动 tng（反代 + tng 均就绪）
-- **THEN** tng 以 TLS 连接该上游、反代转发的 `Host` 为 `<域名>:<端口>`，密态推理页面发起的推理请求可获真实回复（非占位、非拦截页）
-
-
+- **WHEN** 用户以 `域名` 框输入 `https://<域名>` + 端口配置远端并启动 tng
+- **THEN** tng 以 TLS 连接该上游，反代转发的 `Host` 为 `<域名>:<端口>`，密态推理页面发起的推理请求可获真实回复
 ### Requirement: 原始 JSON 高级视图
 
-系统须（SHALL）在"设置"视图提供与结构化表单双向同步的原始 JSON 视图，供高级编辑与兜底（含 `control_interface` 同级如 `ttrpc`、顶层如 `metric/trace`、以及 ingress 条目内未结构化字段）。该视图的序列化结果不含 `control_interface.restful`（承接 `auto-manage-control-port`）、不含 `add_egress`，且每条 ingress 必含锁定 `ohttp`。
+系统须（SHALL）在"设置"视图提供与结构化表单双向同步的原始 JSON 视图，供高级编辑与兜底。该视图的序列化结果不含 `control_interface.restful`、不含 `add_egress`，且每条 ingress 必含锁定 OHTTP 配置。
 
 #### Scenario: 表单到 JSON 同步
 - **WHEN** 用户在结构化控件中编辑
-- **THEN** 原始 JSON 视图反映其序列化结果：结果不含 `control_interface.restful`、不含 `add_egress`，每条 ingress 含锁定 `ohttp`（`header_passthrough` 为写死的 3 个 header）
+- **THEN** 原始 JSON 视图反映其序列化结果：结果不含 `control_interface.restful`、不含 `add_egress`，每条 ingress 含锁定的 `ohttp.path_rewrites` 和 credential 请求头白名单
 
 #### Scenario: JSON 到表单回填
 - **WHEN** 用户在原始 JSON 视图编辑为合法 JSON 并确认
-- **THEN** 结构化控件按该 JSON 回填：`control_interface.restful` 的 `host`/`port` 被丢弃、`add_egress` 被丢弃、ingress 的 `ohttp` 被丢弃（回填用锁定值）、`verify` 回填到 `no_ra`/verify 控件；仅 `mapping`/`http_proxy` 形态的 ingress 条目被回填，其余形态被丢弃并提示；若 JSON 非法则提示错误且不破坏表单状态
-
-
+- **THEN** 结构化控件按该 JSON 回填：`control_interface.restful` 的 `host`/`port` 被丢弃、`add_egress` 被丢弃、ingress 的 `ohttp` 被丢弃（回填用锁定值）、`verify` 回填到 `no_ra`/verify 控件；仅 `mapping`/`http_proxy` 形态 ingress 被回填，其余形态被丢弃并提示
 ### Requirement: JSON 配置导入导出
 
-系统须（SHALL）通过原生文件对话框支持导入（读取文件填充配置）与导出（把当前配置写入文件）JSON 配置。导入/导出的内容为用户侧配置：不含 `control_interface.restful`（承接 `auto-manage-control-port`，由 tngui 在拉起 tng 时注入）、不含 `add_egress`。导入时丢弃文件中的 `add_egress`，并仅认 `mapping`/`http_proxy` 形态的 ingress（其余形态丢弃并提示）。
+系统须（SHALL）通过原生文件对话框支持导入与导出 JSON。导入/导出的内容为用户侧配置：不含 `control_interface.restful`、不含 `add_egress`。导入时丢弃文件中的 `add_egress` 与 ingress 自定义 `ohttp`，并仅认 `mapping`/`http_proxy` 形态的 ingress。
 
 #### Scenario: 导入填充
 - **WHEN** 用户经原生打开文件对话框选择 JSON 文件并导入
-- **THEN** 系统解析该文件并填充结构化控件与原始 JSON 视图：`control_interface.restful` 的 `host`/`port` 被丢弃、`add_egress` 被丢弃、ingress 的 `ohttp` 被丢弃（回填用锁定值）、仅 `mapping`/`http_proxy` 形态 ingress 被回填；解析失败时显示错误且不改变当前配置
+- **THEN** 系统解析该文件并填充结构化控件与原始 JSON 视图；`control_interface.restful`、`add_egress`、ingress 自定义 `ohttp` 被丢弃或由锁定值回填；解析失败时显示错误且不改变当前配置
 
 #### Scenario: 导出写入
 - **WHEN** 用户经原生另存为对话框选择路径并导出
-- **THEN** 系统将当前配置的 pretty JSON 写入该路径，其中不含 `control_interface.restful`、不含 `add_egress`、每条 ingress 含锁定 `ohttp`；写入失败时显示错误
-
-
+- **THEN** 系统将当前配置的 pretty JSON 写入该路径，其中不含 `control_interface.restful`、不含 `add_egress`，每条 ingress 含锁定 OHTTP 配置
 ### Requirement: 默认开局模板
 
-系统须（SHALL）在每次启动 GUI 时以内置默认配置模板初始化"设置"视图：一条锁定形态的 OHTTP `mapping` ingress——行 1 为 tngui 反代对外绑定（`host` 默认 `127.0.0.1`、`port` 取内置默认值），远端 `out` 为占位待用户填写、`no_ra=false`（默认 verify on）且 `verify` 取内置默认值（`model=passport`、`as_provider=tpm`）、`ohttp.header_passthrough.request_headers` 写死为 `["x-model","x-api-key","authorization"]`。模板不含 `add_egress`、不含 `control_interface.restful`（承接 `auto-manage-control-port`：管控面由 tngui 在拉起 tng 时注入）、不含 tng ingress 本地监听 `host`/`port`（由 tngui 在拉起 tng 时以空闲端口注入）。系统不在本地持久化用户编辑。
+系统须（SHALL）在每次启动 GUI 时以内置默认配置模板初始化"设置"视图：一条锁定形态的 OHTTP `mapping` ingress，行 1 为 tngui 反代对外绑定（默认 `127.0.0.1` 和内置默认 port），远端 `out` 为占位；`no_ra=false` 并带默认 `verify`，且含锁定 OHTTP `path_rewrites` 与 credential passthrough。模板不含 `add_egress`、`control_interface.restful`、`x-model` 或 tng ingress 本地监听 `host`/`port`。不在本地持久化用户编辑。
 
 #### Scenario: 全新开局
-
 - **WHEN** GUI 启动
-- **THEN** "设置"视图加载内置锁定形态默认模板，而非任何上次编辑；模板不含 `add_egress`、不含 `control_interface.restful`、不含 tng ingress 本地监听端口
+- **THEN** "设置"视图加载内置锁定形态默认模板
 
 #### Scenario: 默认 ingress 为客户端 OHTTP 形态
-
 - **WHEN** GUI 启动并加载默认模板
-- **THEN** 默认 ingress 为 `mapping`（地址端口）形态、`no_ra=false`、含锁定 `ohttp`，行 1 默认为反代对外绑定（`127.0.0.1` + 内置默认 port），不出现 `socks5`/`netfilter`/`hook` 形态，不出现 `add_ingress` 之外的 egress
+- **THEN** 默认 ingress 为 `mapping`、`no_ra=false`、含锁定 path-model `ohttp` 配置
 
 #### Scenario: 不持久化
-
 - **WHEN** 用户编辑配置后关闭并重新打开 GUI
-- **THEN** "设置"视图仍为默认模板（用户须显式导入或重新编辑）
-
-
+- **THEN** "设置"视图仍为默认模板
 ### Requirement: tng 二进制随软件分发并从资源目录发现
 
 系统须（SHALL）将 `tng` 二进制作为随包资源与 GUI 一同分发，并在启动/重启 tng 时从打包资源目录（Tauri `resource_dir`）解析对应平台的可执行名（Unix 为 `tng`、Windows 为 `tng.exe`）后拉起；若资源目录中不存在 `tng`，则回退使用 `PATH` 上的 `tng`。
@@ -295,56 +272,43 @@
 
 ### Requirement: 密态推理页面发送并显示推理请求
 
-系统须（SHALL）在密态推理视图提供单次作用的推理请求面板：用户在 prompt textarea 输入（发送后不清空、可改可重发）。prompt textarea 须（SHALL）按其内容自动调整高度，最小 4 行且最高 16 行；达到最大高度后内容在框内滚动；用户无法通过拖拽调整其尺寸。“发送测试请求”按钮内的图标与文字须（SHALL）垂直居中；该按钮下方不得遗留单独的蓝色锁形提示框。面板的“可发”门锁只认两个条件——概览“运行状态”卡显示“运行”（即与概览左上角卡片相同的 `deriveIngressStates().runtime === "running"` 判定：控制面 reachable、`/livez` 与 `/readyz` 均 2xx、无 attestation/hpke 结构性失败日志、无进程错误）AND 本机已配置 api-key；满足即显示请求面板，否则显示“当前无法发送测试请求”占位。发送时按 OpenAI 兼容格式 POST 到 tngui 反向代理对外端点 `http://<反代 bind host>:<对外 port>/v1/chat/completions`（携带 `Authorization: Bearer <apiKey>` 头、`{model, messages}` body）；`x-model` 头由 tngui 反代从 body 解析注入（见“tngui 反向代理对外暴露推理入口并注入 x-model 头”），而非前端或发送逻辑注入。模型名 `model` 由用户在本面板内可编辑输入提供（会话内内存、不持久化、不入 tng 配置、不触发 tng 进程重启），不在“设置”视图配置、亦不作为可发门锁条件。输出区（只读）显示当次响应的 assistant 回复文本；不保留历史请求。RA 验证过程展示为 UI 占位（不接 stdout 数据）。
+系统须（SHALL）在密态推理视图提供单次作用的推理请求面板。面板的“可发”门锁只认概览“运行状态”为“运行”AND 本机已配置 api-key。发送时按 OpenAI 兼容格式 POST 到 tngui 反代对外端点，携带 `Authorization: Bearer <apiKey>` 和 `{model, messages}` body。系统绝不（MUST NOT）在前端或反代中另发 `x-model` 头；模型身份由反代按 body.model 改写请求 path。model 为会话内内存、不持久化、不入 tng 配置。输出区只显示当次响应；RA 过程保持占位。
 
 #### Scenario: prompt 发送后不清空且可重发
-
 - **WHEN** 用户发送推理请求后
 - **THEN** prompt textarea 内容保持不变、可编辑后重新发送；输出区显示本次响应
 
 #### Scenario: prompt 按内容自动伸缩
-
 - **WHEN** 用户在 prompt textarea 中增删内容
-- **THEN** textarea 高度随内容自动增高或收缩，最小 4 行、最大 16 行；达到最大高度后内容滚动，且拖拽角不能改变其高度
+- **THEN** textarea 高度自动增高或收缩，最小 4 行、最大 16 行；达到最大高度后内容滚动，且拖拽角不能改变其高度
 
 #### Scenario: 发送按钮图标垂直居中且无遗留提示框
-
 - **WHEN** 渲染可交互的“发送测试请求”按钮
 - **THEN** 按钮内图标与文字垂直居中；按钮下方不出现单独的蓝色锁形提示框
 
 #### Scenario: 可发判定仅认概览运行态与 api-key
-
 - **WHEN** 渲染密态推理视图的请求面板
-- **THEN** 面板在且仅在概览“运行状态”卡显示“运行”（`deriveIngressStates().runtime === "running"`，与概览左上角同一判定，复用同一状态推导）AND api-key 已配置时可用；其余一律显示“当前无法发送测试请求”占位；`model` 是否填写、`readyz` 是否单列、反代对外端口是否独立判定，均不再作为可发门锁条件
+- **THEN** 面板仅在概览运行态与 api-key 同时满足时可用；model 是否填写不作为可发门锁条件
 
 #### Scenario: 真发送经 tng 透明代理
-
 - **WHEN** 用户点击发送 AND 概览显示“运行” AND api-key 已配置
-- **THEN** 系统向 tngui 反代对外端点（`http://<反代 bind host>:<对外 port>/v1/chat/completions`）发 POST，不直连 tng 内部 ingress 端口；反代按 body.model 注入 `x-model` 后转发至 tng 透明代理（ingress）；收到响应后输出区显示 `choices[0].message.content`
+- **THEN** 系统向 tngui 反代对外端点发 POST，不直连 tng 内部 ingress 端口；请求经 pre-TNG path 注入代理进入 TNG
 
 #### Scenario: model 在推理页可编辑且不持久化
-
 - **WHEN** 用户在推理请求面板编辑模型名 `model`
-- **THEN** 该 `model` 作为 body.model 经反代注入 `x-model`；`model` 为会话内内存，关闭 GUI 不保留、不写入 tng-runtime.json、不触发 TNG 配置 dirty 或 tng 进程重启
+- **THEN** 该 `model` 仍作为 body.model 供反代解析；关闭 GUI 不保留，也不触发 TNG 配置 dirty 或 tng 进程重启
 
 #### Scenario: 不保留历史请求
-
 - **WHEN** 用户再次发送推理请求
-- **THEN** 输出区覆盖为最新响应；不显示历史请求列表
+- **THEN** 输出区覆盖为最新响应
 
 #### Scenario: 失败响应框展示脱敏请求与响应调试内容
-
-- **WHEN** 密态推理发送失败且失败发生在请求已构建之后（连接失败、读响应失败、非 2xx、响应非 JSON 或响应缺少 content）
-- **THEN** 响应框显示失败摘要，并显示本次发出的请求文本与收到的响应原文；请求中的 `Authorization` 值必须脱敏，响应正文按 Content-Length/EOF 或解码后的 chunked 内容展示
-- **WHEN** 请求在建立连接/读取响应阶段没有收到任何 HTTP 响应
-- **THEN** 响应框仍显示失败摘要、脱敏请求，以及明确的“无 HTTP 响应”诊断；失败详情只在本次响应框展示，不保留历史
+- **WHEN** 密态推理发送失败
+- **THEN** 响应框显示失败摘要、脱敏请求与响应原文；请求中的 `Authorization` 值必须脱敏
 
 #### Scenario: RA 过程占位
-
 - **WHEN** 渲染密态推理视图的 RA 过程区域
 - **THEN** 仅显示占位 UI，不从 tng stdout 读取 `attested=` 数据
-
-
 ### Requirement: 设置页离开时自动保存并自动重启 tng
 
 系统须（SHALL）在用户从“设置”视图切换到其他视图时检测 TNG 配置是否变化（与最后一次已保存的序列化对比 dirty）；dirty 则写 tng-runtime.json；若 tng 当前正在运行 THEN 自动终止旧进程并拉起新配置下的 tng；未在运行 THEN 仅写盘不 spawn。设置视图不得（MUST NOT）提供 TNG 配置保存按钮；自动保存成功或配置未变化时绝不（MUST NOT）弹出成功、提示或确认弹窗，保存失败仍必须给出明确错误提示。修改 apiKey 不计入 dirty（模型名 `model` 现于“密态推理”视图编辑，不在“设置”视图，本身不构成设置页 dirty 因素）。
@@ -470,17 +434,24 @@
 
 ### Requirement: 客户端 ingress 锁定 OHTTP 协议
 
-系统须（SHALL）对每条 ingress 强制启用 seg1 的 OHTTP（RFC 9458 / HPKE 消息级）加密：传给 tng 的 JSON 中，每条 ingress 必含 `ohttp`，且 `ohttp.header_passthrough.request_headers` 固定为 `["x-model","x-api-key","authorization"]`。系统绝不（MUST NOT）向用户提供关闭 `ohttp` 或编辑这组 `request_headers` 的控件。导入/回填中出现的 ingress `ohttp` 字段一律被丢弃，并由锁定值取代。
+系统须（SHALL）对每条 ingress 强制启用 seg1 的 OHTTP 加密与 capi path 模型鉴权契　约：`ohttp.path_rewrites` 固定为
+`[{ "match_regex": "^/models/([^/]+)(?:/.*)?$", "substitution": "/models/$1" }]`；`ohttp.header_passthrough.request_headers` 固定为 `["authorization","x-api-key"]`。系统绝不（MUST NOT）将 `x-model` 写入透传白名单，也绝不（MUST NOT）向用户提供关闭 `ohttp`、编辑 `path_rewrites` 或编辑请求头白名单的控件。导入/回填中出现的 ingress `ohttp` 字段一律被丢弃，并由锁定值取代。
 
 #### Scenario: ohttp 常开且 header_passthrough 写死
 - **WHEN** 用户编辑或默认加载任意 ingress 并触发序列化
-- **THEN** 序列化结果中该 ingress 含 `ohttp`，且 `ohttp.header_passthrough.request_headers` 恰为 `["x-model","x-api-key","authorization"]`
+- **THEN** 序列化结果中该 ingress 的 `ohttp.header_passthrough.request_headers` 恰为 `["authorization","x-api-key"]`
+
+#### Scenario: ohttp path_rewrites 写死
+- **WHEN** 用户编辑或默认加载任意 ingress 并触发序列化
+- **THEN** 序列化结果中该 ingress 的 `ohttp.path_rewrites` 恰为上述一条规则
 
 #### Scenario: 用户无法关闭或改写 ohttp
 - **WHEN** 渲染 ingress 的结构化控件
-- **THEN** 不出现关闭 `ohttp` 或编辑 `header_passthrough.request_headers` 的控件；导入/回填中自定义的 ingress `ohttp` 被丢弃并替换为锁定值
+- **THEN** 不出现关闭 `ohttp`、编辑 `path_rewrites` 或编辑 `header_passthrough.request_headers` 的控件；导入/回填中自定义的 ingress `ohttp` 被丢弃并替换为锁定值
 
-
+#### Scenario: 远端构建的 outer path 具备模型语义
+- **WHEN** pre-TNG proxy 已改写内部请求为 `/models/{model-segment}{original-path}`
+- **THEN** TNG ingress 生成的 OHTTP outer path 为 `/models/{model-segment}`，credential 请求头进入 outer 请求；未匹配 path rewrite 的请求不得自动获得模型语义
 ### Requirement: ingress 本地监听强制走回环
 
 系统须（SHALL）将每条 ingress 的本地监听 `host` 强制为 `127.0.0.1`、`port` 由 tngui 自动选取并注入——处理 `mapping` 的 `in`、`http_proxy` 的 `proxy_listen`：tngui 在拉起 tng 前以批探测选取空闲回环端口并先验避让对外端口（见"注入端口批探测并避让对外端口"；与"控制面 host 强制走回环地址""管控端口自动选取"同向）注入为该 ingress 本地监听 `port`、host 强制 `127.0.0.1`，覆盖用户任何 host/port 输入。ingress 本地监听 `host`/`port` 不出现在用户配置、结构化控件与原始 JSON 视图（与 `control_interface.restful` 同向向用户隐藏）；外部客户端不直连该 ingress 本地监听端口，而经 tngui 反向代理对外入口（见"tngui 反向代理对外暴露推理入口并注入 x-model 头"）。用户在 ingress 编辑器行 1 所配的"本机端口 + 对外绑定 host"是 tngui 反代对外绑定，非 tng ingress 本地监听。
@@ -663,41 +634,53 @@
 - **THEN** 该产物“客户端版本”一致（同一 `CARGO_PKG_VERSION`），“操作系统”反映其编译期平台
 
 
-### Requirement: tngui 反向代理对外暴露推理入口并注入 x-model 头
+### Requirement: tngui 反向代理作为 pre-TNG path 注入代理
 
-系统须（SHALL）在 tng 运行期间由 tngui 自身运行一个常驻 HTTP 反向代理作为推理对外入口：反代随 tng 启动而启动、随 tng 停止而停止。反代的对外绑定地址由用户配置——`host` 可在 `127.0.0.1`（仅本机）与 `0.0.0.0`（对外网卡）之间切换（默认 `127.0.0.1`），`port` 为用户可配的"本机端口"。反代为完整反代：把收到的请求 `method`/`path`/`header`/`body` 转发到 tng 的内部 ingress 本地监听（仅 `127.0.0.1:<tngui 注入的空闲端口>`，见"ingress 本地监听强制走回环"），并原样回传响应（先支持非流式，OpenAI 兼容默认）。反代须（SHALL）对收到的请求：读取并解析 JSON `body` 取 `model` 字段；当 `body` 为含 `model` 字段的 JSON 时，在转发前设置 `x-model: <body.model>` 头——以 `body.model` 为准，若请求已携带 `x-model` 则随之覆盖、不沿用客户端发来的值（与客户端 ingress 锁定 OHTTP `header_passthrough` 中已含的 `x-model` 对齐），且只剥离 JSON body 开头的 UTF-8 BOM、其余不改写 `body`；不含 `model` 字段或 `body` 非 JSON 时不设置/覆盖 `x-model`、原样转发请求与响应。系统绝不（MUST NOT）把 tng 的 ingress 本地监听端口直接暴露给外部客户端——对外只经反代。系统绝不（MUST NOT）链接任何 tng crate——反代是 tngui 自有进程内的 HTTP 服务，与 tng 仅经其 ingress 本地监听端口做 HTTP 转发。
+系统须（SHALL）在 tng 运行期间由 tngui 自身运行常驻 HTTP 反向代理作为推理对外入口。反代随 tng 启动/停止而启/停，反代把请求转发到 tng 内部 ingress 本地监听，并按 TNG OHTTP path 模型契约执行 pre-TNG path 注入；响应原样回传。系统绝不（MUST NOT）把 tng ingress 本地监听端口直接暴露给外部客户端，也绝不（MUST NOT）链接任何 tng crate。
+
+对 `POST /v1/chat/completions` 与 `POST /v1/messages`，反代须（SHALL）将 body 按 UTF-8 JSON object 解析，读取顶层字符串 `model`，trim 后做单一路径 segment percent-encoding，并把 path 改写为 `/models/{encoded-model-segment}{original-path}`。请求 body 字节、query、method 以及 `Authorization`、`x-api-key`、`Content-Type` 须保留。反代须在 model 缺失、不是字符串、trim 后为空、body 不是合法 UTF-8 JSON object 时返回 400；超过 10 MiB 返回 413；以上失败均不得转发 TNG。
+
+反代绝不（MUST NOT）注入、生成或使用 `x-model` 作为模型身份；客户端携带的 `x-model` 不得影响 path 模型或鉴权结果。非上述两个 path 的请求不产生模型语义，可按通用反代规则转发。
 
 #### Scenario: 反代随 tng 生命周期启停
+- **WHEN** 用户启动或停止 tng
+- **THEN** tngui 反向代理随 tng 生命周期启停；未启动时不监听
 
-- **WHEN** 用户启动 tng（概览启动或设置离开自动重启）或停止 tng
-- **THEN** tngui 反向代理随 tng 启动而开始监听对外端点、随 tng 停止而停止监听；未启动 tng 时反代不监听
+#### Scenario: OpenAI 请求注入模型路径
+- **WHEN** 客户端 `POST /v1/chat/completions` 携带 JSON body `{"model":"  model-a  "}` 和 `Authorization`
+- **THEN** 反代不改写 body，并把内部请求路径改写为 `/models/model-a/v1/chat/completions`
 
-#### Scenario: 含 model 的推理请求被注入 x-model 后转发
+#### Scenario: Anthropic 请求注入模型路径
+- **WHEN** 客户端 `POST /v1/messages` 携带 JSON body `{"model":"provider/model"}` 和 `x-api-key`
+- **THEN** 反代把内部请求路径改写为 `/models/provider%2Fmodel/v1/messages`，并保留 `x-api-key` 与原始 body 字节
 
-- **WHEN** 客户端以 OpenAI 兼容请求（JSON `body` 含 `model` 与 `messages`、`Authorization` 头）访问反代对外端点
-- **THEN** 反代在转发给 tng 内部 ingress 前剥离 JSON body 开头的 UTF-8 BOM（若有）、注入 `x-model: <body.model>` 头（若请求已带 `x-model` 则覆盖），其余 body 不改动，并把响应原样回传给客户端
+#### Scenario: 请求 path 与 query 保持可恢复
+- **WHEN** 客户端请求 `/v1/chat/completions?trace=1` 且 `body.model` 有效
+- **THEN** 反代转发 `/models/{encoded-model-segment}/v1/chat/completions?trace=1`
 
-#### Scenario: 请求自带 x-model 被覆盖为 body.model
+#### Scenario: 客户端伪造 x-model 不影响身份
+- **WHEN** 客户端请求 body.model 解析为 `model-a` 且请求头携带 `x-model: model-b`
+- **THEN** 反代不使用或覆盖 `x-model`，最终 pre-TNG path 表示 `model-a`
 
-- **WHEN** 客户端请求的 JSON `body` 含 `model` 字段，且请求自身已携带 `x-model` 头（与 `body.model` 可能不一致）
-- **THEN** 反代以 `body.model` 覆盖该既有 `x-model` 头后转发，不沿用客户端发来的 `x-model`
+#### Scenario: 非法 model 阻断在 pre-TNG proxy
+- **WHEN** 支持端点的 body 缺失 `model`、`model` 不是字符串、为空/纯空白，或不是 JSON object
+- **THEN** 反代返回 HTTP 400，不建立 TNG 请求
 
-#### Scenario: 无 model 字段请求不注入原样转发
+#### Scenario: 超大请求返回 413
+- **WHEN** 支持端点的请求体超过 10 MiB 声明上限
+- **THEN** 反代返回 HTTP 413，不建立 TNG 请求
 
-- **WHEN** 客户端请求 `body` 不含 `model` 字段或非 JSON
-- **THEN** 反代不注入 `x-model`、按完整反代原样转发请求与响应
+#### Scenario: 非模型 path 不改写
+- **WHEN** 客户端请求的 path 不是 `POST /v1/chat/completions` 或 `POST /v1/messages`
+- **THEN** pre-TNG path 注入逻辑不产生模型前缀
 
-#### Scenario: 对外绑定 host 可切换 127.0.0.1 / 0.0.0.0
-
-- **WHEN** 用户在 ingress 编辑器行 1 以 toggle 在本机 `127.0.0.1` 与对外网卡 `0.0.0.0` 间切换反代对外绑定 host，并启动 tng
+#### Scenario: 对外绑定 host 可切换
+- **WHEN** 用户在 ingress 编辑器行 1 以 toggle 切换反代对外绑定 host 并启动 tng
 - **THEN** 反代绑定在所选 host + 配置的对外 port；默认为 `127.0.0.1`
 
 #### Scenario: 不直连 tng ingress 端口
-
 - **WHEN** 外部客户端请求推理入口
 - **THEN** 客户端连接的是 tngui 反代对外端点，而非 tng 的内部 ingress 本地监听端口
-
-
 ### Requirement: 注入端口批探测并避让对外端口
 
 tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`control_interface.restful` 的管控端口与各 ingress 内部本地监听端口——一次性取齐：在同一回环面上**顺序 `bind` `127.0.0.1:0` 共 n 个 listener 并同时持住**（n = 1(管控) + ingress 条数），收集各自分配的端口后**整批统一释放**。因 n 个 listener 同时持在，系统绝不（MUST NOT）出现两个注入端口取到同一端口号。系统须（SHALL）将每条 ingress 的反代对外端口（用户"本机端口"，见"tngui 反向代理对外暴露推理入口并注入 x-model 头"）列为禁止集合：注入的管控端口与各内部端口绝不（MUST NOT）等于任一对外端口。若某次批探测结果命中禁止集合，系统须（SHALL）整批丢弃并重试批探测（有界重试，避免死循环），直到全部不命中为止；重试耗尽则启动失败并明示。

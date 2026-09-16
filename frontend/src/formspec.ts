@@ -1,6 +1,7 @@
 // form-spec：结构化配置字段模型——客户端 ingress 锁定 OHTTP 形态。
 // 客户端侧只配 add_ingress（mapping 地址端口 / http_proxy 域名两种远端形态），不承载 add_egress。
-// ohttp 常开、header_passthrough 写死；no_ra/verify 互斥序列化（见 configmodel.ts）。
+// ohttp 常开、path_rewrites 与 credential header_passthrough 写死；
+// no_ra/verify 互斥序列化（见 configmodel.ts）。
 // 据真实 cmaas-deploy 客户端配置（publish/docs/03-使用.md §2），不链接 tng 代码。
 
 /** 回环地址：ingress 本地监听 host 由前后端共同强制为回环（与 control_interface.restful 同法）。 */
@@ -16,11 +17,19 @@ export const DEFAULT_LISTEN_PORT = 9443;
 /** 内置默认远端口（mapping 占位）。 */
 export const DEFAULT_OUT_PORT = 10000;
 
-/** 客户端走 OHTTP 时透传的请求头——写死，用户不可改。 */
-export const HEADER_PASSTHROUGH = ["x-model", "x-api-key", "authorization"] as const;
+/** 客户端走 OHTTP 时透传的 credential 请求头——写死，用户不可改。 */
+export const HEADER_PASSTHROUGH = ["authorization", "x-api-key"] as const;
+/** capi path 模型鉴权契约要求的固定 TNG outer path rewrite。 */
+export const OHTTP_PATH_REWRITES = [
+  {
+    match_regex: "^/models/([^/]+)(?:/.*)?$",
+    substitution: "/models/$1",
+  },
+] as const;
 /** 注入到每条 ingress 序列化结果的锁定 ohttp 子配置。 */
 export const LOCKED_OHTTP = {
-  header_passthrough: { request_headers: ["x-model", "x-api-key", "authorization"] },
+  path_rewrites: [{ ...OHTTP_PATH_REWRITES[0] }],
+  header_passthrough: { request_headers: [...HEADER_PASSTHROUGH] },
 };
 
 export interface VerifyConfig {

@@ -610,7 +610,7 @@ mod tests {
     #[test]
     fn prepare_rejects_empty_mapping_out_host() {
         // 默认模板场景：out.host 留空 → tng 加载期 MappingDe 拒掉（host: Option<Ipv4Addr>）
-        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":18443},"out":{"host":"","port":10000}}]},"verify":{"model":"passport","as_provider":"tpm"},"ohttp":{"header_passthrough":{"request_headers":["x-model"]}}}]}"#;
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":18443},"out":{"host":"","port":10000}}]},"verify":{"model":"passport","as_provider":"tpm"},"ohttp":{"header_passthrough":{"request_headers":["authorization"]}}}]}"#;
         let err = prepare_config(src, 40050).unwrap_err();
         assert!(matches!(err, PrepareError::IngressInvalid(_)), "{err}");
         assert!(err.to_string().contains("out.host"), "{err}");

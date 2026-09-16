@@ -3,6 +3,7 @@ import { serialize, parse, type ParseResult } from "./configmodel";
 import {
   defaultModel,
   HEADER_PASSTHROUGH,
+  OHTTP_PATH_REWRITES,
   LOCALHOST,
   DEFAULT_OUTWARD,
   DEFAULT_VERIFY,
@@ -30,6 +31,7 @@ describe("默认模板", () => {
     expect(ing.no_ra).toBeUndefined();
     expect(ing.verify).toBeDefined();
     expect(ing.ohttp).toBeDefined();
+    expect((ing.ohttp as { path_rewrites: unknown[] }).path_rewrites).toEqual(OHTTP_PATH_REWRITES);
     expect((ing.ohttp as { header_passthrough: { request_headers: string[] } }).header_passthrough.request_headers).toEqual([...HEADER_PASSTHROUGH]);
   });
 
@@ -172,9 +174,24 @@ describe("ingress 锁定形态与互斥序列化", () => {
       add_ingress: [{ mapping: { rules: [{ in: { host: "0.0.0.0", port: 1 }, out: { host: "1.1.1.1", port: 2 } }] }, no_ra: true, ohttp: { custom: 1 } }],
     }));
     expect(r.error).toBeUndefined();
-    const o = JSON.parse(serialize(r.model!)) as { add_ingress: { ohttp: { header_passthrough: { request_headers: string[] } } }[] };
+    const o = JSON.parse(serialize(r.model!)) as { add_ingress: { ohttp: { path_rewrites: unknown[]; header_passthrough: { request_headers: string[] } } }[] };
+    expect((o.add_ingress[0].ohttp as { path_rewrites: unknown[] }).path_rewrites).toEqual(OHTTP_PATH_REWRITES);
     expect(o.add_ingress[0].ohttp.header_passthrough.request_headers).toEqual([...HEADER_PASSTHROUGH]);
     expect((o.add_ingress[0].ohttp as { custom?: number }).custom ?? undefined).toBeUndefined();
+
+    // mapping 与 http_proxy 两条形态都必须输出同一条锁定 path rewrite。
+    const two = parse(JSON.stringify({
+      add_ingress: [
+        { mapping: { rules: [{ in: {}, out: { host: "1.1.1.1", port: 2 } }] }, no_ra: true },
+        { http_proxy: { proxy_listen: {}, dst_filters: [{ domain: "a.example.com", port: 443 }] }, no_ra: true },
+      ],
+    }));
+    expect(two.error).toBeUndefined();
+    const outs = JSON.parse(serialize(two.model!)) as { add_ingress: { ohttp: { path_rewrites: unknown[]; header_passthrough: { request_headers: string[] } } }[] };
+    for (const ing of outs.add_ingress) {
+      expect(ing.ohttp.path_rewrites).toEqual(OHTTP_PATH_REWRITES);
+      expect(ing.ohttp.header_passthrough.request_headers).toEqual([...HEADER_PASSTHROUGH]);
+    }
   });
 });
 
