@@ -2,8 +2,6 @@
 import { computed } from "vue";
 import {
   INGRESS_FIELDS,
-  PORT_MAX,
-  PORT_MIN,
   defaultFields,
   DEFAULT_VERIFY,
   DEFAULT_MAPPING_OUT_PORT,
@@ -13,6 +11,7 @@ import {
   type IngressMode,
 } from "../formspec";
 import FieldRenderer from "./FieldRenderer.vue";
+import PortInput from "./PortInput.vue";
 
 const props = defineProps<{ entry: EntryModel }>();
 const emit = defineEmits<{ remove: [] }>();
@@ -103,12 +102,10 @@ function onRemTypeChange(val: string | number) {
             checked-children="0.0.0.0"
             un-checked-children="127.0.0.1"
           />
-          <a-input-number
-            v-model:value="entry.outward.port"
-            :min="PORT_MIN"
-            :max="PORT_MAX"
-            :precision="0"
-            style="width:112px"
+          <PortInput
+            v-model="entry.outward.port"
+            required
+            width="112px"
             placeholder="端口（必填）"
           />
           <span style="color:var(--text-secondary);font-size:12px">{{

@@ -21,6 +21,8 @@
     "@ant-design/icons-vue": "^7.0.1",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-vue": "^5.1.0",
+    "@vue/test-utils": "^2.5.1",
+    "happy-dom": "^20.14.5",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.5.0",
     "unplugin-vue-components": "^0.27.0",
