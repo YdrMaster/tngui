@@ -26,6 +26,12 @@ frontend/components.d.ts
 # npm 本地 registry 配置（环境级，不入库，防止内部镜像 URL 泄漏进 lock）
 frontend/.npmrc
 
-# 随包 tng 二进制（CI 每目标从 TNG 官方产物填入，不入库）；但保留占位文件以满足 tauri-build 校验
+# 随包 tng 二进制：
+# - 普通版（tng-nora/tng-nora.exe，远程证明关闭时使用）不入库——CI release 时按 TNG_VERSION
+#   下载 TNG 官方产物填入（缺失时运行时回退 PATH 上的 tng，开发态兜底）。
+# - 远程证明版（4 平台）直接入库并随包分发；RA 启用时按平台映射解析，绝不回退普通版。
 /resources/*
-!/resources/tng.placeholder
+!/resources/tng.exe
+!/resources/tng-linux-x86_64
+!/resources/tng-linux-aarch64
+!/resources/tng-aarch64-apple-darwin

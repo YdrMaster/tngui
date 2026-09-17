@@ -2,7 +2,7 @@ name: CI
 
 # 触发：
 #   - PR / 分支推送（非 md/LICENSE）：跑质量门禁（ci）
-#   - v* tag 推送：ci 之外叠加 check_version + 5 目标出包（release）
+#   - v* tag 推送：ci 之外叠加 check_version + 4 目标出包（release）
 # 之所以把 build(CI) 与 release 合一：同一套触发点上先验质量、再出包，互不脱节。
 on:
   pull_request:
@@ -103,12 +103,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # GUI 目标 → TNG 官方产物 target（Windows 用 gnu 版 tng.exe，自包含可在 Win 上跑）
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,    tng_target: x86_64-pc-windows-gnu,    tng_ext: zip,    tng_bin: tng.exe }
-          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu,  tng_target: x86_64-unknown-linux-gnu,  tng_ext: tar.gz, tng_bin: tng }
-          - { os: ubuntu-22.04,   target: aarch64-unknown-linux-gnu, tng_target: aarch64-unknown-linux-gnu, tng_ext: tar.gz, tng_bin: tng, cross: true, bundles: "deb,rpm" }
-          - { os: macos-latest,   target: x86_64-apple-darwin,       tng_target: x86_64-apple-darwin,       tng_ext: tar.gz, tng_bin: tng }
-          - { os: macos-latest,   target: aarch64-apple-darwin,      tng_target: aarch64-apple-darwin,      tng_ext: tar.gz, tng_bin: tng }
+          # GUI 目标 → TNG 官方产物 target（Windows 用 gnu 版 tng.exe，自包含可在 Win 上跑）。
+          # macOS x86_64 已移除（不再支持）。nora_out=普通版放置名（避让 RA 版 tng.exe 撞名）；
+          # ra_keep=本平台 RA 版文件名（仓库入库 4 文件之一，打包前保留、其余平台剪枝）。
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,    tng_target: x86_64-pc-windows-gnu,    tng_ext: zip,    tng_bin: tng.exe, nora_out: tng-nora.exe, ra_keep: tng.exe }
+          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu,  tng_target: x86_64-unknown-linux-gnu,  tng_ext: tar.gz, tng_bin: tng,     nora_out: tng-nora,     ra_keep: tng-linux-x86_64 }
+          - { os: ubuntu-22.04,   target: aarch64-unknown-linux-gnu, tng_target: aarch64-unknown-linux-gnu, tng_ext: tar.gz, tng_bin: tng,     nora_out: tng-nora,     ra_keep: tng-linux-aarch64, cross: true, bundles: "deb,rpm" }
+          - { os: macos-latest,   target: aarch64-apple-darwin,      tng_target: aarch64-apple-darwin,      tng_ext: tar.gz, tng_bin: tng,     nora_out: tng-nora,     ra_keep: tng-aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -166,7 +167,7 @@ jobs:
         run: npm ci
         working-directory: frontend
 
-      - name: Download & place bundled tng
+      - name: Place bundled tng binaries (plain + RA)
         shell: bash
         run: |
           set -eux
@@ -178,16 +179,27 @@ jobs:
           if [ "${{ matrix.tng_ext }}" = "zip" ]; then
             # Windows zip 内含裸 tng.exe
             unzip -o tng-asset -d tng-unzipped
-            cp tng-unzipped/tng.exe resources/tng.exe
+            cp tng-unzipped/tng.exe "resources/${{ matrix.nora_out }}"
           else
             # Linux/macOS tar.gz 内含 usr/.../tng
             tar xzf tng-asset
             TNG_SRC="$(find usr -type f -name tng | head -n1)"
-            cp "$TNG_SRC" resources/tng
+            cp "$TNG_SRC" "resources/${{ matrix.nora_out }}"
           fi
-          chmod +x "resources/${{ matrix.tng_bin }}"
-          # 删除占位文件，使安装包只含真实 tng
-          rm -f resources/tng.placeholder
+          chmod +x "resources/${{ matrix.nora_out }}"
+          # 断言本平台 RA 版二进制已随 checkout 到位（.gitignore 白名单漏项时在此 fail，
+          # 不静默产出缺 RA 版的安装包）；RA 版由仓库直接携带，无需下载。
+          test -f "resources/${{ matrix.ra_keep }}" || {
+            echo "::error::resources/${{ matrix.ra_keep }} 缺失：RA 版二进制未入库或被 .gitignore 拦下"
+            exit 1
+          }
+          # 只保留本平台 RA 版、移除其余 3 个平台的 RA 文件——tauri glob resources/tng*
+          # 会把目录内全部匹配打进安装包，不剪枝则每个包多带约 140MB 跨平台死重。
+          for f in tng.exe tng-linux-x86_64 tng-linux-aarch64 tng-aarch64-apple-darwin; do
+            if [ "$f" != "${{ matrix.ra_keep }}" ]; then
+              rm -f "resources/$f"
+            fi
+          done
           ls -la resources/
 
       - name: Tauri build + upload
@@ -200,15 +212,18 @@ jobs:
           releaseBody: |
             tngui ${{ github.ref_name }}
 
-            内含 5 目标安装包，各自内置对应平台的 tng（取自 TNG 官方 release v${{ steps.tng.outputs.version }}，随 resources 打包）：
+            内含 4 目标安装包，各自内置两套 tng 二进制：
+            - 普通版（`tng-nora`/`tng-nora.exe`，远程证明关闭时使用）：取自 TNG 官方 release v${{ steps.tng.outputs.version }}，随 resources 打包。
+            - 远程证明版（RA 版，任一条 ingress 开启远程证明时使用）：直接储存在仓库 `resources/` 内，按平台命名（tng.exe / tng-linux-x86_64 / tng-linux-aarch64 / tng-aarch64-apple-darwin）。
             - Windows x86_64（tng 为 gnu 版，自包含可运行）
             - Linux x86_64 / aarch64
-            - macOS x86_64 / aarch64
+            - macOS aarch64（x86_64 不再支持）
 
             注意：
+            - macOS x86_64 已移除（该架构不再受支持，无 RA 版产物）。
             - macOS 包未签名，首次打开需在 Gatekeeper 处放行。
             - Windows ARM64 本期未发布（TNG 无官方 win-arm64 产物），列为后续。
-            - tngui 版本由 Cargo.toml [workspace.package] version 钉定（须与 tag 一致）；tng 版本由 TNG_VERSION 钉定，二者解耦。
+            - tngui 版本由 Cargo.toml [workspace.package] version 钉定（须与 tag 一致）；普通版 tng 版本由 TNG_VERSION 钉定，RA 版版本由 git 提交钉定。
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}${{ matrix.bundles && format(' --bundles {0}', matrix.bundles) || '' }}

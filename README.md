@@ -15,23 +15,28 @@ cargo test -p tngui-core          # 核心逻辑单测
 cargo tauri dev                   # 开发态开窗（开发期 tng 走 PATH 兜底）
 ```
 
-开发期 `tng` 需自行编译并放到 `PATH`（运行时 `resource_dir` 无随包 tng 时回退 PATH）。
+开发期普通版 `tng` 需自行编译并放到 `PATH`（运行时 `resource_dir` 无 `tng-nora` 时回退 PATH）；远程证明（RA）版已随仓库 `resources/` 直接可用。
 
-## 分发（随包 tng + CI）
+## 分发（双套 tng：普通版 + 远程证明版 + CI）
 
-- `tng` 随 GUI 打包分发（Tauri `bundle.resources = ["resources/tng*"]`），运行时从 `resource_dir` 解析 `tng`/`tng.exe`；找不到回退 `PATH`。
-- CI（`.github/workflows/release.yml`）在 tag `v*.*.*` 触发：从 [inclavare-containers/TNG](https://github.com/inclavare-containers/TNG) 官方 release 下载 5 目标 tng 产物 → 放 `resources/` → `tauri-action` 打包上传草稿 release。
-- tng 版本由仓库根 `TNG_VERSION` 钉定（当前 2.9.2），与 tngui 版本解耦；升 tng 改这一处。
+启动/重启 tng 时按远程证明开关选择二进制：任一条 ingress 开启远程证明（`no_ra` 非 `true`）→ 用 RA 版；全部关闭 → 用普通版。RA 版缺失时拒绝启动并明确报错，绝不静默回退普通版。
 
-### 发布目标（5）
+- **普通版**（RA 全关时使用）：CI release 时从 [inclavare-containers/TNG](https://github.com/inclavare-containers/TNG) 官方 release 下载产物，放置为 `resources/tng-nora`（Unix）/`resources/tng-nora.exe`（Windows）——与 RA 版的 `tng.exe` 撞名规避；运行时从 `resource_dir` 解析，缺失回退 `PATH` 上的 `tng`（开发态）。
+- **远程证明版（RA 版）**（任一 ingress 开 RA 时使用）：直接储存在仓库 `resources/` 内（不入 CI 下载），按平台命名——Windows x64 为 `tng.exe`、Linux x86_64 为 `tng-linux-x86_64`、Linux aarch64 为 `tng-linux-aarch64`、macOS aarch64 为 `tng-aarch64-apple-darwin`；运行时从 `resource_dir` 按平台解析，不回退。
+- 随包打包（Tauri `bundle.resources = ["resources/tng*"]`）同时收入两套；CI 每目标构建前移除其他平台的 RA 文件（防安装包跨平台死重），并断言本平台 RA 文件存在。
+- CI（`.github/workflows/ci.yaml`）在 tag `v*.*.*` 触发：下载 TNG 官方普通版产物 → 放 `resources/tng-nora*` → `tauri-action` 打包上传草稿 release。
+- 普通版 tng 版本由仓库根 `TNG_VERSION` 钉定（当前 2.9.2），与 tngui 版本解耦，升 tng 改这一处；RA 版版本由 git 提交钉定。
 
-| 平台 | 目标 | tng 来源 |
-|---|---|---|
-| Windows x86_64 | `x86_64-pc-windows-msvc` | TNG `x86_64-pc-windows-gnu`（gnu 版自包含可运行） |
-| Linux x86_64 | `x86_64-unknown-linux-gnu` | TNG 同名 |
-| Linux aarch64 | `aarch64-unknown-linux-gnu` | TNG 同名 |
-| macOS x86_64 | `x86_64-apple-darwin` | TNG 同名 |
-| macOS aarch64 | `aarch64-apple-darwin` | TNG 同名 |
+### 发布目标（4）
+
+| 平台 | 目标 | 普通版 tng 来源 | 远程证明版 tng（仓库内置） |
+|---|---|---|---|
+| Windows x86_64 | `x86_64-pc-windows-msvc` | TNG `x86_64-pc-windows-gnu`（gnu 版自包含可运行） | `tng.exe` |
+| Linux x86_64 | `x86_64-unknown-linux-gnu` | TNG 同名 | `tng-linux-x86_64` |
+| Linux aarch64 | `aarch64-unknown-linux-gnu` | TNG 同名 | `tng-linux-aarch64` |
+| macOS aarch64 | `aarch64-apple-darwin` | TNG 同名 | `tng-aarch64-apple-darwin` |
+
+> macOS x86_64 已移除：该架构不再受支持，亦无远程证明版产物；旧文档/脚本若仍提及该目标，请勿沿用。
 
 ### 已知限制 / 后续
 

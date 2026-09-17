@@ -76,8 +76,9 @@ async fn launch_tng(
     // 1. 批探测一次取齐「管控端口 + 各 ingress 内部端口」并先验避让对外端口（不对用户暴露）
     let (ctrl, internal_ports) = pick_launch_ports(&config_json).map_err(|e| e.to_string())?;
     // 2. 注入 control_interface.restful + 每条 ingress 内部端口/host=回环（覆盖用户）、
-    //    剥离"反代对外绑定"字段不进 tng 配置，并取反代路由（带对外绑定 + 内部端口）
-    let (prepared, routes) =
+    //    剥离"反代对外绑定"字段不进 tng 配置，并取反代路由（带对外绑定 + 内部端口）与
+    //    RA 判定（任一 ingress 开远程证明即须 RA 版二进制）
+    let (prepared, routes, ra_required) =
         prepare_launch(&config_json, ctrl, &internal_ports).map_err(|e| e.to_string())?;
 
     // 3. 写盘到应用数据目录
@@ -91,6 +92,9 @@ async fn launch_tng(
 
     // 4. 先停上一会话残留的反代（若有）；锁序：supervisor 先、proxy 后（与 stop_tng 一致）
     let mut sup = state.supervisor.lock().await;
+    // RA 预检（设计 D4）：需要 RA 版而本平台未随包提供时，在停反代/杀旧进程之前拒绝
+    // 启动——当前运行会话保持原状，绝不静默回退到普通版。
+    ra_launch_precheck(ra_required, sup.ra_bin())?;
     {
         let mut pguard = state.proxy.lock().await;
         if let Some((old, _)) = pguard.take() {
@@ -98,9 +102,10 @@ async fn launch_tng(
         }
     }
 
-    // 5. spawn tng（不传 --log-file，tng 日志走 stdout 由 GUI 捕获展示）
+    // 5. spawn tng（不传 --log-file，tng 日志走 stdout 由 GUI 捕获展示）；supervisor 内
+    //    会再次按判定选 bin（RA 开而 RA 版缺失时报错不回退，与预检文案一致）。
     let pid = sup
-        .launch(&runtime)
+        .launch(&runtime, ra_required)
         .await
         .map_err(|e| format!("启动 tng 失败: {e}"))?;
 
@@ -247,8 +252,9 @@ fn write_settings_cache_file(dir: &std::path::Path, payload: &Value) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::{
-        SETTINGS_CACHE_FILE, format_process_log_lines, read_settings_cache_file,
-        write_settings_cache_file,
+        RA_BIN_MISSING, SETTINGS_CACHE_FILE, find_bin_under, format_process_log_lines,
+        ra_launch_precheck, read_settings_cache_file, tng_nora_resource_name_for,
+        tng_ra_resource_name_for, write_settings_cache_file,
     };
     use serde_json::{Value, json};
     use std::fs;
@@ -262,6 +268,79 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn resource_names_map_platforms_per_distribution_contract() {
+        // 普通版：Windows 带 .exe，其余平铺 `tng-nora`（避开 RA 版 `tng.exe` 撞名）。
+        assert_eq!(tng_nora_resource_name_for("windows"), "tng-nora.exe");
+        assert_eq!(tng_nora_resource_name_for("linux"), "tng-nora");
+        assert_eq!(tng_nora_resource_name_for("macos"), "tng-nora");
+
+        // RA 版：与 resources/ 入库 4 文件一一对应。
+        assert_eq!(
+            tng_ra_resource_name_for("windows", "x86_64"),
+            Some("tng.exe")
+        );
+        assert_eq!(
+            tng_ra_resource_name_for("linux", "x86_64"),
+            Some("tng-linux-x86_64")
+        );
+        assert_eq!(
+            tng_ra_resource_name_for("linux", "aarch64"),
+            Some("tng-linux-aarch64")
+        );
+        assert_eq!(
+            tng_ra_resource_name_for("macos", "aarch64"),
+            Some("tng-aarch64-apple-darwin")
+        );
+        // macOS x86_64 不再受支持；其余未列平台同样无 RA 版（显式 None，非静默）。
+        assert_eq!(
+            tng_ra_resource_name_for("macos", "x86_64"),
+            None,
+            "macOS x64 无 RA 版"
+        );
+        assert_eq!(tng_ra_resource_name_for("windows", "aarch64"), None);
+    }
+
+    #[test]
+    fn ra_launch_precheck_rejects_only_when_ra_required_and_bin_missing() {
+        let err = ra_launch_precheck(true, None).unwrap_err();
+        assert_eq!(err, RA_BIN_MISSING);
+        assert!(err.contains("远程证明"), "错误应说明 RA 版缺失: {err}");
+        assert_eq!(
+            ra_launch_precheck(true, Some("/rd/tng-linux-x86_64")),
+            Ok(())
+        );
+        assert_eq!(ra_launch_precheck(false, None), Ok(()));
+        assert_eq!(
+            ra_launch_precheck(false, Some("/rd/tng-linux-x86_64")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn find_bin_under_hits_flat_and_one_level_subdir_layouts() {
+        let dir = test_dir("resource-bin");
+        let name = "tng-linux-x86_64";
+
+        // 平铺命中
+        fs::write(dir.join(name), b"bin").unwrap();
+        let hit = find_bin_under(&dir, name).unwrap();
+        assert_eq!(hit, dir.join(name));
+
+        // 一层子目录命中（Tauri 保留 resources/ 源路径前缀的打包落点）
+        fs::remove_file(dir.join(name)).unwrap();
+        let nested = dir.join("resources");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join(name), b"bin").unwrap();
+        let hit = find_bin_under(&dir, name).unwrap();
+        assert_eq!(hit, nested.join(name));
+
+        // 未命中
+        fs::remove_file(nested.join(name)).unwrap();
+        assert!(find_bin_under(&dir, name).is_none());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -401,28 +480,71 @@ async fn send_inference(
     tngui_core::send_inference(port, &model, &api_key, &prompt).await
 }
 
-/// 解析随包分发的 tng：在 `resource_dir` 下找 `tng`/`tng.exe`（兼容平铺与 `resources/` 子目录两种打包落点）；
-/// 找不到回退 `PATH` 上的 `tng`（开发态）。
-fn resolve_tng_path(app: &tauri::App) -> String {
-    use std::fs;
-    let name = if cfg!(windows) { "tng.exe" } else { "tng" };
-    if let Ok(rd) = app.path().resource_dir() {
-        // 1) 平铺：resource_dir/<name>
-        let direct = rd.join(name);
-        if direct.exists() {
-            return direct.to_string_lossy().into_owned();
-        }
-        // 2) 一层子目录：Tauri 会保留源路径前缀（resources/tng* → resource_dir/resources/<name>）
-        if let Ok(entries) = fs::read_dir(&rd) {
-            for e in entries.flatten() {
-                let p = e.path().join(name);
-                if p.exists() {
-                    return p.to_string_lossy().into_owned();
-                }
-            }
+/// 普通版 tng（远程证明全关时使用）的随包资源名：Windows 为 `tng-nora.exe`、其余平台
+/// 为 `tng-nora`。CI release 下载官方 tng 产物后放此名——与 RA 版的 `tng.exe` 撞名规避。
+fn tng_nora_resource_name_for(os: &str) -> &'static str {
+    match os {
+        "windows" => "tng-nora.exe",
+        _ => "tng-nora",
+    }
+}
+
+fn tng_nora_resource_name() -> &'static str {
+    tng_nora_resource_name_for(std::env::consts::OS)
+}
+
+/// RA 版 tng（任一条 ingress 开远程证明时使用）的资源名平台映射——与直接入库
+/// `resources/` 的 4 个文件一一对应。未列平台（含 macOS x86_64——该架构不再受支持）
+/// 返回 `None`：RA 启用时明确报错，绝不（MUST NOT）回退普通版或 `PATH`。
+fn tng_ra_resource_name_for(os: &str, arch: &str) -> Option<&'static str> {
+    match (os, arch) {
+        ("windows", "x86_64") => Some("tng.exe"),
+        ("linux", "x86_64") => Some("tng-linux-x86_64"),
+        ("linux", "aarch64") => Some("tng-linux-aarch64"),
+        ("macos", "aarch64") => Some("tng-aarch64-apple-darwin"),
+        _ => None,
+    }
+}
+
+fn tng_ra_resource_name() -> Option<&'static str> {
+    tng_ra_resource_name_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// 在资源根下按名查找二进制：1）平铺 `base/<name>`；2）一层子目录
+/// `base/<子目录>/<name>`（Tauri 打包保留 `resources/` 源路径前缀，两种落点均兼容）。
+fn find_bin_under(base: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let direct = base.join(name);
+    if direct.exists() {
+        return Some(direct);
+    }
+    let entries = std::fs::read_dir(base).ok()?;
+    for e in entries.flatten() {
+        let p = e.path().join(name);
+        if p.exists() {
+            return Some(p);
         }
     }
-    "tng".to_string()
+    None
+}
+
+/// 从 `resource_dir` 按名解析随包二进制；未命中返回 `None`。
+fn resolve_resource_bin(app: &tauri::App, name: &str) -> Option<String> {
+    let rd = app.path().resource_dir().ok()?;
+    find_bin_under(&rd, name).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// RA 版缺失时拒绝启动的文案（与 `TngSupervisor::select_bin` 的防御性报错一致：
+/// `tngui-core` 不感知 Tauri 资源解析，两处各自兜底、语义同源）。
+const RA_BIN_MISSING: &str = "当前平台未随包提供远程证明版 tng 二进制；开启远程证明需要该版本";
+
+/// 启动前 RA 预检：需要 RA 版而其二进制不可用时拒绝本次启动。必须在停反代/杀旧
+/// 进程之前调用（见 `launch_tng`），保证正在运行的会话不被终止。
+fn ra_launch_precheck(ra_required: bool, ra_bin: Option<&str>) -> Result<(), String> {
+    if ra_required && ra_bin.is_none() {
+        Err(RA_BIN_MISSING.to_string())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -430,9 +552,14 @@ pub fn run() {
     Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let tng = resolve_tng_path(app);
+            // 普通版：resource_dir 命中即用；缺失回退 PATH 上的 `tng`（开发态兜底）。
+            let nora = resolve_resource_bin(app, tng_nora_resource_name())
+                .unwrap_or_else(|| "tng".to_string());
+            // RA 版：按平台映射名从 resource_dir 解析；平台不支持或文件缺失为 None——
+            // RA 启用时由 launch_tng 预检拒绝，绝不静默回退普通版。
+            let ra = tng_ra_resource_name().and_then(|name| resolve_resource_bin(app, name));
             app.manage(AppState {
-                supervisor: Arc::new(Mutex::new(TngSupervisor::new(tng, 4000))),
+                supervisor: Arc::new(Mutex::new(TngSupervisor::new(nora, ra, 4000))),
                 port: Arc::new(StdMutex::new(None)),
                 proxy: Arc::new(Mutex::new(None)),
             });

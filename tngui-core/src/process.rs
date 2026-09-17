@@ -186,21 +186,43 @@ where
     }
 }
 
-/// 封装 `tng launch …` 的启停，持有共享日志。
+/// 封装 `tng launch …` 的启停，持有共享日志。持有双套 tng 二进制：
+/// - `bin_nora`：普通版（全部 ingress 均关闭远程证明时使用，找不到由 PATH 兜底）
+/// - `bin_ra`：远程证明版（任一 ingress 开 RA 时使用，`None` = 未随包提供，绝不回退）
 pub struct TngSupervisor {
-    bin: String,
+    bin_nora: String,
+    bin_ra: Option<String>,
     rust_log: String,
     log: Arc<Mutex<BoundedLog>>,
     managed: Option<ManagedChild>,
 }
 
 impl TngSupervisor {
-    pub fn new(bin: impl Into<String>, log_cap: usize) -> Self {
+    pub fn new(bin_nora: impl Into<String>, bin_ra: Option<String>, log_cap: usize) -> Self {
         Self {
-            bin: bin.into(),
+            bin_nora: bin_nora.into(),
+            bin_ra,
             rust_log: "info".to_string(),
             log: Arc::new(Mutex::new(BoundedLog::new(log_cap))),
             managed: None,
+        }
+    }
+
+    /// RA 版二进制路径；未随包提供（如 macOS x86_64）或资源缺失时为 `None`。
+    /// 调用方（`launch_tng`）据此在停掉当前会话**之前**拒绝启动——绝不静默回退普通版。
+    pub fn ra_bin(&self) -> Option<&str> {
+        self.bin_ra.as_deref()
+    }
+
+    /// 本次应启动的 bin：RA 开须 RA 版（缺失报错不回退）；RA 关用普通版。
+    /// 在 kill 旧进程前调用，保证缺 RA 版时不误杀现有会话。
+    fn select_bin(&self, ra_required: bool) -> io::Result<&str> {
+        if ra_required {
+            self.bin_ra.as_deref().ok_or_else(|| {
+                io::Error::other("当前平台未随包提供远程证明版 tng 二进制；开启远程证明需要该版本")
+            })
+        } else {
+            Ok(&self.bin_nora)
         }
     }
 
@@ -217,11 +239,12 @@ impl TngSupervisor {
     }
 
     /// spawn 前确保 `bin` 可执行：无 owner 执行位则尝试补上；失败（如缺 chmod 权限）则忽略，
-    /// 由后续 spawn 自然报错。Windows 无执行位概念，空操作。
+    /// 由后续 spawn 自然报错。Windows 无执行位概念，空操作。RA 版二进制入库无执行位
+    /// （git 亦不记录执行位），运行期由本函数对选定的 bin 自动补位。
     #[cfg(unix)]
-    fn ensure_executable(&self) {
+    fn ensure_executable(&self, bin: &str) {
         use std::os::unix::fs::PermissionsExt;
-        let p = Path::new(&self.bin);
+        let p = Path::new(bin);
         let Ok(meta) = std::fs::metadata(p) else {
             return;
         };
@@ -236,12 +259,12 @@ impl TngSupervisor {
     }
 
     #[cfg(not(unix))]
-    fn ensure_executable(&self) {}
+    fn ensure_executable(&self, _bin: &str) {}
 
     /// 构造 `tng launch -c <config_file>` 命令（不传 --log-file，使 tng 日志走 stdout →
     /// 被 get_output 捕获 → UI 可见；可单测）。
-    fn build_command(&self, config_file: &Path) -> Command {
-        let mut c = Command::new(&self.bin);
+    fn build_command(&self, bin: &str, config_file: &Path) -> Command {
+        let mut c = Command::new(bin);
         c.arg("launch")
             .arg("-c")
             .arg(config_file)
@@ -249,12 +272,16 @@ impl TngSupervisor {
         c
     }
 
-    /// 先杀旧进程（若有），再拉起新进程。返回新子进程 pid。
-    pub async fn launch(&mut self, config_file: &Path) -> io::Result<u32> {
+    /// 先杀旧进程（若有），再拉起新进程。`ra_required` 决定用哪套 bin（远程证明
+    /// 开 → RA 版；关 → 普通版）。返回新子进程 pid。
+    pub async fn launch(&mut self, config_file: &Path, ra_required: bool) -> io::Result<u32> {
+        // 选定 bin 必须先于 kill：RA 开而 RA 版缺失时报错返回、不误杀现有会话。
+        // `to_owned` 解除 self 借用，随后 `kill_current` 可取 &mut self。
+        let bin = self.select_bin(ra_required)?.to_owned();
         self.kill_current().await;
         self.clear_log();
-        self.ensure_executable();
-        let cmd = self.build_command(config_file);
+        self.ensure_executable(&bin);
+        let cmd = self.build_command(&bin, config_file);
         let m = spawn_managed(cmd, self.log.clone()).await?;
         let pid = m.pid;
         self.managed = Some(m);
@@ -363,10 +390,51 @@ mod tests {
 
     #[test]
     fn build_command_args_are_correct() {
-        let sup = TngSupervisor::new("tng", 64);
-        let cmd = sup.build_command(Path::new("/tmp/tng-runtime.json"));
+        let sup = TngSupervisor::new("tng-nora", None, 64);
+        let cmd = sup.build_command("tng-nora", Path::new("/tmp/tng-runtime.json"));
         // tokio::process::Command 没有直接取 argv 的 API，断言 bin 即可；
         // 真实 argv 由端到端（用户机器）覆盖。
         let _ = cmd; // 编译期保证该函数可用
+    }
+
+    #[test]
+    fn ra_bin_reflects_construction() {
+        assert!(TngSupervisor::new("tng-nora", None, 64).ra_bin().is_none());
+        let sup = TngSupervisor::new("tng-nora", Some("/rd/tng-linux-x86_64".into()), 64);
+        assert_eq!(sup.ra_bin(), Some("/rd/tng-linux-x86_64"));
+    }
+
+    #[tokio::test]
+    async fn launch_fails_fast_when_ra_required_without_ra_bin() {
+        let mut sup = TngSupervisor::new("tng-nora", None, 64);
+        let err = sup
+            .launch(Path::new("/tmp/tng-runtime.json"), true)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("远程证明"), "错误应说明 RA 版缺失: {msg}");
+        assert!(msg.contains("需要该版本"), "错误应给出明确动作指引: {msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launch_selects_ra_bin_when_ra_required() {
+        // nora bin 故意不存在：若 launch 误用普通版会 spawn 失败；成功即证明用的是 RA bin。
+        let mut sup =
+            TngSupervisor::new("definitely-missing-tng-nora", Some("true".to_string()), 64);
+        sup.launch(Path::new("/tmp/tng-runtime.json"), true)
+            .await
+            .expect("ra_required 时应使用 RA 版二进制启动");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launch_selects_nora_bin_when_ra_not_required() {
+        // RA bin 缺失也不影响 RA 关时的启动：普通版仍可 launch。
+        let mut sup = TngSupervisor::new("true", None, 64);
+        sup.launch(Path::new("/tmp/tng-runtime.json"), false)
+            .await
+            .expect("RA 关时应使用普通版二进制启动");
+        assert!(sup.is_running() || !sup.is_running()); // true 立即退出，仅确认无 panic
     }
 }

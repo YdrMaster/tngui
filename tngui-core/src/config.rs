@@ -211,7 +211,7 @@ pub fn prepare_config(user_json: &str, control_port: u16) -> Result<Value, Prepa
     let n = ingress_count(user_json)?;
     let internal = pick_free_ports(n)
         .map_err(|e| PrepareError::IngressInvalid(format!("无法分配内部端口: {e}")))?;
-    prepare_launch(user_json, control_port, &internal).map(|(v, _)| v)
+    prepare_launch(user_json, control_port, &internal).map(|(v, _, _)| v)
 }
 
 /// 用户配置中 `add_ingress` 的条数（缺失或非数组视为 0）。
@@ -224,16 +224,19 @@ fn ingress_count(user_json: &str) -> Result<usize, PrepareError> {
 }
 
 /// 同 `prepare_config`，但额外返回每条 ingress 的反代路由（带内部端口）供 `launch_tng`
-/// 启动反代。tng 绑定的配置不再含反代对外绑定字段；ingress 本地监听为注入的内部端口。
+/// 启动反代，并返回本次启动是否需要远程证明版（RA 版）tng：任一条 ingress 开启远程证明
+/// （`no_ra` 非 `true`，见 `ra_required`）即须用 RA 版二进制。tng 绑定的配置不再含反代
+/// 对外绑定字段；ingress 本地监听为注入的内部端口。
 pub fn prepare_launch(
     user_json: &str,
     control_port: u16,
     internal_ports: &[u16],
-) -> Result<(Value, Vec<crate::proxy::ProxyRoute>), PrepareError> {
+) -> Result<(Value, Vec<crate::proxy::ProxyRoute>, bool), PrepareError> {
     let mut v = validate_user_config(user_json)?;
     let root = v
         .as_object_mut()
         .expect("validate_user_config 保证根为对象");
+    let ra_required = ra_required(root);
 
     // control_interface.restful 注入
     let ci = root
@@ -276,7 +279,23 @@ pub fn prepare_launch(
     // 状态卡恒"关停"、用户仅能在日志里看到 cryptic 的反序列化错误。
     validate_ingress_for_launch(root)?;
 
-    Ok((v, routes))
+    Ok((v, routes, ra_required))
+}
+
+/// RA 判定：任一条 `add_ingress` 开启远程证明（该条 `no_ra` 非 `true`——含 `verify`
+/// 条目与两者皆缺省的原始 JSON，与前端 `configmodel.parse`"仅 `e.no_ra === true` 才算
+/// 关"的语义一致）则本次启动须用远程证明版 tng 二进制；`add_ingress` 缺失或空数组视为
+/// 全关（用普通版）。`prepare_launch` 基于最终生效配置返回该判定，前后端语义同源。
+fn ra_required(root: &serde_json::Map<String, Value>) -> bool {
+    root.get("add_ingress")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry
+                    .as_object()
+                    .is_some_and(|o| o.get("no_ra").and_then(Value::as_bool) != Some(true))
+            })
+        })
 }
 
 /// 处理一条 ingress 的反代对外绑定与内部本地监听注入：
@@ -795,7 +814,7 @@ mod tests {
     fn prepare_launch_returns_routes_and_injects_internal_port() {
         let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"0.0.0.0","port":1},"out":{"host":"10.0.0.1","port":2}}]},"tngui_outward":{"host":"0.0.0.0","port":8443},"no_ra":true}]}"#;
         let ports = pick_free_ports(1).unwrap();
-        let (v, routes) = prepare_launch(src, 40100, &ports).unwrap();
+        let (v, routes, _) = prepare_launch(src, 40100, &ports).unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].out_host, "0.0.0.0");
         assert_eq!(routes[0].out_port, 8443);
@@ -818,7 +837,7 @@ mod tests {
     fn prepare_launch_http_proxy_route() {
         let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"10.0.0.1","port":1},"dst_filters":{"domain":"x.example.com"}},"tngui_outward":{"host":"127.0.0.1","port":18443}}]}"#;
         let ports = pick_free_ports(1).unwrap();
-        let (v, routes) = prepare_launch(src, 40101, &ports).unwrap();
+        let (v, routes, _) = prepare_launch(src, 40101, &ports).unwrap();
         assert_eq!(routes[0].out_host, "127.0.0.1");
         assert_eq!(routes[0].out_port, 18443);
         // http_proxy 无端口 → remote_host 裸 domain；有端口 → domain:port
@@ -913,7 +932,7 @@ mod tests {
             {"http_proxy":{"proxy_listen":{"host":"127.0.0.1","port":3},"dst_filters":{"domain":"y"}},"tngui_outward":{"host":"127.0.0.1","port":18444}}
         ]}"#;
         let ports = pick_free_ports(2).unwrap();
-        let (v, routes) = prepare_launch(src, 40104, &ports).unwrap();
+        let (v, routes, _) = prepare_launch(src, 40104, &ports).unwrap();
         assert_eq!(routes.len(), 2);
         assert_ne!(
             routes[0].internal_port, routes[1].internal_port,
@@ -924,6 +943,57 @@ mod tests {
         for i in 0..2 {
             assert!(v["add_ingress"][i].get("tngui_outward").is_none());
         }
+    }
+
+    #[test]
+    fn ra_required_false_when_all_ingress_no_ra() {
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]},"no_ra":true,"tngui_outward":{"host":"127.0.0.1","port":9443}}]}"#;
+        let ports = pick_free_ports(1).unwrap();
+        let (_, _, ra_required) = prepare_launch(src, 40200, &ports).unwrap();
+        assert!(!ra_required, "全部 no_ra=true 时应使用普通版");
+    }
+
+    #[test]
+    fn ra_required_true_for_verify_entry_without_no_ra() {
+        // 前端序列化 RA 开的形态：verify 存在、无 no_ra
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]},"verify":{"model":"passport","as_provider":"tpm"},"tngui_outward":{"host":"127.0.0.1","port":9443}}]}"#;
+        let ports = pick_free_ports(1).unwrap();
+        let (_, _, ra_required) = prepare_launch(src, 40201, &ports).unwrap();
+        assert!(ra_required, "verify 条目应要求 RA 版");
+    }
+
+    #[test]
+    fn ra_required_true_when_no_ra_and_verify_both_missing() {
+        // 高级 JSON 双缺省：与前端 parse 一致，默认视为 RA 开
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]},"tngui_outward":{"host":"127.0.0.1","port":9443}}]}"#;
+        let ports = pick_free_ports(1).unwrap();
+        let (_, _, ra_required) = prepare_launch(src, 40202, &ports).unwrap();
+        assert!(ra_required, "双缺省条目默认 RA 开");
+    }
+
+    #[test]
+    fn ra_required_true_for_false_or_mixed_ingress() {
+        // no_ra:false 显式写 false 仍视为开（前端仅 no_ra === true 才算关）；混合条目任一开即开
+        let src = r#"{"add_ingress":[
+            {"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]},"no_ra":false,"tngui_outward":{"host":"127.0.0.1","port":18443}},
+            {"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":3},"out":{"host":"10.0.0.2","port":4}}]},"no_ra":true,"tngui_outward":{"host":"127.0.0.1","port":18444}},
+            {"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":5},"out":{"host":"10.0.0.3","port":6}}]},"verify":{"model":"passport","as_provider":"tpm"},"tngui_outward":{"host":"127.0.0.1","port":18445}}
+        ]}"#;
+        let ports = pick_free_ports(3).unwrap();
+        let (_, _, ra_required) = prepare_launch(src, 40203, &ports).unwrap();
+        assert!(ra_required, "任一条 RA 开即须 RA 版（混合场景）");
+    }
+
+    #[test]
+    fn ra_required_false_when_add_ingress_missing_or_empty() {
+        let (v, routes, ra_required) = prepare_launch(r#"{"add_ingress":[]}"#, 40204, &[]).unwrap();
+        assert!(!ra_required, "空 add_ingress 应使用普通版");
+        assert!(routes.is_empty());
+        assert_eq!(v["add_ingress"].as_array().map(Vec::len), Some(0));
+
+        let (_, _, ra_required) =
+            prepare_launch(r#"{"control_interface":{}}"#, 40205, &[]).unwrap();
+        assert!(!ra_required, "缺失 add_ingress 应使用普通版");
     }
 
     #[test]
