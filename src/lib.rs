@@ -192,9 +192,77 @@ async fn export_tng_log(state: State<'_, AppState>, path: String) -> Result<(), 
         .map_err(|e| format!("写入日志失败 {path}: {e}"))
 }
 
+/// 独立设置缓存文件名（不与 runtime 配置混用）。
+const SETTINGS_CACHE_FILE: &str = "settings-cache.json";
+
+/// 校验设置缓存信封，但不解析业务字段或凭据。
+fn validate_settings_cache_payload(payload: &Value) -> Result<(), &'static str> {
+    if !payload.is_object() {
+        return Err("设置缓存顶层须为 JSON object");
+    }
+    if payload.get("schemaVersion").and_then(Value::as_i64) != Some(1) {
+        return Err("设置缓存 schemaVersion 须为 1");
+    }
+    Ok(())
+}
+
+/// 读取独立设置缓存；缺失、不可读或 JSON 损坏时返回空 object，
+/// schema 校验由前端设置缓存模块继续处理。
+fn read_settings_cache_file(dir: &std::path::Path) -> Value {
+    let contents = std::fs::read_to_string(dir.join(SETTINGS_CACHE_FILE));
+    match contents {
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or(serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    }
+}
+
+/// 原子替换设置缓存；内容仅为前端生成的版本化快照。
+fn write_settings_cache_file(dir: &std::path::Path, payload: &Value) -> Result<(), String> {
+    validate_settings_cache_payload(payload).map_err(|message| message.to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("写入设置缓存失败: {e}"))?;
+
+    let path = dir.join(SETTINGS_CACHE_FILE);
+    let temp = dir.join(format!("{SETTINGS_CACHE_FILE}.tmp"));
+    let mut file = std::fs::File::create(&temp).map_err(|e| format!("写入设置缓存失败: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("写入设置缓存失败: {e}"))?;
+    }
+
+    serde_json::to_writer_pretty(&mut file, payload)
+        .map_err(|e| format!("写入设置缓存失败: {e}"))?;
+    file.sync_all()
+        .map_err(|e| format!("写入设置缓存失败: {e}"))?;
+    drop(file);
+
+    std::fs::rename(&temp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        format!("写入设置缓存失败: {e}")
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_process_log_lines;
+    use super::{
+        SETTINGS_CACHE_FILE, format_process_log_lines, read_settings_cache_file,
+        write_settings_cache_file,
+    };
+    use serde_json::{Value, json};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tngui-settings-cache-{}-{name}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn empty_process_log_exports_empty_content() {
@@ -205,6 +273,69 @@ mod tests {
     fn process_log_lines_keep_original_order_without_placeholder() {
         let lines = vec!["INFO first".to_string(), "ERROR second".to_string()];
         assert_eq!(format_process_log_lines(&lines), "INFO first\nERROR second");
+    }
+
+    #[test]
+    fn settings_cache_missing_layout_returns_empty_object() {
+        let dir = test_dir("missing");
+        assert_eq!(read_settings_cache_file(&dir), json!({}));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_cache_replaces_payload_atomically_and_stays_owner_only_on_unix() {
+        let dir = test_dir("write");
+        let first = json!({
+            "schemaVersion": 1,
+            "tng": {"configJson": "{}", "apiKey": "first"}
+        });
+        write_settings_cache_file(&dir, &first).unwrap();
+        let second = json!({
+            "schemaVersion": 1,
+            "tng": {"configJson": "{}", "apiKey": "second"}
+        });
+        write_settings_cache_file(&dir, &second).unwrap();
+
+        let path = dir.join(SETTINGS_CACHE_FILE);
+        let stored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored, second);
+        assert!(
+            !dir.read_dir()
+                .unwrap()
+                .any(|e| { e.unwrap().file_name().to_string_lossy().contains(".tmp") })
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_cache_corrupt_json_returns_empty_object() {
+        let dir = test_dir("corrupt");
+        fs::write(dir.join(SETTINGS_CACHE_FILE), "{not-json").unwrap();
+        assert_eq!(read_settings_cache_file(&dir), json!({}));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_cache_rejects_unsupported_envelopes_without_payload_details() {
+        let error = write_settings_cache_file(&test_dir("invalid-root"), &json!("secret-config"))
+            .unwrap_err();
+        assert_eq!(error, "设置缓存顶层须为 JSON object");
+
+        let error = write_settings_cache_file(
+            &test_dir("invalid-schema"),
+            &json!({"schemaVersion": 99, "tng": {"apiKey": "secret"}}),
+        )
+        .unwrap_err();
+        assert_eq!(error, "设置缓存 schemaVersion 须为 1");
+        assert!(!error.contains("secret"));
     }
 }
 
@@ -218,6 +349,30 @@ fn import_config(path: String) -> Result<String, String> {
 #[tauri::command]
 fn export_config(path: String, json: String) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| format!("写入失败 {path}: {e}"))
+}
+
+/// 读取独立设置缓存，供 GUI 启动 bootstrap 使用；缺失/损坏返回空 object。
+#[tauri::command]
+fn load_settings_cache(app: AppHandle) -> Result<Value, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("取 app_data_dir 失败: {e}"))?;
+    Ok(read_settings_cache_file(&dir))
+}
+
+/// 应用正常关闭前 flush 当前设置快照。输入由前端生成；后端不解析凭据或 TNG 配置。
+#[tauri::command]
+fn flush_settings_cache(app: AppHandle, payload: Value) -> Result<(), String> {
+    if let Err(message) = validate_settings_cache_payload(&payload) {
+        // 该静态错误不携带 payload。
+        return Err(message.to_string());
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("取 app_data_dir 失败: {e}"))?;
+    write_settings_cache_file(&dir, &payload).map(|_| ())
 }
 
 /// 仅保存 TNG 配置到磁盘（不 spawn）。
@@ -292,6 +447,8 @@ pub fn run() {
             export_tng_log,
             import_config,
             export_config,
+            load_settings_cache,
+            flush_settings_cache,
             save_config,
             send_inference,
             app_info

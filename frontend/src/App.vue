@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, provide, onMounted, onBeforeUnmount } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { message } from "ant-design-vue";
 import {
   SafetyCertificateOutlined, DashboardOutlined, ExperimentOutlined, SettingOutlined,
@@ -9,10 +10,21 @@ import Overview from "./views/Overview.vue";
 import InferenceView from "./views/InferenceView.vue";
 import SettingsView from "./views/SettingsView.vue";
 import { useTngConfig } from "./composables/useTngConfig";
+import { useInferenceConfig } from "./composables/useInferenceConfig";
+import {
+  buildSettingsCacheSnapshot,
+  flushSettingsAndClose,
+} from "./settingsCache";
+import {
+  beforeLeaveSettings as runBeforeLeaveSettings,
+  bootstrapSettings,
+} from "./settingsLifecycle";
+import { flushSettingsCache, loadSettingsCache } from "./tauri";
 
 type View = "overview" | "inference" | "settings";
 const view = ref<View>("overview");
-
+const settingsReady = ref(false);
+let unlistenClose: (() => void) | undefined;
 const themeConfig = {
   token: {
     colorPrimary: "#1677ff",
@@ -53,23 +65,15 @@ async function pollRuntime() {
 
 async function beforeLeaveSettings() {
   const { isDirty, markSaved, serializeCurrent } = useTngConfig();
-  if (!isDirty()) return;
-  const json = serializeCurrent();
-  try {
-    await invoke("save_config", { configJson: json });
-    markSaved();
-  } catch (e) {
-    message.error("保存配置失败: " + String(e));
-    return;
-  }
-  try {
-    const status = await invoke<{ reachable: boolean }>("get_status");
-    if (status.reachable) {
-      await invoke("launch_tng", { configJson: json });
-    }
-  } catch (e) {
-    message.error("自动重启 tng 失败: " + String(e));
-  }
+  await runBeforeLeaveSettings({
+    isDirty,
+    serializeCurrent,
+    markSaved,
+    saveConfig: (configJson: string) => invoke("save_config", { configJson }),
+    getStatus: () => invoke<{ reachable: boolean }>("get_status"),
+    launchTng: (configJson: string) => invoke("launch_tng", { configJson }),
+    showError: (text: string) => message.error(text),
+  });
 }
 
 async function goTo(target: View) {
@@ -79,18 +83,46 @@ async function goTo(target: View) {
 
 provide("navigate", goTo);
 
-onMounted(() => {
+onMounted(async () => {
+  // 关闭监听先注册：设置 bootstrap 未完成时也能 flush 当前默认/已恢复状态。
+  unlistenClose = await getCurrentWindow().onCloseRequested(async (event) => {
+    // 阻止默认关闭，等后端原子写入完成；失败也继续关闭。
+    event.preventDefault();
+    const { serializeCurrent } = useTngConfig();
+    const { apiKey } = useInferenceConfig();
+    await flushSettingsAndClose(
+      buildSettingsCacheSnapshot(serializeCurrent(), apiKey.value),
+      flushSettingsCache,
+      () => getCurrentWindow().destroy(),
+    );
+  });
+
+  // 所有视图都必须等待设置初始化完成，避免用户先进入设置看到默认值。
+  await bootstrapSettings(loadSettingsCache, {
+    initialize: useTngConfig().initialize,
+    initializeApiKey: useInferenceConfig().initializeApiKey,
+  });
+  settingsReady.value = true;
+
   pollRuntime();
   runtimeTimer = window.setInterval(pollRuntime, 2000);
 });
 onBeforeUnmount(() => {
+  unlistenClose?.();
   if (runtimeTimer) window.clearInterval(runtimeTimer);
 });
 </script>
 
 <template>
   <a-config-provider :theme="themeConfig">
-    <a-layout class="h-screen" style="background:var(--bg-layout)">
+    <div
+      v-if="!settingsReady"
+      class="h-screen flex items-center justify-center"
+      style="color:var(--text-secondary)"
+    >
+      正在初始化设置…
+    </div>
+    <a-layout v-else class="h-screen" style="background:var(--bg-layout)">
       <a-layout-sider width="196" theme="light" class="sidebar">
         <div class="brand">
           <div class="brand-mark"><SafetyCertificateOutlined /></div>

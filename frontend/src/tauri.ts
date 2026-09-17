@@ -84,3 +84,21 @@ export async function importConfig(path: string): Promise<string> {
 export async function exportConfig(path: string, json: string): Promise<void> {
   return invoke<void>("export_config", { path, json });
 }
+/** 独立设置缓存 payload；后端只校验信封，不解析 `tng` 字段。 */
+export interface SettingsCachePayload {
+  schemaVersion: 1;
+  tng: {
+    configJson: string;
+    apiKey: string;
+  };
+}
+
+/** 启动时读取独立设置缓存；缺失/损坏时后端返回空 object。 */
+export async function loadSettingsCache(): Promise<unknown> {
+  return invoke<unknown>("load_settings_cache");
+}
+
+/** 正常关闭前 flush 当前设置快照。 */
+export async function flushSettingsCache(payload: SettingsCachePayload): Promise<void> {
+  return invoke<void>("flush_settings_cache", { payload });
+}
