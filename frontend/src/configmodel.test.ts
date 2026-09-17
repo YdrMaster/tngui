@@ -8,6 +8,7 @@ import {
   DEFAULT_OUTWARD,
   DEFAULT_VERIFY,
   INGRESS_MODES,
+  PORT_MAX,
   type ConfigModel,
   type EntryModel,
 } from "./formspec";
@@ -20,6 +21,8 @@ function mk(over: Partial<ConfigModel> = {}): ConfigModel {
     ...over,
   };
 }
+
+const OUTWARD_JSON = { host: "127.0.0.1", port: 9443 };
 
 describe("默认模板", () => {
   it("序列化为客户端 OHTTP 形态：含 ohttp、no_ra 缺失而 verify 存在；不含 restful 与 egress", () => {
@@ -104,7 +107,7 @@ describe("ingress 锁定形态与互斥序列化", () => {
   });
 
   it("http_proxy 端口为空时输出仅 domain（不把端口塞进 domain、不输出 port）", () => {
-    const m = mk({ add_ingress: [{ mode: "http_proxy", fields: { proxy_listen: { host: LOCALHOST, port: 1 }, dst_filters: { domain: "x.example.com", port: 0 } }, no_ra: true, outward: { ...DEFAULT_OUTWARD }, extra: {} }] });
+    const m = mk({ add_ingress: [{ mode: "http_proxy", fields: { proxy_listen: { host: LOCALHOST, port: 1 }, dst_filters: { domain: "x.example.com", port: null } }, no_ra: true, outward: { ...DEFAULT_OUTWARD }, extra: {} }] });
     const o = JSON.parse(serialize(m)) as { add_ingress: { http_proxy: { dst_filters: { domain: string; port?: number }[] }; ohttp: Record<string, unknown> }[] };
     expect(o.add_ingress[0].http_proxy.dst_filters).toEqual([{ domain: "x.example.com" }]);
     expect(o.add_ingress[0].http_proxy.dst_filters[0].port).toBeUndefined();
@@ -131,7 +134,7 @@ describe("ingress 锁定形态与互斥序列化", () => {
   });
 
   it("导入 ohttp.tls:true 回填 tls并在域名框以 https:// 前缀回显；序列化还原", () => {
-    const r = parse(JSON.stringify({ add_ingress: [{ http_proxy: { proxy_listen: { host: "127.0.0.1", port: 1 }, dst_filters: [{ domain: "a.example.com", port: 443 }] }, ohttp: { tls: true }, no_ra: true }] }));
+    const r = parse(JSON.stringify({ add_ingress: [{ http_proxy: { proxy_listen: { host: "127.0.0.1", port: 1 }, dst_filters: [{ domain: "a.example.com", port: 443 }] }, ohttp: { tls: true }, no_ra: true, tngui_outward: OUTWARD_JSON }] }));
     expect(r.error).toBeUndefined();
     const e = r.model!.add_ingress[0];
     expect((e as { tls?: boolean }).tls).toBe(true);
@@ -145,7 +148,7 @@ describe("ingress 锁定形态与互斥序列化", () => {
   });
 
   it("导入 dst_filters.domain 携带 https:// 前缀（即便无 ohttp.tls）也派生 tls=true", () => {
-    const r = parse(JSON.stringify({ add_ingress: [{ http_proxy: { proxy_listen: { host: "127.0.0.1", port: 1 }, dst_filters: [{ domain: "https://b.example.com", port: 443 }] }, no_ra: true }] }));
+    const r = parse(JSON.stringify({ add_ingress: [{ http_proxy: { proxy_listen: { host: "127.0.0.1", port: 1 }, dst_filters: [{ domain: "https://b.example.com", port: 443 }] }, no_ra: true, tngui_outward: OUTWARD_JSON }] }));
     expect(r.error).toBeUndefined();
     const e = r.model!.add_ingress[0];
     expect((e as { tls?: boolean }).tls).toBe(true);
@@ -156,43 +159,62 @@ describe("ingress 锁定形态与互斥序列化", () => {
   });
 
   it("导入数组形态 dst_filters 回填为内部 {domain, port}", () => {
-    const r = parse(JSON.stringify({ add_ingress: [{ http_proxy: { proxy_listen: { host: "127.0.0.1", port: 1 }, dst_filters: [{ domain: "inference-test.cloud.misuan.com", port: 30090 }] }, no_ra: true }] }));
+    const r = parse(JSON.stringify({ add_ingress: [{ http_proxy: { proxy_listen: { host: "127.0.0.1", port: 1 }, dst_filters: [{ domain: "inference-test.cloud.misuan.com", port: 30090 }] }, no_ra: true, tngui_outward: OUTWARD_JSON }] }));
     expect(r.error).toBeUndefined();
     const df = r.model!.add_ingress[0].fields.dst_filters as { domain: string; port: number };
     expect(df).toEqual({ domain: "inference-test.cloud.misuan.com", port: 30090 });
   });
 
-  it("导入遗留对象形态 dst_filters 缺省端口回填 443", () => {
-    const r = parse(JSON.stringify({ add_ingress: [{ http_proxy: { proxy_listen: { host: "127.0.0.1", port: 1 }, dst_filters: { domain: "x.example.com" } }, no_ra: true }] }));
+  it("导入 http_proxy 端口缺省时不限定目标端口", () => {
+    const r = parse(JSON.stringify({ add_ingress: [{ http_proxy: { proxy_listen: { host: "127.0.0.1", port: 1 }, dst_filters: { domain: "x.example.com" } }, no_ra: true, tngui_outward: OUTWARD_JSON }] }));
     expect(r.error).toBeUndefined();
-    const df = r.model!.add_ingress[0].fields.dst_filters as { domain: string; port: number };
-    expect(df).toEqual({ domain: "x.example.com", port: 443 });
+    const df = r.model!.add_ingress[0].fields.dst_filters as { domain: string; port: number | null };
+    expect(df.domain).toBe("x.example.com");
+    expect(df.port).toBeNull();
   });
 
-  it("导入显式端口保持不变，包括 http_proxy 显式 0", () => {
+  it("导入显式有效端口保持不变", () => {
     const r = parse(JSON.stringify({
       add_ingress: [
-        { mapping: { rules: [{ in: {}, out: { host: "10.0.0.1", port: 40000 } }] }, no_ra: true },
-        { http_proxy: { proxy_listen: {}, dst_filters: [{ domain: "x.example.com", port: 0 }] }, no_ra: true },
+        { mapping: { rules: [{ in: {}, out: { host: "10.0.0.1", port: 40000 } }] }, no_ra: true, tngui_outward: OUTWARD_JSON },
+        { http_proxy: { proxy_listen: {}, dst_filters: [{ domain: "x.example.com", port: PORT_MAX }] }, no_ra: true, tngui_outward: OUTWARD_JSON },
       ],
     }));
     expect(r.error).toBeUndefined();
     const m = r.model!.add_ingress[0].fields["rules"] as Array<{ out: { port: number } }>;
     const d = r.model!.add_ingress[1].fields.dst_filters as { port: number };
     expect(m[0].out.port).toBe(40000);
-    expect(d.port).toBe(0);
+    expect(d.port).toBe(PORT_MAX);
   });
 
-  it("导入 mapping out 对象缺失端口时回填 80", () => {
-    const r = parse(JSON.stringify({ add_ingress: [{ mapping: { rules: [{ in: {}, out: { host: "10.0.0.1" } }] }, no_ra: true }] }));
-    expect(r.error).toBeUndefined();
-    const rules = r.model!.add_ingress[0].fields["rules"] as Array<{ out: { port: number } }>;
-    expect(rules[0].out.port).toBe(80);
+  it("导入 mapping out 缺失或非法端口时不静默回填", () => {
+    const missing = parse(JSON.stringify({ add_ingress: [{ mapping: { rules: [{ in: {}, out: { host: "10.0.0.1" } }] }, no_ra: true, tngui_outward: OUTWARD_JSON }] }));
+    expect(missing.error).toContain("mapping.rules[0].out.port");
+    const zero = parse(JSON.stringify({ add_ingress: [{ mapping: { rules: [{ in: {}, out: { host: "10.0.0.1", port: 0 } }] }, no_ra: true, tngui_outward: OUTWARD_JSON }] }));
+    expect(zero.error).toContain("mapping.rules[0].out.port");
+    const big = parse(JSON.stringify({ add_ingress: [{ mapping: { rules: [{ in: {}, out: { host: "10.0.0.1", port: 65536 } }] }, no_ra: true, tngui_outward: OUTWARD_JSON }] }));
+    expect(big.error).toContain("mapping.rules[0].out.port");
+    const serializedNull = parse(JSON.stringify({ add_ingress: [{ mapping: { rules: [{ in: {}, out: { host: "10.0.0.1", port: null } }] }, no_ra: true, tngui_outward: OUTWARD_JSON }] }));
+    expect(serializedNull.error).toContain("mapping.rules[0].out.port");
+  });
+
+  it("tngui_outward 必填有效端口，缺失或非法时报错", () => {
+    const raw = (outward: unknown) => JSON.stringify({
+      add_ingress: [{ mapping: { rules: [{ in: {}, out: { host: "10.0.0.1", port: 80 } }] }, no_ra: true, ...(outward === undefined ? {} : { tngui_outward: outward }) }],
+    });
+    expect(parse(raw(undefined)).error).toContain("tngui_outward.port 缺失");
+    expect(parse(raw({ host: "127.0.0.1", port: null })).error).toContain("tngui_outward.port");
+    expect(parse(raw({ host: "127.0.0.1", port: 0 })).error).toContain("tngui_outward.port");
+    expect(parse(raw({ host: "127.0.0.1", port: 65536 })).error).toContain("tngui_outward.port");
+    expect(parse(raw({ host: "127.0.0.1", port: 1.2 })).error).toContain("tngui_outward.port");
+    const ok = parse(raw({ host: "127.0.0.1", port: 65535 }));
+    expect(ok.error).toBeUndefined();
+    expect(ok.model!.add_ingress[0].outward.port).toBe(65535);
   });
 
   it("import 中自定义 ingress ohttp 被丢弃并用锁定值替代", () => {
     const r = parse(JSON.stringify({
-      add_ingress: [{ mapping: { rules: [{ in: { host: "0.0.0.0", port: 1 }, out: { host: "1.1.1.1", port: 2 } }] }, no_ra: true, ohttp: { custom: 1 } }],
+      add_ingress: [{ mapping: { rules: [{ in: { host: "0.0.0.0", port: 1 }, out: { host: "1.1.1.1", port: 2 } }] }, no_ra: true, ohttp: { custom: 1 }, tngui_outward: OUTWARD_JSON }],
     }));
     expect(r.error).toBeUndefined();
     const o = JSON.parse(serialize(r.model!)) as { add_ingress: { ohttp: { path_rewrites: unknown[]; header_passthrough: { request_headers: string[] } } }[] };
@@ -203,8 +225,8 @@ describe("ingress 锁定形态与互斥序列化", () => {
     // mapping 与 http_proxy 两条形态都必须输出同一条锁定 path rewrite。
     const two = parse(JSON.stringify({
       add_ingress: [
-        { mapping: { rules: [{ in: {}, out: { host: "1.1.1.1", port: 2 } }] }, no_ra: true },
-        { http_proxy: { proxy_listen: {}, dst_filters: [{ domain: "a.example.com", port: 443 }] }, no_ra: true },
+        { mapping: { rules: [{ in: {}, out: { host: "1.1.1.1", port: 2 } }] }, no_ra: true, tngui_outward: OUTWARD_JSON },
+        { http_proxy: { proxy_listen: {}, dst_filters: [{ domain: "a.example.com", port: 443 }] }, no_ra: true, tngui_outward: OUTWARD_JSON },
       ],
     }));
     expect(two.error).toBeUndefined();
@@ -219,7 +241,7 @@ describe("ingress 锁定形态与互斥序列化", () => {
 describe("egress 去除与 ingress 形态收敛", () => {
   it("导入含 add_egress：被丢弃且 warning 提示", () => {
     const r = parse(JSON.stringify({
-      add_ingress: [{ mapping: { rules: [{ in: { host: "0.0.0.0", port: 1 }, out: { host: "1.1.1.1", port: 2 } }] }, no_ra: true }],
+      add_ingress: [{ mapping: { rules: [{ in: { host: "0.0.0.0", port: 1 }, out: { host: "1.1.1.1", port: 2 } }] }, no_ra: true, tngui_outward: OUTWARD_JSON }],
       add_egress: [{ mapping: { rules: [{ in: { port: 3 }, out: { host: "127.0.0.1", port: 4 } }] } }],
     }));
     expect(r.error).toBeUndefined();
@@ -232,7 +254,7 @@ describe("egress 去除与 ingress 形态收敛", () => {
   it("导入含 socks5/netfilter ingress：被丢弃并 warning；mapping 形态被保留", () => {
     const r = parse(JSON.stringify({
       add_ingress: [
-        { mapping: { rules: [{ in: { host: "0.0.0.0", port: 1 }, out: { host: "1.1.1.1", port: 2 } }] }, no_ra: true },
+        { mapping: { rules: [{ in: { host: "0.0.0.0", port: 1 }, out: { host: "1.1.1.1", port: 2 } }] }, no_ra: true, tngui_outward: OUTWARD_JSON },
         { socks5: { proxy_listen: { host: "0.0.0.0", port: 3 } }, no_ra: true },
         { netfilter: { capture_dst: [{ port: 9 }] }, no_ra: true },
       ],
@@ -284,5 +306,82 @@ describe("错误处理", () => {
   });
   it("add_egress 非数组返回 error", () => {
     expect(parse(JSON.stringify({ add_egress: 5 })).error).toMatch(/add_egress 须为数组/);
+  });
+});
+
+
+describe("用户端口限制", () => {
+  it("http_proxy 缺省/留空端口序列化为无 port，显式有效端口保留", () => {
+    const empty = mk({
+      add_ingress: [{
+        mode: "http_proxy",
+        fields: { proxy_listen: { host: LOCALHOST, port: 1 }, dst_filters: { domain: "x.example.com", port: null } },
+        no_ra: true,
+        outward: { ...DEFAULT_OUTWARD },
+        extra: {},
+      }],
+    });
+    const oEmpty = JSON.parse(serialize(empty)) as { add_ingress: { http_proxy: { dst_filters: Record<string, unknown>[] } }[] };
+    expect(oEmpty.add_ingress[0].http_proxy.dst_filters[0].port).toBeUndefined();
+
+    const explicit = mk({
+      add_ingress: [{
+        mode: "http_proxy",
+        fields: { proxy_listen: { host: LOCALHOST, port: 1 }, dst_filters: { domain: "x.example.com", port: 65535 } },
+        no_ra: true,
+        outward: { ...DEFAULT_OUTWARD },
+        extra: {},
+      }],
+    });
+    const oExplicit = JSON.parse(serialize(explicit)) as { add_ingress: { http_proxy: { dst_filters: { port: number }[] } }[] };
+    expect(oExplicit.add_ingress[0].http_proxy.dst_filters[0].port).toBe(65535);
+  });
+
+  it("http_proxy 显式 0/越界导入报错", () => {
+    for (const port of [0, 65536]) {
+      const r = parse(JSON.stringify({
+        add_ingress: [{
+          http_proxy: { proxy_listen: {}, dst_filters: [{ domain: "x.example.com", port }] },
+          no_ra: true,
+          tngui_outward: OUTWARD_JSON,
+        }],
+      }));
+      expect(r.error).toContain("http_proxy.dst_filters[0].port");
+    }
+  });
+
+  it("mapping 与 outward 清空后序列化保留空值，不回填默认端口", () => {
+    const m = mk({
+      add_ingress: [{
+        mode: "mapping",
+        fields: { rules: [{ in: { host: LOCALHOST, port: 1 }, out: { host: "10.0.0.1", port: null } }] },
+        no_ra: true,
+        outward: { host: "127.0.0.1", port: null },
+        extra: {},
+      }],
+    });
+    const o = JSON.parse(serialize(m)) as { add_ingress: { mapping: { rules: { out: { port: number | null } }[] }; tngui_outward: { port: number | null } }[] };
+    expect(o.add_ingress[0].mapping.rules[0].out.port).toBeNull();
+    expect(o.add_ingress[0].tngui_outward.port).toBeNull();
+  });
+
+  it("非法端口导入/回填报错，http_proxy 缺省端口不报错", () => {
+    const missingProxyPort = parse(JSON.stringify({
+      add_ingress: [{
+        http_proxy: { proxy_listen: {}, dst_filters: [{ domain: "x.example.com" }] },
+        no_ra: true,
+        tngui_outward: OUTWARD_JSON,
+      }],
+    }));
+    expect(missingProxyPort.error).toBeUndefined();
+
+    const invalidOutward = parse(JSON.stringify({
+      add_ingress: [{
+        mapping: { rules: [{ in: {}, out: { host: "10.0.0.1", port: 80 } }] },
+        no_ra: true,
+        tngui_outward: { host: "127.0.0.1", port: -1 },
+      }],
+    }));
+    expect(invalidOutward.error).toContain("tngui_outward.port");
   });
 });

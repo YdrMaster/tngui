@@ -17,8 +17,8 @@ tngui 是客户端侧工具：它启动并管理本机的 tng 进程，只配置
 
 | 客户端 ingress 形态 | 概念 | 用途 |
 |---|---|---|
-| mapping（地址端口） | 端口映射 | 把本地一个端口映射到远端 `<IP>:<端口>`（TNG 约束 host 须为 IP） |
-| http_proxy（域名） | HTTP 代理 | 应用经 HTTP 代理把流量交给 TNG，远端为主机名 + 端口（主机名单文本、端口独立字段，序列化为 `dst_filters=[{domain,port}]`） |
+| mapping（地址端口） | 端口映射 | 把本地一个端口映射到远端 `<IP>:<端口>`（TNG 约束 host 须为 IP；远端端口必填 `1~65535`） |
+| http_proxy（域名） | HTTP 代理 | 应用经 HTTP 代理把流量交给 TNG，远端为主机名 + 可选端口（主机名单文本、端口独立字段，序列化为 `dst_filters=[{domain,port}]`；显式端口须为 `1~65535`） |
 
 TNG 通用能力还提供其它入口模式（透明拦截 / 钩子等非推理用例形态），但 tngui 客户端不暴露、不配置。两种形态下 ingress 到 egress 的业务流量均走 OHTTP 封装（见 1.3）。 tngui 在本机只以一个内置反向代理对外暴露推理入口（默认 `127.0.0.1`、可切 `0.0.0.0`，见 5.3 行 1），tng 的 ingress 本地监听端口仅 `127.0.0.1` 可达、由 tngui 启动时注入、不由用户配置——客户端只连反代、不直连 tng ingress（见 3.3、4）。
 
@@ -234,9 +234,10 @@ SecureFlow 五步对应密态推理的保护过程：
 
 - 结构化（客户端 ingress 锁定 OHTTP 形态，不承载 egress）：
   - control_interface 的管控端口（restful 子段）由 tngui 在拉起 tng 时自动选取空闲回环端口并注入、对用户不暴露；配置页不提供其控件。
-  - 行 1 反代对外绑定（本机端口）：`host` 在 `127.0.0.1`（仅本机，默认）/ `0.0.0.0`（对外网卡）间 toggle、`port` 可配；tng 本地监听 `host`/`port` 由 tngui 启动时自选空闲回环端口注入、对用户隐藏，不在此配置、不在结构化控件出现。
-  - 远端形态二选一：`地址端口`（`mapping`，`out = <IP>:<端口>`，host 须为 IP）/ `域名`（`http_proxy`，`dst_filters = [{domain, port}]`，主机名 + 端口分两字段、序列化为数组、主机名不含端口；域名框可写 `http://` 或 `https://` 前缀——`https://` 前缀会在序列化时派生 `ohttp.tls: true`（tng 以 TLS 连上游）、`http://` 或无前缀则不写 `tls`，前缀本身会被剥离不进 `dst_filters.domain`）。
-- tng 的 `http_proxy` 上游目标跟随请求 `Host` 头的 host 与端口（`dst_filters.port` 仅参与 ingress 匹配）；tngui 反代转发时 `Host` 头填 `domain:port`（配置了端口时），非 80 端口如 https 的 443/30090 由此可达。
+  - 用户显式编辑的服务端口必须为整数 `1~65535`；`0` 不作为合法端口或特殊“不限定端口”值。
+  - 行 1 反代对外绑定（本机端口）：`host` 在 `127.0.0.1`（仅本机，默认）/ `0.0.0.0`（对外网卡）间 toggle、`port` 必填且在 `1~65535`；tng 本地监听 `host`/`port` 由 tngui 启动时自选空闲回环端口注入、对用户隐藏，不在此配置、不在结构化控件出现。
+  - 远端形态二选一：`地址端口`（`mapping`，`out = <IP>:<端口>`，host 须为 IP、端口必填且在 `1~65535`）/ `域名`（`http_proxy`，`dst_filters = [{domain, port}]`，主机名 + 可选端口分两字段、序列化为数组、主机名不含端口；端口可留空表示不限定目标端口，显式填写时须为 `1~65535`；域名框可写 `http://` 或 `https://` 前缀——`https://` 前缀会在序列化时派生 `ohttp.tls: true`（tng 以 TLS 连上游）、`http://` 或无前缀则不写 `tls`，前缀本身会被剥离不进 `dst_filters.domain`）。
+- tng 的 `http_proxy` 上游目标跟随请求 `Host` 头的 host 与端口（`dst_filters.port` 仅参与 ingress 匹配）；tngui 反代转发时 `Host` 头填 `domain:port`（配置了端口时），非 80 端口如 https 的 443/30090 由此可达。`dst_filters.port` 留空时不写入该字段，表示不限定目标端口。
   - `ohttp` 常开且写死：每条 ingress 始终带 capi path 模型鉴权契约，
 `path_rewrites` 固定为 `[{ match_regex: "^/models/([^/]+)(?:/.*)?$", substitution: "/models/$1" }]`，
 `header_passthrough.request_headers` 固定为 `["authorization","x-api-key"]`。用户不可关闭，
@@ -244,8 +245,8 @@ SecureFlow 五步对应密态推理的保护过程：
   - ingress 编辑器按三行分组：行 1 反代对外绑定独占一行；行 2 远端类型与当前远端字段同一横排，远端类型切换即时生效、直接切换控件显示状态并把远端字段重置为该类型默认值，不弹窗确认；行 3 远程证明开关与 `verify` 同一横排。远程证明开关表示是否启用远程证明（ra）：开启（ra=on/`no_ra=false`）时显示 `verify`（`model` / `as_provider`，默认 `passport` / `tpm`），关闭（`no_ra=true`）时仅显示开关、不渲染 `verify`。
   - 不提供 `add_egress` 结构化控件——客户端不承载 egress。
   - 未结构化字段（RA `attest` 等）由全局原始 JSON 视图兜底。
-- 原始 JSON：直接编辑整份配置，点击“应用回填表单”后同步到结构化控件；非法 JSON 不破坏表单状态。
-- 导入/导出 JSON：通过原生文件对话框导入或导出配置；导入会丢弃文件中的 `add_egress`、ingress 的自定义 `ohttp`（由锁定值替代），且仅接受 `mapping` / `http_proxy` 形态的 ingress（其余形态被丢弃并提示）。
+- 原始 JSON：直接编辑整份配置，点击“应用回填表单”后同步到结构化控件；非法 JSON 或非法端口不会破坏表单状态。
+- 导入/导出 JSON：通过原生文件对话框导入或导出配置；导入会丢弃文件中的 `add_egress`、ingress 的自定义 `ohttp`（由锁定值替代），且仅接受 `mapping` / `http_proxy` 形态的 ingress（其余形态被丢弃并提示）。显式 `port: 0` 或越界端口会被拒绝；`http_proxy` 删除 `port` 字段则表示不限定目标端口。
 
 ### 5.4 客户端信息
 

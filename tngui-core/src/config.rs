@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 /// 回环地址。控制面强制绑定于此，避免无鉴权接口暴露到外部网卡。
 const LOCALHOST: &str = "127.0.0.1";
 
-/// 反代对外绑定端口的默认值（前端 `formspec.DEFAULT_LISTEN_PORT` 的后端镜像；仅当用户配置
-/// 不含 `tngui_outward.port` 时回退——正常路径前端总会显式写入）。
-const DEFAULT_OUTWARD_PORT: u16 = 9443;
+/// 用户可编辑服务端口的有效整数域。前端同名 `PORT_MIN/PORT_MAX` 保持一致。
+const PORT_MIN: u64 = 1;
+const PORT_MAX: u64 = 65535;
 
 /// 管控面由 tngui 自管、端口不对用户暴露：端口由 `pick_free_ports` 批取（绑定
 /// `127.0.0.1:0` 占住再放）后交给启动流程注入传给 tng 的配置。该端口随后由 `PortCell`
@@ -63,15 +63,142 @@ impl fmt::Display for PrepareError {
 
 impl std::error::Error for PrepareError {}
 
-/// 校验用户侧配置：仅 JSON 解析 + 根对象校验。不要求、不校验
+/// 校验用户侧配置：JSON 解析 + 根对象 + 用户端口校验。不要求、不校验
 /// `control_interface.restful`——管控面由 tngui 在启动时注入（见 `prepare_config`）。
 /// 供 `save_config` 持久化"不含 restful"的用户侧配置。
 pub fn validate_user_config(user_json: &str) -> Result<Value, PrepareError> {
     let v: Value = serde_json::from_str(user_json).map_err(PrepareError::InvalidJson)?;
-    if !v.is_object() {
+    let root = if v.is_object() {
+        v.as_object().expect("checked above")
+    } else {
         return Err(PrepareError::RootNotObject);
-    }
+    };
+    validate_user_ports(root)?;
     Ok(v)
+}
+
+/// 校验用户侧三类可编辑端口：outward 必填、mapping out 必填、http_proxy dst_filters 可选。
+/// 该函数供保存/导入/拉起前共用，保证高级 JSON 绕过 UI 也不能产生非法端口。
+fn validate_user_ports(root: &serde_json::Map<String, Value>) -> Result<(), PrepareError> {
+    let Some(entries) = root.get("add_ingress").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for (i, entry) in entries.iter().enumerate() {
+        let at = |field: &str| format!("add_ingress[{i}].{field}");
+        let obj = entry.as_object();
+
+        // 反代对外端口是 tngui 自身就直接绑定的必填端口；缺失不再回退默认。
+        match obj.and_then(|o| o.get("tngui_outward")) {
+            Some(job) => required_port(job.get("port"), &at("tngui_outward.port"))?,
+            None => {
+                return Err(
+                    PortError::new(at("tngui_outward.port"), PortErrorKind::Missing).into(),
+                );
+            }
+        }
+
+        if let Some(m) = obj
+            .and_then(|o| o.get("mapping"))
+            .and_then(Value::as_object)
+        {
+            if let Some(rules) = m.get("rules").and_then(Value::as_array) {
+                for (j, rule) in rules.iter().enumerate() {
+                    if let Some(out) = rule.get("out").and_then(Value::as_object) {
+                        required_port(
+                            out.get("port"),
+                            &at(&format!("mapping.rules[{j}].out.port")),
+                        )?;
+                    } else {
+                        return Err(PortError::new(
+                            at(&format!("mapping.rules[{j}].out.port")),
+                            PortErrorKind::Missing,
+                        )
+                        .into());
+                    }
+                }
+            } else if let Some(out) = m.get("out").and_then(Value::as_object) {
+                required_port(out.get("port"), &at("mapping.out.port"))?;
+            } else {
+                return Err(PortError::new(at("mapping.out.port"), PortErrorKind::Missing).into());
+            }
+        }
+
+        if let Some(h) = obj
+            .and_then(|o| o.get("http_proxy"))
+            .and_then(Value::as_object)
+        {
+            if let Some(filters) = h.get("dst_filters") {
+                if let Some(arr) = filters.as_array() {
+                    for (j, filter) in arr.iter().enumerate() {
+                        if let Some(f) = filter.as_object() {
+                            optional_port(
+                                f.get("port"),
+                                &at(&format!("http_proxy.dst_filters[{j}].port")),
+                            )?;
+                        }
+                    }
+                } else if let Some(f) = filters.as_object() {
+                    optional_port(f.get("port"), &at("http_proxy.dst_filters[0].port"))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+enum PortErrorKind {
+    Missing,
+    Invalid,
+}
+
+struct PortError {
+    location: String,
+    kind: PortErrorKind,
+}
+
+impl PortError {
+    fn new(location: String, kind: PortErrorKind) -> Self {
+        Self { location, kind }
+    }
+}
+
+impl From<PortError> for PrepareError {
+    fn from(e: PortError) -> Self {
+        PrepareError::IngressInvalid(match e.kind {
+            PortErrorKind::Missing => format!(
+                "{} 缺失（须为 {}~{} 的整数端口）",
+                e.location, PORT_MIN, PORT_MAX
+            ),
+            PortErrorKind::Invalid => {
+                format!("{} 须为 {}~{} 的整数端口", e.location, PORT_MIN, PORT_MAX)
+            }
+        })
+    }
+}
+
+fn required_port(value: Option<&Value>, at: &str) -> Result<(), PrepareError> {
+    let Some(value) = value else {
+        return Err(PortError::new(at.to_string(), PortErrorKind::Missing).into());
+    };
+    valid_port(value, at)
+}
+
+fn optional_port(value: Option<&Value>, at: &str) -> Result<(), PrepareError> {
+    if value.is_none() {
+        return Ok(());
+    }
+    valid_port(value.expect("checked Some"), at)
+}
+
+fn valid_port(value: &Value, at: &str) -> Result<(), PrepareError> {
+    let ok = value
+        .as_u64()
+        .is_some_and(|n| (PORT_MIN..=PORT_MAX).contains(&n));
+    if ok {
+        Ok(())
+    } else {
+        Err(PortError::new(at.to_string(), PortErrorKind::Invalid).into())
+    }
 }
 
 /// 在 `validate_user_config` 基础上注入/覆盖
@@ -153,7 +280,7 @@ pub fn prepare_launch(
 }
 
 /// 处理一条 ingress 的反代对外绑定与内部本地监听注入：
-/// - 读 `tngui_outward`（缺失用默认 `127.0.0.1` + `DEFAULT_OUTWARD_PORT`），校验 host 仅
+/// - 读 `tngui_outward`（端口已由 `validate_user_ports` 保证存在且有效），校验 host 仅
 ///   为 `127.0.0.1`/`0.0.0.0`；
 /// - 选空闲回环端口作为 tng 内部 ingress 本地监听端口，注入 `in.host=127.0.0.1`+
 ///   `in.port=自动端口`（覆盖用户任何 host/port）、`http_proxy` 的 `proxy_listen` 同理；
@@ -198,11 +325,12 @@ fn read_outward(entry: &Value) -> (String, u16) {
         .filter(|s| !s.is_empty())
         .map(String::from)
         .unwrap_or_else(|| crate::proxy::BIND_LOCALHOST.to_string());
+    // 调用前 `validate_user_ports` 保证 outward 端口存在且有效。
     let port = o
         .and_then(|x| x.get("port"))
         .and_then(Value::as_u64)
         .map(|n| n as u16)
-        .unwrap_or(DEFAULT_OUTWARD_PORT);
+        .unwrap_or(0);
     (host, port)
 }
 
@@ -523,7 +651,7 @@ mod tests {
     fn prepare_preserves_control_interface_siblings_and_other_keys() {
         let src = r#"{
             "control_interface":{"restful":{"host":"0.0.0.0","port":12345},"ttrpc":{"path":"/tmp/x"}},
-            "add_ingress":[{"mapping":{"in":{"port":10001},"out":{"host":"127.0.0.1","port":30001}},"no_ra":true}]
+            "add_ingress":[{"mapping":{"in":{"port":10001},"out":{"host":"127.0.0.1","port":30001}},"no_ra":true,"tngui_outward":{"host":"127.0.0.1","port":9443}}]
         }"#;
         let v = prepare_config(src, 40010).unwrap();
         assert_eq!(v["control_interface"]["restful"]["host"], "127.0.0.1");
@@ -568,7 +696,7 @@ mod tests {
 
     #[test]
     fn prepare_drops_add_egress() {
-        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"0.0.0.0","port":1},"out":{"host":"1.1.1.1","port":2}}]},"no_ra":true}],"add_egress":[{"mapping":{"rules":[{"in":{"port":3},"out":{"host":"127.0.0.1","port":4}}]}}]}"#;
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"0.0.0.0","port":1},"out":{"host":"1.1.1.1","port":2}}]},"no_ra":true,"tngui_outward":{"host":"127.0.0.1","port":9443}}],"add_egress":[{"mapping":{"rules":[{"in":{"port":3},"out":{"host":"127.0.0.1","port":4}}]}}]}"#;
         let v = prepare_config(src, 40030).unwrap();
         assert!(v.get("add_egress").is_none(), "add_egress 应被丢弃");
         assert_eq!(v["control_interface"]["restful"]["port"], 40030);
@@ -576,7 +704,7 @@ mod tests {
 
     #[test]
     fn prepare_forces_mapping_listen_host_loopback() {
-        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"0.0.0.0","port":1},"out":{"host":"10.0.0.1","port":2}}]},"no_ra":true}]}"#;
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"0.0.0.0","port":1},"out":{"host":"10.0.0.1","port":2}}]},"no_ra":true,"tngui_outward":{"host":"127.0.0.1","port":9443}}]}"#;
         let v = prepare_config(src, 40031).unwrap();
         assert_eq!(
             v["add_ingress"][0]["mapping"]["rules"][0]["in"]["host"],
@@ -590,7 +718,7 @@ mod tests {
 
     #[test]
     fn prepare_forces_http_proxy_listen_host_loopback() {
-        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"10.0.0.1","port":18443},"dst_filters":[{"domain":"x.example.com","port":8443}]},"no_ra":true}]}"#;
+        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"10.0.0.1","port":18443},"dst_filters":[{"domain":"x.example.com","port":8443}]},"no_ra":true,"tngui_outward":{"host":"127.0.0.1","port":9443}}]}"#;
         let v = prepare_config(src, 40032).unwrap();
         assert_eq!(
             v["add_ingress"][0]["http_proxy"]["proxy_listen"]["host"],
@@ -610,7 +738,7 @@ mod tests {
     #[test]
     fn prepare_rejects_empty_mapping_out_host() {
         // 默认模板场景：out.host 留空 → tng 加载期 MappingDe 拒掉（host: Option<Ipv4Addr>）
-        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":18443},"out":{"host":"","port":10000}}]},"verify":{"model":"passport","as_provider":"tpm"},"ohttp":{"header_passthrough":{"request_headers":["authorization"]}}}]}"#;
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":18443},"out":{"host":"","port":10000}}]},"verify":{"model":"passport","as_provider":"tpm"},"ohttp":{"header_passthrough":{"request_headers":["authorization"]}},"tngui_outward":{"host":"127.0.0.1","port":9443}}]}"#;
         let err = prepare_config(src, 40050).unwrap_err();
         assert!(matches!(err, PrepareError::IngressInvalid(_)), "{err}");
         assert!(err.to_string().contains("out.host"), "{err}");
@@ -619,7 +747,7 @@ mod tests {
 
     #[test]
     fn prepare_rejects_non_ipv4_mapping_out_host() {
-        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"example.com","port":2}}]}}]}"#;
+        let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"example.com","port":2}}]},"tngui_outward":{"host":"127.0.0.1","port":9443}}]}"#;
         assert!(
             prepare_config(src, 40051)
                 .unwrap_err()
@@ -640,12 +768,12 @@ mod tests {
     #[test]
     fn prepare_accepts_valid_mapping_out_host_rules_and_legacy() {
         assert!(prepare_config(
-            r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]}}]}"#,
+            r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]},"tngui_outward":{"host":"127.0.0.1","port":9443}}]}"#,
             40053
         )
         .is_ok());
         assert!(prepare_config(
-            r#"{"add_ingress":[{"mapping":{"in":{"port":10001},"out":{"host":"127.0.0.1","port":30001}}}]}"#,
+            r#"{"add_ingress":[{"mapping":{"in":{"port":10001},"out":{"host":"127.0.0.1","port":30001}},"tngui_outward":{"host":"127.0.0.1","port":9443}}]}"#,
             40054
         )
         .is_ok());
@@ -654,7 +782,7 @@ mod tests {
     #[test]
     fn prepare_accepts_http_proxy_empty_domain() {
         // http_proxy 空 domain 也能加载（tng 接受）→ 不拦
-        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"127.0.0.1","port":18443},"dst_filters":[{"domain":""}]}}]}"#;
+        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{"host":"127.0.0.1","port":18443},"dst_filters":[{"domain":""}]},"tngui_outward":{"host":"127.0.0.1","port":9443}}]}"#;
         assert!(prepare_config(src, 40055).is_ok());
     }
 
@@ -717,13 +845,65 @@ mod tests {
     }
 
     #[test]
-    fn prepare_launch_default_outward_when_missing() {
-        // 用户配置不含 tngui_outward → 默认 (127.0.0.1, DEFAULT_OUTWARD_PORT=9443)
+    fn prepare_launch_rejects_missing_outward_port() {
+        // 用户配置不含 tngui_outward → 不静默回退；启动前明确报错。
         let src = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]}}]}"#;
         let ports = pick_free_ports(1).unwrap();
-        let (_v, routes) = prepare_launch(src, 40103, &ports).unwrap();
-        assert_eq!(routes[0].out_host, "127.0.0.1");
-        assert_eq!(routes[0].out_port, 9443);
+        let err = prepare_launch(src, 40103, &ports).unwrap_err();
+        assert!(err.to_string().contains("tngui_outward.port"), "{err}");
+    }
+
+    #[test]
+    fn validate_ports_rejects_required_zero_small_and_big_values() {
+        let zero_outward = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":2}}]},"tngui_outward":{"host":"127.0.0.1","port":0}}]}"#;
+        let err = validate_user_config(zero_outward).unwrap_err();
+        assert!(err.to_string().contains("tngui_outward.port"), "{err}");
+        assert!(err.to_string().contains("1~65535"), "{err}");
+
+        let big_mapping = r#"{"add_ingress":[{"mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":65536}}]},"tngui_outward":{"host":"127.0.0.1","port":9443}}]}"#;
+        let err = validate_user_config(big_mapping).unwrap_err();
+        assert!(
+            err.to_string().contains("mapping.rules[0].out.port"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("1~65535"), "{err}");
+    }
+
+    #[test]
+    fn validate_ports_accepts_boundaries_and_rejects_bad_number_types() {
+        let ok = r#"{"add_ingress":[{
+            "mapping":{"rules":[{"in":{"host":"127.0.0.1","port":1},"out":{"host":"10.0.0.1","port":65535}}]},
+            "http_proxy":{"proxy_listen":{},"dst_filters":[{"domain":"x.example.com","port":1},{"domain":"y.example.com"}]},
+            "tngui_outward":{"host":"127.0.0.1","port":65535}
+        }]}"#;
+        assert!(validate_user_config(ok).is_ok());
+
+        for port in [
+            serde_json::json!(5.2),
+            serde_json::json!(-1),
+            serde_json::Value::Null,
+            serde_json::json!("443"),
+        ] {
+            let src = serde_json::json!({
+                "add_ingress": [{
+                    "mapping": {"rules": [{"in": {}, "out": {"host": "10.0.0.1", "port": port}}]},
+                    "tngui_outward": {"host": "127.0.0.1", "port": 9443},
+                }],
+            })
+            .to_string();
+            let err = validate_user_config(&src).unwrap_err();
+            assert!(
+                err.to_string().contains("mapping.rules[0].out.port"),
+                "{port}: {err}"
+            );
+            assert!(err.to_string().contains("1~65535"), "{port}: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_ports_accepts_missing_http_proxy_port() {
+        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{},"dst_filters":[{"domain":"x.example.com"}]},"tngui_outward":{"host":"127.0.0.1","port":9443}}]}"#;
+        assert!(validate_user_config(src).is_ok());
     }
 
     #[test]

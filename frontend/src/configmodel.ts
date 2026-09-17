@@ -4,16 +4,17 @@
 //   tng 本地监听 host/port 不进用户序列化（in/proxy_listen 输出为空对象，由 tngui 启动时注入）；
 //   反代对外绑定作 tngui 侧 `tngui_outward` 与 add_ingress 平级 sibling 输出（不进 tng 的 mapping.in）。
 // - parse：丢弃 add_egress（warning）、丢弃 ingress 的 ohttp（用锁定值）、读 verify 回填、
-//   读 `tngui_outward` 回填 `entry.outward`（缺失用默认）；仅认 mapping/http_proxy 两种 ingress。
+//   读/校验 `tngui_outward.port`（必填有效 TCP 端口）；仅认 mapping/http_proxy 两种 ingress。
 // control_interface.restful 子段由 tngui 启动时注入（auto-manage-control-port），这里丢弃/不输出。
 import {
   ALL_MODES,
   DEFAULT_LISTEN_PORT,
-  DEFAULT_HTTP_PROXY_DST_PORT,
-  DEFAULT_MAPPING_OUT_PORT,
   DEFAULT_OUTWARD,
   DEFAULT_VERIFY,
   LOCKED_OHTTP,
+  PORT_MAX,
+  PORT_MIN,
+  isValidPort,
   type ConfigModel,
   type EntryModel,
   type IngressMode,
@@ -60,11 +61,12 @@ function mappingFields(fields: Record<string, unknown>): Record<string, unknown>
     | { in?: Record<string, unknown>; out?: Record<string, unknown> }
     | undefined;
   const outEp = first?.out ?? {};
+  // 不做默认回填：mapping out.port 必填；UI 清空时保留空值，启动前报错。
   return {
     rules: [
       {
         in: {},
-        out: { host: strOr(outEp.host, ""), port: numOr(outEp.port, DEFAULT_MAPPING_OUT_PORT) },
+        out: { host: strOr(outEp.host, ""), port: outEp.port ?? null },
       },
     ],
   };
@@ -91,8 +93,8 @@ function deriveHttpProxyTls(e: EntryModel): boolean {
 /** 序列化为 TNG 配置形状（内部模型 → 输出）：剥除 tng 本地监听 host/port（`in`/`proxy_listen`
  *  输出为空对象，由 tngui 启动注入）；http_proxy 的 `dst_filters` 输出为 tng 实际接受的数组
  *  `[{domain, port}]`——主机名仅含主机名（剥离 scheme 前缀）、端口走独立 `port` 字段，
- *  绝不把端口拼进 `domain`；端口为空（0/越界）时省略 `port`，tng 即 `port_match: None`
- *  （匹配任意端口）。 */
+ *  绝不把端口拼进 `domain`；目标端口留空（null/undefined）时省略 `port`，表示不限定。
+ *  显式非法值原样保留，供启动前校验报错，绝不静默改写。 */
 function serializeFields(mode: IngressMode, fields: Record<string, unknown>): Record<string, unknown> {
   if (mode === "mapping") return mappingFields(fields);
   const df = (fields.dst_filters ?? {}) as Record<string, unknown>;
@@ -100,7 +102,7 @@ function serializeFields(mode: IngressMode, fields: Record<string, unknown>): Re
   const domain = strOr(df.domain, "").replace(/^https?:\/\//i, "");
   const dst: Record<string, unknown> = { domain };
   const p = df.port;
-  if (typeof p === "number" && Number.isFinite(p) && p >= 1 && p <= 65535) dst.port = p;
+  if (p !== undefined && p !== null && p !== "") dst.port = p;
   return { proxy_listen: {}, dst_filters: [dst] };
 }
 
@@ -111,11 +113,12 @@ function normalizeFields(mode: IngressMode, fields: Record<string, unknown>): Re
   if (mode === "mapping") return mappingFields(fields);
   const dfRaw = fields.dst_filters;
   let domain = "";
-  let port = DEFAULT_HTTP_PROXY_DST_PORT;
+  // http_proxy 目标端口可选；JSON 中缺省或 UI 留空都表示不限定端口。
+  let port: number | null = null;
   const readFrom = (d: Record<string, unknown>): void => {
     domain = strOr(d.domain, "");
     const pp = d.port;
-    if (typeof pp === "number" && Number.isFinite(pp)) port = pp;
+    port = isValidPort(pp) ? pp : null;
   };
   if (Array.isArray(dfRaw) && dfRaw.length > 0 && typeof dfRaw[0] === "object" && dfRaw[0] !== null) {
     readFrom(dfRaw[0] as Record<string, unknown>);
@@ -221,6 +224,8 @@ function parseEntry(
     if (Array.isArray(dfRaw)) dfRaw.forEach(writeDom);
     else writeDom(dfRaw);
   }
+  const portError = validateEntryPorts(mode, fieldsRaw, at);
+  if (portError) return { error: portError };
   const fields = normalizeFields(mode, fieldsRaw);
 
   let no_ra: boolean;
@@ -234,8 +239,10 @@ function parseEntry(
     verify = undefined;
   }
 
-  // 反代对外绑定：tngui 侧 `tngui_outward`（缺失/非法用默认）
-  const outward = parseOutward(e.tngui_outward);
+  // 反代对外绑定：tngui 侧 `tngui_outward`（端口必填有效；缺失不静默回退）
+  const outwardResult = parseOutward(e.tngui_outward, at);
+  if (outwardResult.error) return { error: outwardResult.error };
+  const outward = outwardResult.outward!;
 
   const extra: Record<string, unknown> = { ...e };
   delete extra[mode];
@@ -247,19 +254,64 @@ function parseEntry(
   return { model: { mode, fields, no_ra, verify, outward, tls, extra } };
 }
 
-/** 解析 `tngui_outward`：host 仅认 127.0.0.1/0.0.0.0，port 须为数字；缺失/非法用 `DEFAULT_OUTWARD`。 */
-function parseOutward(raw: unknown): OutwardBind {
-  if (raw && typeof raw === "object") {
-    const o = raw as Record<string, unknown>;
-    const host = o.host === "0.0.0.0" ? "0.0.0.0" : o.host === "127.0.0.1" ? "127.0.0.1" : DEFAULT_OUTWARD.host;
-    const port = typeof o.port === "number" && Number.isFinite(o.port) ? o.port : DEFAULT_OUTWARD.port;
-    return { host, port: port as OutwardBind["port"] };
+/** 校验一条 ingress 中用户可编辑端口；只关注端口，不改变 host/结构语义。 */
+function validateEntryPorts(mode: IngressMode, fields: Record<string, unknown>, at: string): string | undefined {
+  if (mode === "mapping") {
+    const m = fields;
+    if (Array.isArray(m.rules)) {
+      const rules = m.rules as unknown[];
+      for (let j = 0; j < rules.length; j++) {
+        const r = rules[j];
+        if (!r || typeof r !== "object") continue;
+        const out = (r as Record<string, unknown>).out;
+        if (!out || typeof out !== "object") continue;
+        const error = requiredPortError((out as Record<string, unknown>).port, `${at}.mapping.rules[${j}].out.port`);
+        if (error) return error;
+      }
+    } else if (m.out && typeof m.out === "object") {
+      const error = requiredPortError((m.out as Record<string, unknown>).port, `${at}.mapping.out.port`);
+      if (error) return error;
+    }
+    return undefined;
   }
-  return { ...DEFAULT_OUTWARD };
+  const dfs = fields.dst_filters;
+  const check = (d: unknown, j: number): string | undefined => {
+    if (!d || typeof d !== "object") return undefined;
+    return optionalPortError((d as Record<string, unknown>).port, `${at}.http_proxy.dst_filters[${j}].port`);
+  };
+  if (Array.isArray(dfs)) {
+    for (let j = 0; j < (dfs as unknown[]).length; j++) {
+      const error = check((dfs as unknown[])[j], j);
+      if (error) return error;
+    }
+    return undefined;
+  }
+  return check(dfs, 0);
 }
 
-function numOr(v: unknown, def: number): number {
-  return typeof v === "number" && Number.isFinite(v) ? v : def;
+function requiredPortError(value: unknown, location: string): string | undefined {
+  if (value === undefined) return `${location} 缺失（须为 ${PORT_MIN}~${PORT_MAX} 的整数端口）`;
+  return portError(value, location);
+}
+
+function optionalPortError(value: unknown, location: string): string | undefined {
+  if (value === undefined) return undefined;
+  return portError(value, location);
+}
+
+function portError(value: unknown, location: string): string | undefined {
+  if (isValidPort(value)) return undefined;
+  return `${location} 须为 ${PORT_MIN}~${PORT_MAX} 的整数端口`;
+}
+
+/** 解析 `tngui_outward`：host 仅认 127.0.0.1/0.0.0.0，port 必须为 1~65535 整数；缺失/非法不静默回退。 */
+function parseOutward(raw: unknown, at: string): { outward?: OutwardBind; error?: string } {
+  const location = `${at}.tngui_outward.port`;
+  if (!raw || typeof raw !== "object") return { error: `${location} 缺失（须为 ${PORT_MIN}~${PORT_MAX} 的整数端口）` };
+  const o = raw as Record<string, unknown>;
+  const host = o.host === "0.0.0.0" ? "0.0.0.0" : o.host === "127.0.0.1" ? "127.0.0.1" : DEFAULT_OUTWARD.host;
+  if (!isValidPort(o.port)) return { error: `${location} 须为 ${PORT_MIN}~${PORT_MAX} 的整数端口` };
+  return { outward: { host, port: o.port } };
 }
 function strOr(v: unknown, def: string): string {
   return typeof v === "string" ? v : def;

@@ -19,6 +19,14 @@ export const DEFAULT_MAPPING_OUT_PORT = 80;
 /** http_proxy 内置默认远端目标端口。 */
 export const DEFAULT_HTTP_PROXY_DST_PORT = 443;
 
+/** 用户可编辑服务端口的有效整数域：`1~65535`。`0` 不是合法端口。 */
+export const PORT_MIN = 1;
+export const PORT_MAX = 65535;
+
+export function isValidPort(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= PORT_MIN && value <= PORT_MAX;
+}
+
 /** 客户端走 OHTTP 时透传的 credential 请求头——写死，用户不可改。 */
 export const HEADER_PASSTHROUGH = ["authorization", "x-api-key"] as const;
 /** capi path 模型鉴权契约要求的固定 TNG outer path rewrite。 */
@@ -45,7 +53,8 @@ export const DEFAULT_VERIFY: VerifyConfig = { model: "passport", as_provider: "t
  */
 export interface OutwardBind {
   host: "127.0.0.1" | "0.0.0.0";
-  port: number;
+  /** 必填端口；UI 清空后可为空，启动前须校验。 */
+  port: number | null;
 }
 /** 反代对外绑定默认值（仅本机回环 + 内置默认端口）。 */
 export const DEFAULT_OUTWARD: OutwardBind = { host: "127.0.0.1", port: DEFAULT_LISTEN_PORT };
@@ -53,7 +62,8 @@ export const DEFAULT_OUTWARD: OutwardBind = { host: "127.0.0.1", port: DEFAULT_L
 // —— 嵌套形状（serialize/parse 用，extra 字段仍可经 entry extra 容器往返） ——
 export interface RuleEndpoint {
   host: string;
-  port: number;
+  /** mapping 远端为必填端口；编辑中可为空，启动前须校验。 */
+  port: number | null;
 }
 export interface MappingRule {
   in: RuleEndpoint;
@@ -65,7 +75,8 @@ export interface ProxyListen {
 }
 export interface DstFilters {
   domain: string;
-  port: number;
+  /** 可选端口：留空/null 表示不限定目标端口。 */
+  port: number | null;
 }
 
 /** 一条 ingress 条目的模型。fields 为各模式的嵌套字段；verify 仅在 no_ra=false 时有效；

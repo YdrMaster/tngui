@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { defaultFields, defaultModel, isRemoteConfigured, DEFAULT_HTTP_PROXY_DST_PORT, DEFAULT_MAPPING_OUT_PORT, type ConfigModel, type EntryModel } from "./formspec";
+import { defaultFields, defaultModel, isRemoteConfigured, DEFAULT_HTTP_PROXY_DST_PORT, DEFAULT_MAPPING_OUT_PORT, PORT_MAX, PORT_MIN, isValidPort, type ConfigModel, type EntryModel } from "./formspec";
 
 function setOutHost(m: ConfigModel, host: string): void {
   const e = m.add_ingress[0];
@@ -55,7 +55,7 @@ describe("isRemoteConfigured（镜像后端 validate_ingress_for_launch）", () 
       add_ingress: [
         {
           mode: "http_proxy",
-          fields: { proxy_listen: { host: "127.0.0.1", port: 18443 }, dst_filters: { domain: "", port: 0 } },
+          fields: { proxy_listen: { host: "127.0.0.1", port: 18443 }, dst_filters: { domain: "", port: null } },
           no_ra: true,
           outward: { host: "127.0.0.1", port: 18443 },
           extra: {},
@@ -76,6 +76,26 @@ describe("isRemoteConfigured（镜像后端 validate_ingress_for_launch）", () 
     };
     m.add_ingress.push(e2);
     expect(isRemoteConfigured(m)).toBe(false);
+  });
+});
+
+describe("端口有效性判定", () => {
+  it("接受 1~65535 整数端口", () => {
+    expect(PORT_MIN).toBe(1);
+    expect(PORT_MAX).toBe(65535);
+    expect(isValidPort(1)).toBe(true);
+    expect(isValidPort(65535)).toBe(true);
+    expect(isValidPort(80)).toBe(true);
+  });
+
+  it("拒绝 0、越界、小数和非数字端口", () => {
+    expect(isValidPort(0)).toBe(false);
+    expect(isValidPort(65536)).toBe(false);
+    expect(isValidPort(1.2)).toBe(false);
+    expect(isValidPort(-1)).toBe(false);
+    expect(isValidPort(null)).toBe(false);
+    expect(isValidPort(undefined)).toBe(false);
+    expect(isValidPort("443")).toBe(false);
   });
 });
 

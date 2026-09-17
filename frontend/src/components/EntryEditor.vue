@@ -2,6 +2,8 @@
 import { computed } from "vue";
 import {
   INGRESS_FIELDS,
+  PORT_MAX,
+  PORT_MIN,
   defaultFields,
   DEFAULT_VERIFY,
   DEFAULT_MAPPING_OUT_PORT,
@@ -41,11 +43,11 @@ function ensureDstFilters() {
     const d0 = typeof df[0] === "object" && df[0] !== null ? (df[0] as Record<string, any>) : {};
     props.entry.fields.dst_filters = {
       domain: typeof d0.domain === "string" ? d0.domain : "",
-      port: typeof d0.port === "number" ? d0.port : 0,
+      port: typeof d0.port === "number" ? d0.port : null,
     };
     return;
   }
-  if (typeof df !== "object" || df === null) props.entry.fields.dst_filters = { domain: "https://", port: 0 };
+  if (typeof df !== "object" || df === null) props.entry.fields.dst_filters = { domain: "https://", port: null };
 }
 
 // 锁定形态的嵌套子对象（供 FieldRenderer 绑定 remote / verify）
@@ -103,10 +105,11 @@ function onRemTypeChange(val: string | number) {
           />
           <a-input-number
             v-model:value="entry.outward.port"
-            :min="1"
-            :max="65535"
+            :min="PORT_MIN"
+            :max="PORT_MAX"
+            :precision="0"
             style="width:112px"
-            placeholder="端口"
+            placeholder="端口（必填）"
           />
           <span style="color:var(--text-secondary);font-size:12px">{{
             outwardExternal ? "对外网卡（0.0.0.0，须在受信网络下使用）" : "仅本机访问（127.0.0.1）"
