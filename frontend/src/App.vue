@@ -64,14 +64,16 @@ async function pollRuntime() {
 }
 
 async function beforeLeaveSettings() {
-  const { isDirty, markSaved, serializeCurrent } = useTngConfig();
+  const { isDirty, markSaved, serializeCurrent, currentRvsUrl } = useTngConfig();
   await runBeforeLeaveSettings({
     isDirty,
     serializeCurrent,
+    currentRvsUrl,
     markSaved,
     saveConfig: (configJson: string) => invoke("save_config", { configJson }),
     getStatus: () => invoke<{ reachable: boolean }>("get_status"),
-    launchTng: (configJson: string) => invoke("launch_tng", { configJson }),
+    launchTng: (configJson: string, rvsUrl: string) =>
+      invoke("launch_tng", { configJson, rvsUrl }),
     showError: (text: string) => message.error(text),
   });
 }
@@ -88,10 +90,10 @@ onMounted(async () => {
   unlistenClose = await getCurrentWindow().onCloseRequested(async (event) => {
     // 阻止默认关闭，等后端原子写入完成；失败也继续关闭。
     event.preventDefault();
-    const { serializeCurrent } = useTngConfig();
+    const { serializeCurrent, currentRvsUrl } = useTngConfig();
     const { apiKey } = useInferenceConfig();
     await flushSettingsAndClose(
-      buildSettingsCacheSnapshot(serializeCurrent(), apiKey.value),
+      buildSettingsCacheSnapshot(serializeCurrent(), apiKey.value, currentRvsUrl()),
       flushSettingsCache,
       () => getCurrentWindow().destroy(),
     );
@@ -100,6 +102,7 @@ onMounted(async () => {
   // 所有视图都必须等待设置初始化完成，避免用户先进入设置看到默认值。
   await bootstrapSettings(loadSettingsCache, {
     initialize: useTngConfig().initialize,
+    initializeRvsUrl: useTngConfig().initializeRvsUrl,
     initializeApiKey: useInferenceConfig().initializeApiKey,
   });
   settingsReady.value = true;

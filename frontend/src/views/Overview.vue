@@ -55,7 +55,7 @@ async function onToggle() {
     }
   } else {
     try {
-      await launchTng(serializeCurrent());
+      await launchTng(serializeCurrent(), model.value.rvsUrl);
       message.success("已启动 tng");
     } catch (e) {
       message.error("启动失败: " + String(e));

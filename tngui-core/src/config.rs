@@ -63,6 +63,19 @@ impl fmt::Display for PrepareError {
 
 impl std::error::Error for PrepareError {}
 
+/// 前端 GUI 侧全局 RVS 地址字段。仅属于用户/设置态，不进 tng 配置 schema。
+pub const TNGUI_RVS_URL_FIELD: &str = "tngui_rvs_url";
+
+/// 剥离 GUI 侧 RVS 字段，得到可加载为 tng 配置的数据。除 `tngui_rvs_url` 外，
+/// 与 `validate_user_config` 的用户侧校验保持一致。
+pub fn sanitize_user_config_for_tng(user_json: &str) -> Result<Value, PrepareError> {
+    let mut v = validate_user_config(user_json)?;
+    if let Some(root) = v.as_object_mut() {
+        root.remove(TNGUI_RVS_URL_FIELD);
+    }
+    Ok(v)
+}
+
 /// 校验用户侧配置：JSON 解析 + 根对象 + 用户端口校验。不要求、不校验
 /// `control_interface.restful`——管控面由 tngui 在启动时注入（见 `prepare_config`）。
 /// 供 `save_config` 持久化"不含 restful"的用户侧配置。
@@ -237,6 +250,9 @@ pub fn prepare_launch(
         .as_object_mut()
         .expect("validate_user_config 保证根为对象");
     let ra_required = ra_required(root);
+
+    // RVS 地址通过 RATS_TEE_VERIFIER_URL 注入子进程；tng-runtime.json 不保留 GUI 侧字段。
+    root.remove(TNGUI_RVS_URL_FIELD);
 
     // control_interface.restful 注入
     let ci = root
@@ -982,6 +998,30 @@ mod tests {
         let ports = pick_free_ports(3).unwrap();
         let (_, _, ra_required) = prepare_launch(src, 40203, &ports).unwrap();
         assert!(ra_required, "任一条 RA 开即须 RA 版（混合场景）");
+    }
+
+    #[test]
+    fn prepare_launch_strips_tngui_rvs_url_for_tng_schema() {
+        let src = r#"{"tngui_rvs_url":"https://private-rvs.example.com:8443","add_ingress":[{"mapping":{"rules":[{"in":{},"out":{"host":"10.0.0.1","port":2}}]},"verify":{"model":"passport","as_provider":"tpm"},"ohttp":{"header_passthrough":{"request_headers":["authorization"]}},"tngui_outward":{"host":"127.0.0.1","port":9443}}]}"#;
+        let ports = pick_free_ports(1).unwrap();
+        let (v, _, ra_required) = prepare_launch(src, 40206, &ports).unwrap();
+        assert!(ra_required);
+        assert!(
+            v.get(TNGUI_RVS_URL_FIELD).is_none(),
+            "tng-runtime.json 不允许携带 GUI 侧 RVS 字段"
+        );
+        assert_eq!(
+            v["add_ingress"][0]["verify"]["model"], "passport",
+            "严格 schema 样本的既有 TNG 字段应原样保留"
+        );
+    }
+
+    #[test]
+    fn sanitize_user_config_for_tng_strips_only_gui_rvs_field() {
+        let src = r#"{"tngui_rvs_url":"https://private-rvs.example.com:8443","add_ingress":[],"custom":1}"#;
+        let v = sanitize_user_config_for_tng(src).unwrap();
+        assert!(v.get(TNGUI_RVS_URL_FIELD).is_none());
+        assert_eq!(v["custom"], 1);
     }
 
     #[test]

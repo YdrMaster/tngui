@@ -9,6 +9,7 @@ import {
   DEFAULT_VERIFY,
   INGRESS_MODES,
   PORT_MAX,
+  DEFAULT_RVS_URL,
   type ConfigModel,
   type EntryModel,
 } from "./formspec";
@@ -17,6 +18,7 @@ function mk(over: Partial<ConfigModel> = {}): ConfigModel {
   return {
     control_interface_extra: {},
     add_ingress: [],
+    rvsUrl: DEFAULT_RVS_URL,
     extra: {},
     ...over,
   };
@@ -36,6 +38,16 @@ describe("默认模板", () => {
     expect(ing.ohttp).toBeDefined();
     expect((ing.ohttp as { path_rewrites: unknown[] }).path_rewrites).toEqual(OHTTP_PATH_REWRITES);
     expect((ing.ohttp as { header_passthrough: { request_headers: string[] } }).header_passthrough.request_headers).toEqual([...HEADER_PASSTHROUGH]);
+  });
+
+  it("序列化包含 GUI 侧 RVS 字段且能往返恢复，不落入顶层 extra", () => {
+    const m = mk({ rvsUrl: "https://private-rvs.example.com:8443" });
+    const o = JSON.parse(serialize(m)) as Record<string, unknown>;
+    expect(o.tngui_rvs_url).toBe("https://private-rvs.example.com:8443");
+    const r = parse(serialize(m));
+    expect(r.error).toBeUndefined();
+    expect(r.model!.rvsUrl).toBe("https://private-rvs.example.com:8443");
+    expect(r.model!.extra.tngui_rvs_url).toBeUndefined();
   });
 
   it("默认模板往返：mode=mapping、no_ra=false、verify 为默认值、extra 空", () => {

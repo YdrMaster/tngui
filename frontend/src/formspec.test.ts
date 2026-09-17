@@ -1,5 +1,18 @@
 import { describe, it, expect } from "vitest";
-import { defaultFields, defaultModel, isRemoteConfigured, DEFAULT_HTTP_PROXY_DST_PORT, DEFAULT_MAPPING_OUT_PORT, PORT_MAX, PORT_MIN, isValidPort, type ConfigModel, type EntryModel } from "./formspec";
+import {
+  DEFAULT_RVS_URL,
+  defaultFields,
+  defaultModel,
+  isRemoteAttestationEnabled,
+  isRemoteConfigured,
+  DEFAULT_HTTP_PROXY_DST_PORT,
+  DEFAULT_MAPPING_OUT_PORT,
+  PORT_MAX,
+  PORT_MIN,
+  isValidPort,
+  type ConfigModel,
+  type EntryModel,
+} from "./formspec";
 
 function setOutHost(m: ConfigModel, host: string): void {
   const e = m.add_ingress[0];
@@ -61,6 +74,7 @@ describe("isRemoteConfigured（镜像后端 validate_ingress_for_launch）", () 
           extra: {},
         },
       ],
+      rvsUrl: DEFAULT_RVS_URL,
       extra: {},
     };
     expect(isRemoteConfigured(m)).toBe(true);
@@ -114,5 +128,39 @@ describe("ingress 默认远端端口", () => {
     expect(mapping.rules[0].out.port).toBe(80);
     expect(proxy.dst_filters.port).toBe(443);
     expect(DEFAULT_HTTP_PROXY_DST_PORT).toBe(443);
+  });
+});
+
+describe("远程证明服务配置显示条件", () => {
+  it("任意 ingress 开启 RA 时显示配置块", () => {
+    const m = defaultModel();
+    expect(isRemoteAttestationEnabled(m)).toBe(true);
+    m.add_ingress[0].no_ra = false;
+    m.add_ingress.push({
+      mode: "mapping",
+      fields: defaultFields("mapping"),
+      no_ra: true,
+      outward: { host: "127.0.0.1", port: 9444 },
+      extra: {},
+    });
+    expect(isRemoteAttestationEnabled(m)).toBe(true);
+  });
+
+  it("全部 ingress 关闭 RA 时不显示配置块", () => {
+    const m = defaultModel();
+    m.add_ingress[0].no_ra = true;
+    m.add_ingress.push({
+      mode: "mapping",
+      fields: defaultFields("mapping"),
+      no_ra: true,
+      outward: { host: "127.0.0.1", port: 9444 },
+      extra: {},
+    });
+    expect(isRemoteAttestationEnabled(m)).toBe(false);
+  });
+
+  it("默认 RVS 地址与 TNG 内置默认一致", () => {
+    expect(DEFAULT_RVS_URL).toBe("https://rvs.tsk.com:9443");
+    expect(defaultModel().rvsUrl).toBe(DEFAULT_RVS_URL);
   });
 });

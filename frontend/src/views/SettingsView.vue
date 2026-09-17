@@ -4,13 +4,14 @@ import { message } from "ant-design-vue";
 import {
   ApiOutlined, ExperimentOutlined, ImportOutlined, ExportOutlined,
 } from "@ant-design/icons-vue";
-import { defaultFields, DEFAULT_OUTWARD } from "../formspec";
+import { defaultFields, DEFAULT_OUTWARD, isRemoteAttestationEnabled } from "../formspec";
 import { parse } from "../configmodel";
 import {
   pickLogPath, exportTngLog, pickImportPath, pickExportPath,
   importConfig, exportConfig, appInfo,
 } from "../tauri";
 import EntryEditor from "../components/EntryEditor.vue";
+import RemoteAttestationServiceConfig from "../components/RemoteAttestationServiceConfig.vue";
 import IngressStateCard from "../components/IngressStateCard.vue";
 import { useTngConfig } from "../composables/useTngConfig";
 import { useIngressState } from "../composables/useIngressState";
@@ -21,6 +22,7 @@ const { model, isDirty, markSaved, serializeCurrent } = useTngConfig();
 const { apiKey } = useInferenceConfig();
 const { states } = useIngressState();
 const gatewayViews = computed(() => deriveGatewayStateViews(states.value));
+const showRemoteAttestationServiceConfig = computed(() => isRemoteAttestationEnabled(model.value));
 const activeTab = ref<"form" | "raw">("form");
 const rawEditing = ref(serializeCurrent());
 const exportingLog = ref(false);
@@ -177,6 +179,11 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
         <a-textarea v-model:value="rawEditing" :rows="18" class="json-editor" autocapitalize="off" autocorrect="off" spellcheck="false" />
       </a-tab-pane>
     </a-tabs>
+
+    <RemoteAttestationServiceConfig
+      v-model:value="model.rvsUrl"
+      :visible="showRemoteAttestationServiceConfig"
+    />
 
     <!-- 客户端信息 -->
     <a-card title="客户端信息" class="client-info-card">

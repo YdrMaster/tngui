@@ -31,8 +31,8 @@ export async function proxyEndpoint(): Promise<ProxyEndpoint[]> {
   return invoke<ProxyEndpoint[]>("proxy_endpoint");
 }
 
-export async function launchTng(configJson: string): Promise<number> {
-  return invoke<number>("launch_tng", { configJson });
+export async function launchTng(configJson: string, rvsUrl: string): Promise<number> {
+  return invoke<number>("launch_tng", { configJson, rvsUrl });
 }
 
 /** 客户端信息：版本（编译期 CARGO_PKG_VERSION）与操作系统（编译期平台常量）。 */
@@ -90,6 +90,7 @@ export interface SettingsCachePayload {
   tng: {
     configJson: string;
     apiKey: string;
+    rvsUrl: string;
   };
 }
 

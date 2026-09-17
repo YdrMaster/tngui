@@ -7,6 +7,9 @@
 /** 回环地址：ingress 本地监听 host 由前后端共同强制为回环（与 control_interface.restful 同法）。 */
 export const LOCALHOST = "127.0.0.1";
 
+/** RVS 默认地址。仅首次启动、缓存缺失/无效或 RVS 值非法时使用，绝不覆盖有效缓存值。 */
+export const DEFAULT_RVS_URL = "https://rvs.tsk.com:9443";
+
 export type IngressMode = "mapping" | "http_proxy";
 export const INGRESS_MODES: IngressMode[] = ["mapping", "http_proxy"];
 /** parse 识别的 ingress 模式 tag（其余 tag 视为不支持，见 configmodel.parseEntry）。 */
@@ -97,6 +100,8 @@ export interface EntryModel {
 export interface ConfigModel {
   control_interface_extra: Record<string, unknown>;
   add_ingress: EntryModel[];
+  /** GUI 侧全局 RVS 地址。序列化为用户态 `tngui_rvs_url`，启动 tng 前由后端剥离。 */
+  rvsUrl: string;
   extra: Record<string, unknown>;
 }
 
@@ -154,8 +159,14 @@ export function defaultModel(): ConfigModel {
         extra: {},
       },
     ],
+    rvsUrl: DEFAULT_RVS_URL,
     extra: {},
   };
+}
+
+/** 任意 ingress 开启远程证明时显示“远程证明服务配置”。 */
+export function isRemoteAttestationEnabled(model: ConfigModel): boolean {
+  return model.add_ingress.some((entry) => !entry.no_ra);
 }
 
 

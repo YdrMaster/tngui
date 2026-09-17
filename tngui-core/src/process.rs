@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::{Child, Command as TokioCommand};
 
 use crate::log::BoundedLog;
 
@@ -48,7 +48,7 @@ pub struct ManagedChild {
 /// 子进程自成一组（pgid == pid），便于整组终止：
 /// Unix 设 process_group(0)；Windows 设 CREATE_NEW_PROCESS_GROUP（组长 pid 即组 id）。
 pub async fn spawn_managed(
-    mut command: Command,
+    mut command: TokioCommand,
     log: Arc<Mutex<BoundedLog>>,
 ) -> io::Result<ManagedChild> {
     #[cfg(unix)]
@@ -262,26 +262,58 @@ impl TngSupervisor {
     fn ensure_executable(&self, _bin: &str) {}
 
     /// 构造 `tng launch -c <config_file>` 命令（不传 --log-file，使 tng 日志走 stdout →
-    /// 被 get_output 捕获 → UI 可见；可单测）。
-    fn build_command(&self, bin: &str, config_file: &Path) -> Command {
-        let mut c = Command::new(bin);
+    /// 被 get_output 捕获 → UI 可见；可单测）。RA 启动必须携带 RVS 地址；
+    /// 非 RA 启动不得注入 `RATS_TEE_VERIFIER_URL`。
+    fn build_command(
+        &self,
+        bin: &str,
+        config_file: &Path,
+        ra_required: bool,
+        rvs_url: Option<&str>,
+    ) -> std::process::Command {
+        let mut c = std::process::Command::new(bin);
         c.arg("launch")
             .arg("-c")
             .arg(config_file)
             .env("RUST_LOG", &self.rust_log);
+        if ra_required {
+            let rvs_url = rvs_url.expect("launch 已保证 RA 启动携带 RVS 地址");
+            c.env("RATS_TEE_VERIFIER_URL", rvs_url);
+        }
         c
     }
 
     /// 先杀旧进程（若有），再拉起新进程。`ra_required` 决定用哪套 bin（远程证明
-    /// 开 → RA 版；关 → 普通版）。返回新子进程 pid。
-    pub async fn launch(&mut self, config_file: &Path, ra_required: bool) -> io::Result<u32> {
+    /// 开 → RA 版；关 → 普通版）。RA 启动必须携带非空 RVS 地址；非 RA 启动忽略该值
+    /// 且不注入 RVS 环境变量。返回新子进程 pid。
+    pub async fn launch(
+        &mut self,
+        config_file: &Path,
+        ra_required: bool,
+        rvs_url: Option<&str>,
+    ) -> io::Result<u32> {
         // 选定 bin 必须先于 kill：RA 开而 RA 版缺失时报错返回、不误杀现有会话。
         // `to_owned` 解除 self 借用，随后 `kill_current` 可取 &mut self。
         let bin = self.select_bin(ra_required)?.to_owned();
+        if ra_required {
+            let Some(rvs_url) = rvs_url else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "开启远程证明时必须提供 RVS 地址",
+                ));
+            };
+            if rvs_url.trim().is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "开启远程证明时 RVS 地址不能为空",
+                ));
+            }
+        }
         self.kill_current().await;
         self.clear_log();
         self.ensure_executable(&bin);
-        let cmd = self.build_command(&bin, config_file);
+        let command = self.build_command(&bin, config_file, ra_required, rvs_url);
+        let cmd = TokioCommand::from(command);
         let m = spawn_managed(cmd, self.log.clone()).await?;
         let pid = m.pid;
         self.managed = Some(m);
@@ -313,21 +345,22 @@ impl TngSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::time::Duration;
 
     /// 用一个能输出到 stdout/stderr 并持续运行的 shell 命令做替身。
-    fn dummy_listen() -> Command {
+    fn dummy_listen() -> TokioCommand {
         // 即便不是 tng，这里验证的是"新进程组 + 捕获 + 整组杀"这层机制。
         #[cfg(unix)]
         {
-            let mut c = Command::new("sh");
+            let mut c = TokioCommand::new("sh");
             c.arg("-c")
                 .arg("echo start; echo bad-field-on-stderr: >&2; echo to-stdout; exec sleep 30");
             c
         }
         #[cfg(windows)]
         {
-            let mut c = Command::new("powershell");
+            let mut c = TokioCommand::new("powershell");
             c.arg("-NoProfile").arg("-Command").arg(concat!(
                 "'start'; ",
                 "\"bad-field-on-stderr:\" | Write-Host; ",
@@ -344,13 +377,13 @@ mod tests {
         // 这个替身立刻退出
         #[cfg(unix)]
         let c = {
-            let mut c = Command::new("sh");
+            let mut c = TokioCommand::new("sh");
             c.arg("-c").arg("echo out-line; echo err-line >&2; exit 0");
             c
         };
         #[cfg(windows)]
         let c = {
-            let mut c = Command::new("cmd");
+            let mut c = TokioCommand::new("cmd");
             c.arg("/C").arg("echo out-line& echo err-line 1>&2");
             c
         };
@@ -391,10 +424,64 @@ mod tests {
     #[test]
     fn build_command_args_are_correct() {
         let sup = TngSupervisor::new("tng-nora", None, 64);
-        let cmd = sup.build_command("tng-nora", Path::new("/tmp/tng-runtime.json"));
-        // tokio::process::Command 没有直接取 argv 的 API，断言 bin 即可；
-        // 真实 argv 由端到端（用户机器）覆盖。
-        let _ = cmd; // 编译期保证该函数可用
+        let cmd = sup.build_command("tng-nora", Path::new("/tmp/tng-runtime.json"), false, None);
+        assert_eq!(cmd.get_program(), OsStr::new("tng-nora"));
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            vec![
+                OsStr::new("launch"),
+                OsStr::new("-c"),
+                Path::new("/tmp/tng-runtime.json").as_os_str(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_command_injects_exact_rvs_url_only_for_ra_launch() {
+        let sup = TngSupervisor::new("tng-nora", Some("/rd/tng.exe".into()), 64);
+        const RVS_URL: &str = "https://private-rvs.example.com:8443";
+        const RVS_ENV: &str = "RATS_TEE_VERIFIER_URL";
+
+        let ra_cmd = sup.build_command(
+            "tng-ra",
+            Path::new("/tmp/tng-runtime.json"),
+            true,
+            Some(RVS_URL),
+        );
+        let ra_value = ra_cmd
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new(RVS_ENV))
+            .and_then(|(_, value)| value);
+        assert_eq!(ra_value, Some(OsStr::new(RVS_URL)));
+
+        let nora_cmd = sup.build_command(
+            "tng-nora",
+            Path::new("/tmp/tng-runtime.json"),
+            false,
+            Some(RVS_URL),
+        );
+        assert!(
+            nora_cmd
+                .get_envs()
+                .all(|(key, _)| *key != *OsStr::new(RVS_ENV)),
+            "非 RA 启动不得注入 RVS 地址"
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_rejects_missing_or_empty_rvs_url_for_ra() {
+        let mut sup = TngSupervisor::new("tng-nora", Some("true".into()), 64);
+        let missing = sup
+            .launch(Path::new("/tmp/tng-runtime.json"), true, None)
+            .await
+            .unwrap_err();
+        assert!(missing.to_string().contains("RVS 地址"));
+
+        let empty = sup
+            .launch(Path::new("/tmp/tng-runtime.json"), true, Some("  "))
+            .await
+            .unwrap_err();
+        assert!(empty.to_string().contains("不能为空"));
     }
 
     #[test]
@@ -408,7 +495,11 @@ mod tests {
     async fn launch_fails_fast_when_ra_required_without_ra_bin() {
         let mut sup = TngSupervisor::new("tng-nora", None, 64);
         let err = sup
-            .launch(Path::new("/tmp/tng-runtime.json"), true)
+            .launch(
+                Path::new("/tmp/tng-runtime.json"),
+                true,
+                Some("https://rvs.tsk.com:9443"),
+            )
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -422,9 +513,13 @@ mod tests {
         // nora bin 故意不存在：若 launch 误用普通版会 spawn 失败；成功即证明用的是 RA bin。
         let mut sup =
             TngSupervisor::new("definitely-missing-tng-nora", Some("true".to_string()), 64);
-        sup.launch(Path::new("/tmp/tng-runtime.json"), true)
-            .await
-            .expect("ra_required 时应使用 RA 版二进制启动");
+        sup.launch(
+            Path::new("/tmp/tng-runtime.json"),
+            true,
+            Some("https://private-rvs.example.com:8443"),
+        )
+        .await
+        .expect("ra_required 时应使用 RA 版二进制启动");
     }
 
     #[cfg(unix)]
@@ -432,7 +527,7 @@ mod tests {
     async fn launch_selects_nora_bin_when_ra_not_required() {
         // RA bin 缺失也不影响 RA 关时的启动：普通版仍可 launch。
         let mut sup = TngSupervisor::new("true", None, 64);
-        sup.launch(Path::new("/tmp/tng-runtime.json"), false)
+        sup.launch(Path::new("/tmp/tng-runtime.json"), false, None)
             .await
             .expect("RA 关时应使用普通版二进制启动");
         assert!(sup.is_running() || !sup.is_running()); // true 立即退出，仅确认无 panic

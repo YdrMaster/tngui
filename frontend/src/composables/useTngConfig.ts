@@ -8,7 +8,7 @@ const model: Ref<ConfigModel> = ref(defaultModel());
 let lastSavedSerialized = serialize(model.value);
 
 export function useTngConfig() {
-  return { model, isDirty, initialize, markSaved, serializeCurrent };
+  return { model, isDirty, initialize, initializeRvsUrl, currentRvsUrl, markSaved, serializeCurrent };
 }
 
 function isDirty(): boolean {
@@ -21,8 +21,18 @@ function initialize(next: ConfigModel): void {
   markSaved();
 }
 
+/** 独立恢复缓存中的 RVS 地址，避免有效缓存值被默认值覆盖。 */
+function initializeRvsUrl(next: string): void {
+  model.value.rvsUrl = next;
+  markSaved();
+}
+
 function markSaved(): void {
   lastSavedSerialized = serialize(model.value);
+}
+
+function currentRvsUrl(): string {
+  return model.value.rvsUrl;
 }
 
 function serializeCurrent(): string {

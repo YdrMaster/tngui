@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 
 use tngui_core::{
     ProxyHandle, StatusReport, TngSupervisor, fetch_status, pick_launch_ports, prepare_launch,
-    start_proxy, validate_user_config, write_runtime_config,
+    sanitize_user_config_for_tng, start_proxy, write_runtime_config,
 };
 
 /// 控制端口（启动时注入）；状态轮询读取。
@@ -72,6 +72,7 @@ async fn launch_tng(
     app: AppHandle,
     state: State<'_, AppState>,
     config_json: String,
+    rvs_url: String,
 ) -> Result<u32, String> {
     // 1. 批探测一次取齐「管控端口 + 各 ingress 内部端口」并先验避让对外端口（不对用户暴露）
     let (ctrl, internal_ports) = pick_launch_ports(&config_json).map_err(|e| e.to_string())?;
@@ -105,7 +106,7 @@ async fn launch_tng(
     // 5. spawn tng（不传 --log-file，tng 日志走 stdout 由 GUI 捕获展示）；supervisor 内
     //    会再次按判定选 bin（RA 开而 RA 版缺失时报错不回退，与预检文案一致）。
     let pid = sup
-        .launch(&runtime, ra_required)
+        .launch(&runtime, ra_required, Some(&rvs_url))
         .await
         .map_err(|e| format!("启动 tng 失败: {e}"))?;
 
@@ -458,7 +459,7 @@ fn flush_settings_cache(app: AppHandle, payload: Value) -> Result<(), String> {
 #[tauri::command]
 async fn save_config(app: AppHandle, config_json: String) -> Result<(), String> {
     // 仅校验用户侧配置（不注入 control_interface.restful）——保存的配置对用户可见、不含管控端口
-    let validated = validate_user_config(&config_json).map_err(|e| e.to_string())?;
+    let validated = sanitize_user_config_for_tng(&config_json).map_err(|e| e.to_string())?;
     let dir = app
         .path()
         .app_data_dir()

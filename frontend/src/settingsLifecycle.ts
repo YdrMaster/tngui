@@ -6,6 +6,7 @@ import type { SettingsCachePayload } from "./tauri";
 export interface SettingsRestoreTarget {
   initialize(config: ConfigModel): void;
   initializeApiKey(apiKey: string): void;
+  initializeRvsUrl(rvsUrl: string): void;
 }
 
 export async function bootstrapSettings(
@@ -17,21 +18,24 @@ export async function bootstrapSettings(
     const restored = parseSettingsCache(await load());
     target.initialize(restored.config);
     target.initializeApiKey(restored.apiKey);
+    target.initializeRvsUrl(restored.rvsUrl);
   } catch (error) {
     console.error("读取设置缓存失败", error);
     const fallback = parseSettingsCache({});
     target.initialize(fallback.config);
     target.initializeApiKey(fallback.apiKey);
+    target.initializeRvsUrl(fallback.rvsUrl);
   }
 }
 
 export interface BeforeLeaveSettingsDependencies {
   isDirty(): boolean;
   serializeCurrent(): string;
+  currentRvsUrl(): string;
   markSaved(): void;
   saveConfig(configJson: string): Promise<void>;
   getStatus(): Promise<{ reachable: boolean }>;
-  launchTng(configJson: string): Promise<unknown>;
+  launchTng(configJson: string, rvsUrl: string): Promise<unknown>;
   showError(message: string): void;
 }
 
@@ -41,6 +45,7 @@ export async function beforeLeaveSettings(
 ): Promise<void> {
   if (!dependencies.isDirty()) return;
   const configJson = dependencies.serializeCurrent();
+  const rvsUrl = dependencies.currentRvsUrl();
   try {
     await dependencies.saveConfig(configJson);
     dependencies.markSaved();
@@ -51,7 +56,7 @@ export async function beforeLeaveSettings(
   try {
     const status = await dependencies.getStatus();
     if (status.reachable) {
-      await dependencies.launchTng(configJson);
+      await dependencies.launchTng(configJson, rvsUrl);
     }
   } catch (error) {
     dependencies.showError("自动重启 tng 失败: " + String(error));

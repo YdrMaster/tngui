@@ -9,6 +9,7 @@
 import {
   ALL_MODES,
   DEFAULT_LISTEN_PORT,
+  DEFAULT_RVS_URL,
   DEFAULT_OUTWARD,
   DEFAULT_VERIFY,
   LOCKED_OHTTP,
@@ -22,12 +23,16 @@ import {
   type VerifyConfig,
 } from "./formspec";
 
+/** GUI 侧 RVS 字段名。用户态配置保留该字段便于模型往返；后端写 tng runtime 前统一剥离。 */
+export const TNGUI_RVS_URL_FIELD = "tngui_rvs_url";
+
 export function serialize(model: ConfigModel): string {
   const out: Record<string, unknown> = {};
   if (Object.keys(model.control_interface_extra).length > 0) {
     out.control_interface = { ...model.control_interface_extra };
   }
   out.add_ingress = model.add_ingress.map(serializeEntry);
+  out[TNGUI_RVS_URL_FIELD] = model.rvsUrl || DEFAULT_RVS_URL;
   for (const [k, v] of Object.entries(model.extra)) out[k] = v;
   return JSON.stringify(out, null, 2);
 }
@@ -175,14 +180,18 @@ export function parse(json: string): ParseResult {
     entries.push(r.model!);
   }
 
+  // GUI 侧全局 RVS 地址：从用户 JSON 取出，不落入顶层 extra；序列化时再写回用户态 JSON。
+  const rvsUrl = strOr(root[TNGUI_RVS_URL_FIELD], DEFAULT_RVS_URL);
+
   // 顶层 extra
   const topExtra: Record<string, unknown> = { ...root };
   delete topExtra.control_interface;
   delete topExtra.add_ingress;
   delete topExtra.add_egress;
+  delete topExtra[TNGUI_RVS_URL_FIELD];
 
   return {
-    model: { control_interface_extra, add_ingress: entries, extra: topExtra },
+    model: { control_interface_extra, add_ingress: entries, rvsUrl, extra: topExtra },
     warnings: warnings.length ? warnings : undefined,
   };
 }
