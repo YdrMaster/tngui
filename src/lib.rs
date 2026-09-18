@@ -7,11 +7,12 @@
 //! - `proxy_endpoint`：暴露反代各 ingress 对外端点（供前端渲染 `API Base URL` 与推理目标）
 //! - `get_status`：轮询控制面 `/livez|/readyz|/status/`
 //! - `get_output`：取子进程 stdout/stderr 快照
-//! - `send_inference`：经反代对外端点发推理（`x-model` 由反代注入，此处不注）
+//! - `send_inference_stream`：经反代对外端点发流式推理（SSE delta 经 Channel 推送；`x-model` 由反代注入，此处不注）
 
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde_json::Value;
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tauri::{Builder, generate_context, generate_handler};
 use tokio::sync::Mutex;
@@ -469,16 +470,24 @@ async fn save_config(app: AppHandle, config_json: String) -> Result<(), String> 
     Ok(())
 }
 
-/// 通过 tngui 反代对外端点发送推理请求（`x-model` 由反代按 body.model 注入，此处不注），
-/// 返回 assistant 响应文本。`port` 为反代对外端口（前端取自 `proxy_endpoint`）。
+/// 通过 tngui 反代对外端点发送流式推理请求（`x-model` 由反代按 body.model 注入，
+/// 此处不注），body 恒含 `"stream": true`。每节 `choices[0].delta.content` 经
+/// `on_delta` Channel 推送；收到 `data: [DONE]` 后命令成功返回。任何失败（连接
+/// 失败、非 2xx、非 SSE 响应、SSE 解析失败、`[DONE]` 前断流、响应超上限）返回
+/// 既有格式诊断（Authorization 脱敏）。`port` 为反代对外端口（前端取自
+/// `proxy_endpoint`）。
 #[tauri::command]
-async fn send_inference(
+async fn send_inference_stream(
     port: u16,
     model: String,
     api_key: String,
     prompt: String,
-) -> Result<String, String> {
-    tngui_core::send_inference(port, &model, &api_key, &prompt).await
+    on_delta: Channel<String>,
+) -> Result<(), String> {
+    tngui_core::send_inference_stream(port, &model, &api_key, &prompt, |delta| {
+        let _ = on_delta.send(delta);
+    })
+    .await
 }
 
 /// 从本地 pre-TNG proxy 获取模型清单，不发送 inference API Key。
@@ -584,7 +593,7 @@ pub fn run() {
             load_settings_cache,
             flush_settings_cache,
             save_config,
-            send_inference,
+            send_inference_stream,
             list_models,
             app_info
         ])

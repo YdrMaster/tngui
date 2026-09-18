@@ -1,5 +1,5 @@
 // 与 Tauri 后端的 invoke 封装 + 原生对话框（导入/导出取路径）。
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 export interface StatusReport {
@@ -29,6 +29,30 @@ export interface ProxyEndpoint {
 }
 export async function proxyEndpoint(): Promise<ProxyEndpoint[]> {
   return invoke<ProxyEndpoint[]>("proxy_endpoint");
+}
+
+/**
+ * 通过 tngui 反代对外端点发送流式推理请求（body 恒含 `"stream": true`，由后端组装）。
+ * 每节 `choices[0].delta.content` 到达即调用 `onDelta`；收到 `data: [DONE]` 后
+ * Promise resolve。任何失败（连接失败、非 2xx、非 SSE、断流等）Promise reject，
+ * 错误为脱敏诊断字符串（不含明文凭据）。
+ */
+export async function sendInferenceStream(
+  port: number,
+  model: string,
+  apiKey: string,
+  prompt: string,
+  onDelta: (delta: string) => void,
+): Promise<void> {
+  const channel = new Channel<string>();
+  channel.onmessage = onDelta;
+  await invoke<void>("send_inference_stream", {
+    port,
+    model,
+    apiKey,
+    prompt,
+    onDelta: channel,
+  });
 }
 
 /** 从本地 pre-TNG proxy 的 \/v1\/models 获取模型清单。 */

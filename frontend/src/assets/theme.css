@@ -177,6 +177,12 @@ button, input, textarea { font: inherit; }
 .send-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
 .send-button .anticon { display: inline-flex; align-items: center; line-height: 1; }
 .response-panel { min-height: 340px; }
+/* 流式生成中：阶段卡冻结（紧凑高度）+ 渐进文本 */
+.streaming-state { display: flex; flex-direction: column; gap: 10px; padding: 18px 18px 14px; min-height: 320px; }
+.streaming-state .stage-viewport { height: 92px; margin-top: 10px; }
+.streaming-state .stage-card-desc { display: none; }
+.streaming-body { position: relative; flex: 1; min-height: 90px; padding: 4px 8px; overflow: auto; text-align: left; font-size: 15px; line-height: 1.85; white-space: pre-line; }
+.stream-caret { display: inline-block; width: 8px; height: 18px; margin-left: 2px; vertical-align: -3px; background: var(--primary); animation: stream-caret 1s steps(1) infinite; }
 .sending-state, .empty-response { min-height: 320px; padding: 28px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; }
 .sending-state .ant-progress { max-width: 360px; }
 .sending-state h4 { margin: 6px 0 0 !important; }
@@ -257,3 +263,9 @@ button, input, textarea { font: inherit; }
 .ingress-info-row b { font-weight: 650; }
 .ingress-debug-grid { display: grid; grid-template-columns: 1fr; gap: 14px; margin-top: 14px; }
 @media (min-width: 980px) { .ingress-debug-grid { grid-template-columns: 1fr 1fr; } }
+
+/* 流式推理：渐进文本后的输入光标（生成中闪烁） */
+@keyframes stream-caret { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  @keyframes stream-caret { 0%, 100% { opacity: 1; } }
+}

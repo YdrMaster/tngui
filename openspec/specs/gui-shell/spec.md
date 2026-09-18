@@ -156,23 +156,27 @@
 
 #### Scenario: 导入含 ohttp.tls 的配置回填 tls
 - **WHEN** 用户导入的 JSON 中某 `http_proxy` ingress 的 `ohttp` 含 `tls: true`
-- **THEN** 该 ingress 回填前端内部 `tls=true` 并在域名框以 `https://` 前缀回显；`ohttp.tls` 在下次序列化时按前缀派生语义回写
+- **THEN** 系统回填前端内部 `tls=true` 并在域名框以 `https://` 前缀回显；`ohttp.tls` 在下次序列化时按前缀派生语义回写
 
 #### Scenario: 反代转发 Host 含 dst 端口
 - **WHEN** tngui 反代把请求转发给 tng 内部 `http_proxy` ingress
 - **THEN** 请求 `Host` 头使用 tngui 远端目标；`dst_filters` 配了有效端口时为 `<domain>:<port>`，未配有效端口时为 `<domain>`
 
 #### Scenario: 推理响应按 Content-Length 或 chunked 成帧均可解析
-- **WHEN** tng/上游以 `Transfer-Encoding: chunked` 或 `Content-Length` 成帧返回非流式推理响应
-- **THEN** 密态推理发送逻辑剥除 chunk 帧（或按长度读取）后解析 `choices[0].message.content`，输出区显示真实回复文本
+- **WHEN** tng/上游以 `Transfer-Encoding: chunked` 成帧返回 OpenAI 兼容 SSE 流（`Content-Type: text/event-stream`），或以 `Content-Length` 成帧 / EOF 结尾返回非 SSE body（如网关错误 JSON、WAF HTML 拦截页）
+- **THEN** SSE 流路径逐块剥除 chunk 帧并逐事件解析 `data:` 行，每节 `choices[0].delta.content` 即时送达输出区、不等待整个响应体收齐；非 SSE body 按缓冲解析并进入失败诊断路径展示原文摘要，不尝试按 SSE 渐进渲染
+
+#### Scenario: 累积响应体上限保持防护
+- **WHEN** 响应体（含 SSE 流）累计达到 10 MiB
+- **THEN** 密态推理发送逻辑停止接收并以失败处理，不无限累积
 
 #### Scenario: 非 JSON/非 2xx 响应报可读调试详情
-- **WHEN** 密态推理发送链路收到 2xx 但响应体非 JSON，或非 2xx
+- **WHEN** 密态推理发送链路收到 2xx 但响应不满足 SSE data 事件语义、非 2xx，或 SSE 流中断
 - **THEN** 输出区显示失败摘要、脱敏请求与响应原文；绝不（MUST NOT）只报"JSON 解析失败"而不带任何上下文
 
 #### Scenario: https 上游经反代加密可达
 - **WHEN** 用户以 `域名` 框输入 `https://<域名>` + 端口配置远端并启动 tng
-- **THEN** tng 以 TLS 连接该上游，反代转发的 `Host` 为 `<域名>:<端口>`，密态推理页面发起的推理请求可获真实回复
+- **THEN** tng 以 TLS 连接该上游，反代转发的 `Host` 为 `<域名>:<端口>`，密态推理页面发起的流式推理请求可经 SSE 获得真实增量回复
 ### Requirement: 原始 JSON 高级视图
 
 系统须（SHALL）在“设置”视图提供与结构化表单双向同步的原始 JSON 视图，供高级编辑与兜底。该视图在进行编辑时须（SHALL）与结构化表单保持同步；当 TNG 配置锁定开启时，原始 JSON 输入区域与“应用回填表单”操作须（SHALL）不可交互。该视图的序列化结果不含 `control_interface.restful`、不含 `add_egress`，且当前唯一 ingress 必含锁定 OHTTP 配置。对 RA 开启的 ingress，原始 JSON 中的自定义 `verify.model` / `verify.as_provider` 须（SHALL）在应用回填时被忽略并统一为默认值。
@@ -300,7 +304,7 @@
 - **THEN** 界面不出现 TNG 配置编辑控件/原始 JSON/导入导出/密态推理 model+API Key 输入字段；仅含启动/停止按钮 + 四状态卡 + 原始状态数据 + 进程日志输出区
 ### Requirement: 密态推理模型清单驱动测试请求
 
-系统须（SHALL）在密态推理视图提供单次作用的推理请求面板。面板的“可发”门锁须（SHALL）同时满足：概览“运行状态”为“运行”、本机已配置 api-key、模型发现请求成功返回至少一个模型，且当前选中模型属于最新模型清单。发送时按 OpenAI 兼容格式 POST 到 tngui 反代对外端点，携带 `Authorization: Bearer <apiKey>` 和 `{model,messages}` body。系统绝不（MUST NOT）在前端或反代中另发 `x-model` 头；模型身份由反代按 body.model 改写请求 path。输出区只显示当次响应；RA 过程保持占位。
+系统须（SHALL）在密态推理视图提供单次作用的推理请求面板。面板的“可发”门锁须（SHALL）同时满足：概览“运行状态”为“运行”、本机已配置 api-key、模型发现请求成功返回至少一个模型，且当前选中模型属于最新模型清单。发送时按 OpenAI 兼容格式 POST 到 tngui 反代对外端点，携带 `Authorization: Bearer <apiKey>` 和 `{model, messages, stream: true}` body——`stream` 恒为 `true`，系统不依赖上游非流式全量响应。响应须（SHALL）按 OpenAI 兼容 SSE 数据流逐事件处理：每节 `choices[0].delta.content` 文本到达即向输出区增量渲染，无需等待后续事件或流结束；收到 `data: [DONE]` 时标记当次响应完整完成。推理流在 `[DONE]` 前中断（连接断开、提前 EOF 或事件解析失败）时，系统须（SHALL）保留已到达的增量文本、标注当次响应不完整并给出失败摘要，绝不（MUST NOT）清空或改写已渲染文本。系统绝不（MUST NOT）在前端或反代中另发 `x-model` 头；模型身份由反代按 body.model 改写请求 path。输出区只显示当次响应，再次发送须（SHALL）先清空此前内容；RA 过程保持占位。
 
 密态推理请求面板的模型控件须（SHALL）是基于 `/v1/models` 响应创建的选项下拉菜单。系统须（SHALL）解析 OpenAI 兼容响应中的 `data[].id` 作为模型 ID，只允许用户在下拉选项之间切换，不得提供自由文本输入、创建新值、空选项或清除选择。
 
@@ -328,6 +332,36 @@
 
 - **WHEN** 用户点击发送 AND 概览显示“运行” AND api-key 已配置 AND 模型在下拉清单中被选中
 - **THEN** 系统向 tngui 反代对外端点发 POST，不直连 tng 内部 ingress 端口；请求经 pre-TNG path 注入代理进入 TNG
+
+#### Scenario: 请求体携带 stream true
+
+- **WHEN** 用户点击发送且满足可发门锁
+- **THEN** 发往反代的 JSON body 含 `"stream": true`，且 `model` 与 `messages` 语义保持不变；系统不构造非流式请求
+
+#### Scenario: 首个增量到达即开始渐进渲染
+
+- **WHEN** 推理请求已发出且上游 SSE 流的首节 content 增量到达
+- **THEN** 输出区立即显示该增量文本，不等后续事件或流结束
+
+#### Scenario: 后续增量逐节追加
+
+- **WHEN** SSE 流持续返回多节 `choices[0].delta.content`
+- **THEN** 输出区按到达顺序把各节文本增量追加到已渲染内容之后
+
+#### Scenario: 收到 DONE 标记完整完成
+
+- **WHEN** SSE 流返回 `data: [DONE]` 事件
+- **THEN** 系统停止追加并把当次响应标记为完整完成；发送控件回到可再次发送状态
+
+#### Scenario: 无内容事件不产生空渲染
+
+- **WHEN** SSE 事件不含 `delta.content`（如首节仅含 role、终止节仅含 finish_reason）
+- **THEN** 该事件被跳过，不向输出区追加空文本或占位内容
+
+#### Scenario: 断流保留部分文本并标注不完整
+
+- **WHEN** SSE 流在 `[DONE]` 前连接断开或提前 EOF
+- **THEN** 已到达的增量文本保持显示，界面标注当次响应不完整并给出失败摘要；已渲染文本不被清空或改写
 
 #### Scenario: 模型发现返回空列表
 
@@ -362,12 +396,12 @@
 #### Scenario: 不保留历史请求
 
 - **WHEN** 用户再次发送推理请求
-- **THEN** 输出区覆盖为最新响应
+- **THEN** 输出区覆盖为最新响应，首个新增量到达前不残留上一次的文本
 
 #### Scenario: 失败响应框展示脱敏请求与响应调试内容
 
-- **WHEN** 密态推理发送失败
-- **THEN** 响应框显示失败摘要、脱敏请求与响应原文；请求中的 `Authorization` 值必须脱敏
+- **WHEN** 密态推理发送失败（连接失败、非 2xx、2xx 但响应不满足 SSE data 事件语义，或流中断）
+- **THEN** 响应框显示失败摘要、脱敏请求与响应原文；请求中的 `Authorization` 值必须脱敏；流中断场景已到达的部分文本保留显示
 
 #### Scenario: RA 过程占位
 
@@ -376,19 +410,26 @@
 
 ### Requirement: 密态推理发送阶段垂直转场
 
-系统须（SHALL）在密态推理请求发送期间，把响应卡中的五步安全流程呈现为单张当前阶段卡：显示当前阶段的图标、阶段标题和阶段说明；上方只提供进度点/序号等小型阶段指示，不得把五个阶段节点横向一字铺开。发送阶段推进时，前一阶段卡须（SHALL）向上淡出，新到达阶段卡须（SHALL）从下方淡入；切换区域须（SHALL）使用固定占位高度，不得因阶段切换引发响应卡高度跳变。阶段内容与现有五步安全语义一致，继续保留现有线性进度条。
+系统须（SHALL）在密态推理请求发送期间、首个响应增量文本到达前，把响应卡中的五步安全流程呈现为单张当前阶段卡：显示当前阶段的图标、阶段标题和阶段说明；上方只提供进度点/序号等小型阶段指示，不得把五个阶段节点横向一字铺开。发送阶段推进时，前一阶段卡须（SHALL）向上淡出，新到达阶段卡须（SHALL）从下方淡入；切换区域须（SHALL）使用固定占位高度，不得因阶段切换引发响应卡高度跳变。阶段内容与现有五步安全语义一致，继续保留现有线性进度条。
+
+首个响应增量文本到达后，阶段推进须（SHALL）停止并保持当前阶段卡，响应区切换为渐进文本渲染（见“密态推理模型清单驱动测试请求”）；此后阶段卡不再随时间推进，直至本次发送结束或失败。
 
 当用户声明偏好减少动态效果时，系统须（SHALL）禁用垂直位移动画；阶段内容可直接切换，但不得再横向展开。
 
 #### Scenario: 发送中只显示当前阶段卡
 
-- **WHEN** 用户发送推理请求且响应卡处于发送中
+- **WHEN** 用户发送推理请求且响应卡处于发送中（首个增量到达前）
 - **THEN** 卡片以小型阶段指示加一个当前阶段卡展示，不出现五个阶段节点横向排布
 
 #### Scenario: 阶段推进向上淡出并向下滑入
 
-- **WHEN** 发送阶段从任一阶段推进到下一阶段
+- **WHEN** 发送阶段从任一阶段推进到下一阶段（首个增量到达前）
 - **THEN** 前一阶段卡向上淡出，当前阶段卡从下方淡入，形成垂直幻灯片式转场
+
+#### Scenario: 首个增量到达后阶段卡停止推进
+
+- **WHEN** 首个响应增量文本到达
+- **THEN** 阶段卡保持当前阶段不再推进，响应区切换为渐进文本渲染
 
 #### Scenario: 阶段切换不抖动布局
 

@@ -239,8 +239,8 @@ async fn handle_conn(
     up_wr.write_all(&fwd).await?;
     up_wr.flush().await?;
 
-    // 6. 原样回传：把 upstream 字节透传给客户端，直到 upstream EOF（其对 upstream 发了
-    //    Connection: close，响应完成后关闭；与 inference::http_request 读到 EOF 同法，非流式按此成帧）。
+    // 6. 原样回传：把 upstream 字节逐块透传给客户端，直到 upstream EOF（其对 upstream 发了
+    //    Connection: close，响应完成后关闭）。逐块写出即流式——SSE 响应经此逐 token 到达客户端。
     let mut pipe = vec![0u8; 8192];
     loop {
         let n = tokio::time::timeout(UPSTREAM_TIMEOUT, up_rd.read(&mut pipe))

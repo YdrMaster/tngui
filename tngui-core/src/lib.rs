@@ -20,7 +20,7 @@ pub use config::{
     pick_launch_ports, prepare_config, prepare_launch, sanitize_user_config_for_tng,
     validate_user_config, write_runtime_config,
 };
-pub use inference::send_inference;
+pub use inference::send_inference_stream;
 pub use log::BoundedLog;
 pub use models::{list_models, parse_model_list};
 pub use process::{ManagedChild, TngSupervisor, kill_group, spawn_managed};

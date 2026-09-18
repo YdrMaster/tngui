@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, inject, onMounted, onBeforeUnmount, watch } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { ref, computed, inject, onMounted, onBeforeUnmount, nextTick, watch } from "vue";
 import { message } from "ant-design-vue";
 import {
   ExperimentOutlined, SendOutlined, InfoCircleOutlined, LockOutlined, LoadingOutlined,
@@ -9,7 +8,7 @@ import {
 } from "@ant-design/icons-vue";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
 import { useIngressState } from "../composables/useIngressState";
-import { listModels, proxyEndpoint } from "../tauri";
+import { listModels, proxyEndpoint, sendInferenceStream } from "../tauri";
 import SecureFlow from "../components/SecureFlow.vue";
 import ArchitectureFlow from "../components/ArchitectureFlow.vue";
 import ProtectionItem from "../components/ProtectionItem.vue";
@@ -34,10 +33,15 @@ const activeTab = ref<"request" | "integration" | "security">("request");
 const prompt = ref("请用三点说明密态推理如何保护我的输入数据。");
 const output = ref("");
 const sending = ref(false);
+// 流式状态：首个 delta 已到达（阶段卡冻结，响应区切渐进文本）。
+const streaming = ref(false);
 const phase = ref(4);
 const phaseTimer = ref<number | undefined>(undefined);
 const statusCode = ref(0);
 const failed = ref(false);
+// 失败诊断（与 output 分离：断流时保留已到达文本 + 诊断并示）。
+const errorDiagnostic = ref("");
+const responseText = ref<HTMLElement | null>(null);
 // 反代对外端口（取自 proxy_endpoint[0].port）：tng 未启动时为 null。
 const proxyPort = ref<number | null>(null);
 let proxyTimer: number | undefined;
@@ -104,12 +108,13 @@ const canSelectModel = computed(() => modelDiscoveryState.value === "loaded-none
 // 发送门锁：概览运行、apiKey、可用模型清单和清单内选中模型同时满足。
 const usable = computed(() => tngRunning.value && !!apiKey.value && canSelectModel.value && !!model.value);
 
-const curlExample = computed(() => `curl http://127.0.0.1:${proxyPort.value ?? 8080}/v1/chat/completions \
+const curlExample = computed(() => `curl -N http://127.0.0.1:${proxyPort.value ?? 8080}/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <YOUR_API_KEY>" \
   -d '{
     "model": "${modelStateMessage.value || model.value}",
-    "messages": [{"role": "user", "content": "请分析这段文本"}]
+    "messages": [{"role": "user", "content": "请分析这段文本"}],
+    "stream": true
   }'`);
 
 const deepSeekClientConfig = computed(() => `API 类型       OpenAI Compatible
@@ -117,27 +122,44 @@ API Base URL   ${localEndpoint.value}
 API Key        <从 1 号节点控制台获取>
 Model ID       ${modelStateMessage.value || model.value}`);
 
+/** 首个 delta 到达：结束阶段动画（冻结在当前阶段），切换为渐进文本渲染。 */
+function onFirstDelta() {
+  streaming.value = true;
+  statusCode.value = 200; failed.value = false; errorDiagnostic.value = "";
+  window.clearInterval(phaseTimer.value);
+}
+
 async function onSend() {
   if (!usable.value) { message.warning("请先在「概览」启动 TNG 网关（显示运行）、在「设置」配置 API Key，并确认存在可用的密态模型"); return; }
   if (!prompt.value.trim()) { message.warning("请输入测试内容"); return; }
   if (proxyPort.value === null) { message.warning("网关对外端口未就绪，无法发送"); return; }
-  sending.value = true; output.value = ""; statusCode.value = 0; failed.value = false; phase.value = 0;
+  sending.value = true; streaming.value = false; output.value = "";
+  statusCode.value = 0; failed.value = false; errorDiagnostic.value = ""; phase.value = 0;
   let step = 0;
   phaseTimer.value = window.setInterval(() => {
     step += 1; phase.value = step;
     if (step >= 4) window.clearInterval(phaseTimer.value);
   }, 520);
   try {
-    const result = await invoke<string>("send_inference", {
-      port: proxyPort.value, model: model.value, apiKey: apiKey.value, prompt: prompt.value,
-    });
-    window.clearInterval(phaseTimer.value); phase.value = 4; statusCode.value = 200; failed.value = false;
-    output.value = result;
+    await sendInferenceStream(
+      proxyPort.value, model.value, apiKey.value, prompt.value,
+      (delta) => {
+        if (!streaming.value) onFirstDelta();
+        output.value += delta;
+        void nextTick(() => {
+          const el = responseText.value;
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      },
+    );
+    window.clearInterval(phaseTimer.value); phase.value = 4;
+    statusCode.value = 200; failed.value = false;
   } catch (e) {
-    window.clearInterval(phaseTimer.value); phase.value = 1;
-    statusCode.value = 0; failed.value = true;
-    output.value = String(e);
-  } finally { sending.value = false; }
+    window.clearInterval(phaseTimer.value);
+    failed.value = true; errorDiagnostic.value = String(e);
+    // 断流/失败不改写已到达文本（spec：已渲染文本不得清空）；无 delta 时 statusCode 已是 0。
+    if (!streaming.value) { statusCode.value = 0; phase.value = 1; }
+  } finally { sending.value = false; streaming.value = false; }
 }
 </script>
 
@@ -221,24 +243,41 @@ async function onSend() {
             <a-col :span="13">
               <a-card title="响应">
                 <template #extra>
-                  <span v-if="output && statusCode === 200" style="display:flex;gap:8px;align-items:center">
+                  <span v-if="streaming && sending" style="display:flex;gap:8px;align-items:center">
+                    <a-tag color="processing">200 OK</a-tag>
+                    <span style="color:var(--text-secondary)">正在生成，响应已在本地解密</span>
+                  </span>
+                  <span v-else-if="output && statusCode === 200 && !failed" style="display:flex;gap:8px;align-items:center">
                     <a-tag color="success">200 OK</a-tag>
                     <span style="color:var(--text-secondary)">响应已在本地解密</span>
                   </span>
                   <span v-else-if="failed" style="display:flex;gap:8px;align-items:center">
                     <a-tag color="error">请求失败</a-tag>
-                    <span style="color:var(--text-secondary)">调试详情（Authorization 已脱敏）</span>
+                    <span v-if="output" style="color:var(--text-secondary)">响应不完整（已保留部分文本）· 调试详情（Authorization 已脱敏）</span>
+                    <span v-else style="color:var(--text-secondary)">调试详情（Authorization 已脱敏）</span>
                   </span>
                 </template>
                 <div class="response-panel">
-                  <div v-if="sending" class="sending-state">
+                  <div v-if="sending && !streaming" class="sending-state">
                     <Spin size="large" />
                     <a-progress :percent="(phase + 1) * 20" :showInfo="false" style="width:min(360px,100%)" />
                     <SecureFlow :active-index="phase" />
                   </div>
-                  <div v-else-if="output" style="padding:8px">
-                    <pre v-if="failed" class="code-block response-debug" style="white-space:pre-wrap;overflow:auto;max-height:560px;margin:0">{{ output }}</pre>
-                    <p v-else class="response-text" style="white-space:pre-line;font-size:15px;line-height:1.85">{{ output }}</p>
+                  <!-- 首个 delta 到达：阶段卡冻结在当前阶段，下方渐进渲染文本 -->
+                  <div v-else-if="sending && streaming" class="streaming-state">
+                    <SecureFlow :active-index="phase" />
+                    <div class="streaming-body">
+                      <p ref="responseText" class="response-text" style="margin:0">{{ output }}</p>
+                      <span class="stream-caret" />
+                    </div>
+                  </div>
+                  <div v-else-if="output || errorDiagnostic" style="padding:8px">
+                    <p
+                      v-if="output"
+                      class="response-text"
+                      style="white-space:pre-line;font-size:15px;line-height:1.85;margin:0 0 8px;max-height:480px;overflow:auto"
+                    >{{ output }}</p>
+                    <pre v-if="failed" class="code-block response-debug" style="white-space:pre-wrap;overflow:auto;max-height:560px;margin:8px 0 0">{{ errorDiagnostic }}</pre>
                   </div>
                   <div v-else class="empty-response">
                     <ExperimentOutlined style="font-size:46px;color:#bfbfbf" />
