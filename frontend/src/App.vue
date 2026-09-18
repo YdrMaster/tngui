@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, provide, onMounted, onBeforeUnmount } from "vue";
+import { computed, ref, provide, onMounted, onBeforeUnmount } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { message } from "ant-design-vue";
@@ -45,6 +45,13 @@ const menuItems = [
 
 const runtimeStatus = ref({ running: false, statusLabel: "检测中…" });
 let runtimeTimer: number | undefined;
+
+const views = {
+  overview: Overview,
+  inference: InferenceView,
+  settings: SettingsView,
+} as const;
+const activeView = computed(() => views[view.value]);
 
 async function pollRuntime() {
   try {
@@ -162,9 +169,9 @@ onBeforeUnmount(() => {
           class="p-4 overflow-auto"
           style="background:linear-gradient(145deg,#ffffff 0%,#f3f8ff 52%,#f8fbff 100%)"
         >
-          <Overview v-if="view === 'overview'" />
-          <InferenceView v-else-if="view === 'inference'" />
-          <SettingsView v-else />
+          <KeepAlive include="InferenceView">
+            <component :is="activeView" />
+          </KeepAlive>
         </a-layout-content>
       </a-layout>
     </a-layout>

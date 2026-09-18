@@ -1,12 +1,14 @@
 //! 密态推理请求：通过 tngui 反向代理对外端点发送 OpenAI 兼容的流式 POST 请求。
 //!
 //! `send_inference_stream` 是普通 OpenAI 客户端：仅带 `Authorization: Bearer` + JSON
-//! body（`{model, messages, stream: true}`）POST 到 `127.0.0.1:<port>`——`port` 调用方
-//! 传的是 tngui 反代对外端口（`launch_tng` 启动反代、`proxy_endpoint` 命令暴露）；
-//! `body.model` 交给反代解析，并由 pre-TNG proxy 改写模型 path，此处不改写 path、也
-//! 绝不注入 `x-model`。流式：POST /v1/chat/completions，响应为 OpenAI 兼容 SSE
-//! （`data: {...chunk...}` 逐事件、`data: [DONE]` 终止）；chunked 帧增量剥除，每节
-//! `choices[0].delta.content` 即回调 `on_delta`，不等整包收齐。
+//! body（`{model, messages, stream: true, reasoning_effort}`）POST 到
+//! `127.0.0.1:<port>`——`port` 调用方传的是 tngui 反代对外端口（`launch_tng` 启动反
+//! 代、`proxy_endpoint` 命令暴露）；`body.model` 交给反代解析，并由 pre-TNG proxy
+//! 改写模型 path，此处不改写 path、也绝不注入 `x-model`。流式：POST
+//! /v1/chat/completions，响应为 OpenAI 兼容 SSE（`data: {...chunk...}` 逐事件、
+//! `data: [DONE]` 终止）；chunked 帧增量剥除，每节非空
+//! `choices[0].delta.reasoning` / `choices[0].delta.content` 按类型回调 `on_delta`，
+//! 不等整包收齐。
 
 use std::time::Duration;
 
@@ -16,6 +18,56 @@ use tokio::net::TcpStream;
 
 /// 响应累计上限（头+体裸字节）。超过即失败，防异常流无限累积。
 const RESPONSE_LIMIT: usize = 10 * 1024 * 1024;
+
+/// OpenAI compatible chat message 的受限角色集合。命令边界只接受 user / assistant。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InferenceRole {
+    User,
+    Assistant,
+}
+
+/// 思考强度。默认值为 medium，与 GUI 默认“中”保持一致。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InferenceEffort {
+    None,
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+/// 发送端 OpenAI compatible 消息。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InferenceMessage {
+    pub role: InferenceRole,
+    pub content: String,
+}
+
+/// SSE 增量类型。vLLM 0.26 thinking 模型使用 `delta.reasoning`，最终回答为
+/// `delta.content`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InferenceDeltaKind {
+    Reasoning,
+    Content,
+}
+
+/// 推送给 UI 的 typed SSE 增量。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InferenceDelta {
+    pub kind: InferenceDeltaKind,
+    pub text: String,
+}
+
+/// 流式请求的命令层结果。Stopped 是用户主动取消的成功结果，不是网络错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InferenceStreamOutcome {
+    Completed,
+    Stopped,
+}
 
 /// 推理请求失败时的可读诊断。`request` 已脱敏 Authorization；
 /// `response` 只在收到 HTTP 头后才存在。
@@ -183,10 +235,10 @@ impl SseParser {
 }
 
 /// 单个 SSE `data:` 载荷解释结果。
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum SsePayload {
-    /// `choices[0].delta.content` 非空文本。
-    Delta(String),
+    /// 非空 reasoning/content 增量。
+    Delta(InferenceDelta),
     /// `data: [DONE]`。
     Done,
     /// 无 content（如首节仅 role、终止节仅 finish_reason），跳过。
@@ -199,36 +251,51 @@ fn interpret_sse_data(data: &str) -> Result<SsePayload, String> {
     }
     let v: Value = serde_json::from_str(data)
         .map_err(|e| format!("SSE data JSON 解析失败: {e}: {}", truncate_chars(data, 200)))?;
-    let content = v
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("delta"))
-        .and_then(|d| d.get("content"))
-        .and_then(Value::as_str);
-    match content {
-        Some(s) if !s.is_empty() => Ok(SsePayload::Delta(s.to_string())),
-        _ => Ok(SsePayload::Skip),
+    fn non_empty_delta_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+        let text = value
+            .get("choices")?
+            .get(0)?
+            .get("delta")?
+            .get(field)?
+            .as_str()?;
+        (!text.is_empty()).then_some(text)
     }
+
+    if let Some(text) = non_empty_delta_field(&v, "reasoning") {
+        return Ok(SsePayload::Delta(InferenceDelta {
+            kind: InferenceDeltaKind::Reasoning,
+            text: text.to_string(),
+        }));
+    }
+    if let Some(text) = non_empty_delta_field(&v, "content") {
+        return Ok(SsePayload::Delta(InferenceDelta {
+            kind: InferenceDeltaKind::Content,
+            text: text.to_string(),
+        }));
+    }
+    Ok(SsePayload::Skip)
 }
 
-/// 发送流式推理请求。每节 `choices[0].delta.content` 到达即调用 `on_delta`；
-/// 收到 `data: [DONE]` 返回 `Ok(())`。任何失败（连接失败、非 2xx、2xx 但非
-/// chunked+`text/event-stream`、SSE 事件解析失败、`[DONE]` 前断流、响应超过
-/// 上限）返回既有格式诊断（Authorization 脱敏）。
+/// 发送流式多轮推理请求。每节非空 `delta.reasoning` / `delta.content` 到达即调用
+/// `on_delta`；收到 `data: [DONE]` 返回 `Ok(InferenceStreamOutcome::Completed)`。
+/// 任何失败（连接失败、非 2xx、2xx 但非 chunked+`text/event-stream`、SSE 事件解析
+/// 失败、`[DONE]` 前断流、响应超过上限）返回既有格式诊断（Authorization 脱敏）。
 pub async fn send_inference_stream<F>(
     port: u16,
     model: &str,
     api_key: &str,
-    prompt: &str,
+    messages: &[InferenceMessage],
+    reasoning_effort: InferenceEffort,
     mut on_delta: F,
-) -> Result<(), String>
+) -> Result<InferenceStreamOutcome, String>
 where
-    F: FnMut(String),
+    F: FnMut(InferenceDelta),
 {
     let body = serde_json::json!({
         "model": model,
-        "messages": [{ "role": "user", "content": prompt }],
+        "messages": messages,
         "stream": true,
+        "reasoning_effort": reasoning_effort,
     })
     .to_string();
 
@@ -332,7 +399,7 @@ where
                     break;
                 }
                 if done {
-                    return Ok(());
+                    return Ok(InferenceStreamOutcome::Completed);
                 }
             }
             continue;
@@ -351,7 +418,7 @@ where
                 break;
             }
             if done {
-                return Ok(());
+                return Ok(InferenceStreamOutcome::Completed);
             }
         }
         // 缓冲路径：持续累积到 EOF（外层 break）再统一诊断。
@@ -416,13 +483,13 @@ fn consume_sse_bytes<F>(
     done: &mut bool,
 ) -> Result<(), String>
 where
-    F: FnMut(String),
+    F: FnMut(InferenceDelta),
 {
     let feed = dechunk.feed(bytes)?;
     decoded_body.extend_from_slice(&feed.data);
     for data in sse.feed(&feed.data)? {
         match interpret_sse_data(&data)? {
-            SsePayload::Delta(text) => on_delta(text),
+            SsePayload::Delta(delta) => on_delta(delta),
             SsePayload::Done => {
                 *done = true;
                 return Ok(());
@@ -656,10 +723,58 @@ mod tests {
         assert_eq!(got, vec!["line1\nline2".to_string(), "[DONE]".to_string()]);
     }
 
-    /// 无 content 事件（仅 role / 仅 finish_reason）跳过；非空 content 产出 delta。
+    fn message(content: &str) -> InferenceMessage {
+        InferenceMessage {
+            role: InferenceRole::User,
+            content: content.to_string(),
+        }
+    }
+
     #[test]
-    fn interpret_skips_contentless_and_extracts_delta() {
-        let role = r#"{"choices":[{"delta":{"role":"assistant","content":""}}]}"#;
+    fn typed_contracts_serialize_and_reject_invalid_roles_and_efforts() {
+        let turn = message("你好");
+        let json = serde_json::to_value(&turn).unwrap();
+        assert_eq!(json, serde_json::json!({"role":"user","content":"你好"}));
+        assert_eq!(turn, serde_json::from_value(json).unwrap());
+
+        assert_eq!(
+            serde_json::to_value(InferenceEffort::Medium).unwrap(),
+            serde_json::json!("medium")
+        );
+        assert_eq!(InferenceEffort::default(), InferenceEffort::Medium);
+        assert!(
+            serde_json::from_str::<InferenceMessage>(r#"{"role":"system","content":"x"}"#).is_err()
+        );
+        assert!(serde_json::from_str::<InferenceEffort>("\"extreme\"").is_err());
+
+        let delta = InferenceDelta {
+            kind: InferenceDeltaKind::Reasoning,
+            text: "先思考".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&delta).unwrap(),
+            serde_json::json!({"kind":"reasoning","text":"先思考"})
+        );
+        assert_eq!(
+            delta,
+            serde_json::from_value(serde_json::to_value(&delta).unwrap()).unwrap()
+        );
+
+        assert_eq!(
+            serde_json::to_value(InferenceStreamOutcome::Completed).unwrap(),
+            serde_json::json!("completed")
+        );
+        assert_eq!(
+            serde_json::to_value(InferenceStreamOutcome::Stopped).unwrap(),
+            serde_json::json!("stopped")
+        );
+    }
+
+    /// 无 reasoning/content 事件（仅 role / finish_reason / 空 delta）跳过；两类文本
+    /// 均产出 typed delta。
+    #[test]
+    fn interpret_skips_empty_and_extracts_typed_delta() {
+        let role = r#"{"choices":[{"delta":{"role":"assistant","reasoning":"","content":""}}]}"#;
         match interpret_sse_data(role).unwrap() {
             SsePayload::Skip => {}
             other => panic!("role-only 应跳过: {other:?}"),
@@ -669,11 +784,22 @@ mod tests {
             interpret_sse_data(finish).unwrap(),
             SsePayload::Skip
         ));
+        let thinking = r#"{"choices":[{"delta":{"reasoning":"先分析"}}]}"#;
+        assert_eq!(
+            interpret_sse_data(thinking).unwrap(),
+            SsePayload::Delta(InferenceDelta {
+                kind: InferenceDeltaKind::Reasoning,
+                text: "先分析".to_string(),
+            })
+        );
         let text = r#"{"choices":[{"delta":{"content":"你"}}]}"#;
-        match interpret_sse_data(text).unwrap() {
-            SsePayload::Delta(s) => assert_eq!(s, "你"),
-            other => panic!("content 应产出 delta: {other:?}"),
-        }
+        assert_eq!(
+            interpret_sse_data(text).unwrap(),
+            SsePayload::Delta(InferenceDelta {
+                kind: InferenceDeltaKind::Content,
+                text: "你".to_string(),
+            })
+        );
         assert!(matches!(
             interpret_sse_data("[DONE]").unwrap(),
             SsePayload::Done
@@ -686,7 +812,16 @@ mod tests {
 
     #[tokio::test]
     async fn stream_no_server_returns_err() {
-        let r = send_inference_stream(1, "model", "key", "prompt", |_| {}).await;
+        let messages = vec![message("prompt")];
+        let r = send_inference_stream(
+            1,
+            "model",
+            "key",
+            &messages,
+            InferenceEffort::default(),
+            |_| {},
+        )
+        .await;
         assert!(r.is_err());
         let e = r.unwrap_err();
         assert!(e.contains("发送失败: 连接失败"), "{e}");
@@ -699,10 +834,27 @@ mod tests {
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_string()
     }
 
-    fn chunk_delta(content: &str) -> String {
+    fn chunk_delta_field(field: &str, text: &str) -> String {
         let event = serde_json::json!({
             "id": "x", "object": "chat.completion.chunk",
-            "choices": [{ "index": 0, "delta": { "content": content }, "finish_reason": null }]
+            "choices": [{
+                "index": 0,
+                "delta": { field: text },
+                "finish_reason": null
+            }]
+        })
+        .to_string();
+        format!("data: {event}\n\n")
+    }
+
+    fn chunk_delta(content: &str) -> String {
+        chunk_delta_field("content", content)
+    }
+
+    fn chunk_empty_delta() -> String {
+        let event = serde_json::json!({
+            "id": "x", "object": "chat.completion.chunk",
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": null }]
         })
         .to_string();
         format!("data: {event}\n\n")
@@ -722,10 +874,10 @@ mod tests {
         format!("data: {role}\n\ndata: {finish}\n\n")
     }
 
-    /// 流式退化客户端契约：模型身份只在 body（由反代转 path），绝不注入 x-model；
-    /// body 恒带 stream:true；成功流逐 delta 顺序回调且 [DONE] 后 Ok。
+    /// 多轮 body + 思考强度 + 流式契约：模型身份只在 body（由反代转 path），绝不注入
+    /// x-model；body 恒带 stream:true 与 reasoning_effort；成功流逐 delta 顺序回调。
     #[tokio::test]
-    async fn stream_posts_stream_true_no_x_model_deltas_in_order() {
+    async fn stream_posts_multiturn_stream_reasoning_and_no_x_model() {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = l.local_addr().unwrap().port();
         let seen: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
@@ -752,13 +904,28 @@ mod tests {
             s.flush().await.unwrap();
         });
 
+        let request_messages = vec![
+            message("第一轮"),
+            InferenceMessage {
+                role: InferenceRole::Assistant,
+                content: "第一轮回答".to_string(),
+            },
+            message("第二轮"),
+        ];
         let deltas = Arc::new(Mutex::new(Vec::new()));
         let d2 = deltas.clone();
-        let r = send_inference_stream(port, "gpt-x", "key", "ping", move |t| {
-            d2.lock().unwrap().push(t);
-        })
+        let r = send_inference_stream(
+            port,
+            "gpt-x",
+            "key",
+            &request_messages,
+            InferenceEffort::default(),
+            move |delta| {
+                d2.lock().unwrap().push(delta);
+            },
+        )
         .await;
-        r.unwrap();
+        assert_eq!(r.unwrap(), InferenceStreamOutcome::Completed);
 
         let request = String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
         assert!(
@@ -768,18 +935,92 @@ mod tests {
                 .starts_with("x-model:")),
             "send_inference_stream 不应注入 x-model"
         );
-        assert!(
-            request.contains("\"stream\":true"),
-            "body 应含 stream:true: {request}"
+        let body = request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| serde_json::from_str::<Value>(body).unwrap())
+            .unwrap();
+        assert_eq!(body["model"], serde_json::json!("gpt-x"));
+        assert_eq!(body["stream"], serde_json::json!(true));
+        assert_eq!(body["reasoning_effort"], serde_json::json!("medium"));
+        assert_eq!(
+            body["messages"],
+            serde_json::json!([
+                {"role":"user","content":"第一轮"},
+                {"role":"assistant","content":"第一轮回答"},
+                {"role":"user","content":"第二轮"}
+            ])
         );
-        assert!(request.contains("\"model\":\"gpt-x\""), "{request}");
+        assert!(
+            !request.lines().skip(1).any(|ln| ln.contains("x-model")),
+            "send_inference_stream 不应注入 x-model"
+        );
         assert!(
             !request.contains("Bearer <已隐藏>"),
             "实际请求应带真实凭据（仅诊断脱敏）"
         );
         assert_eq!(
             *deltas.lock().unwrap(),
-            vec!["你".to_string(), "好".to_string()]
+            vec![
+                InferenceDelta {
+                    kind: InferenceDeltaKind::Content,
+                    text: "你".to_string(),
+                },
+                InferenceDelta {
+                    kind: InferenceDeltaKind::Content,
+                    text: "好".to_string(),
+                },
+            ]
+        );
+    }
+
+    /// vLLM 0.26 thinking 模型顺序：role → reasoning → 空 delta → content → [DONE]。
+    #[tokio::test]
+    async fn stream_parses_reasoning_and_content_in_order() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            read_request_safely(&mut s).await;
+            let body = format!(
+                "{}{}{}{}{}",
+                chunk_role_and_finish().replace(",\"content\":\"\"", ""),
+                chunk_delta_field("reasoning", "先分析"),
+                chunk_empty_delta(),
+                chunk_delta_field("content", "回答"),
+                "data: [DONE]\n\n",
+            );
+            let resp = format!("{}{:x}\r\n{body}\r\n0\r\n\r\n", sse_head(), body.len());
+            s.write_all(resp.as_bytes()).await.unwrap();
+            s.flush().await.unwrap();
+        });
+
+        let messages = vec![message("thinking")];
+        let deltas: Arc<Mutex<Vec<InferenceDelta>>> = Arc::new(Mutex::new(Vec::new()));
+        let d2 = deltas.clone();
+        send_inference_stream(
+            port,
+            "m",
+            "k",
+            &messages,
+            InferenceEffort::High,
+            move |delta| {
+                d2.lock().unwrap().push(delta);
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *deltas.lock().unwrap(),
+            vec![
+                InferenceDelta {
+                    kind: InferenceDeltaKind::Reasoning,
+                    text: "先分析".to_string(),
+                },
+                InferenceDelta {
+                    kind: InferenceDeltaKind::Content,
+                    text: "回答".to_string(),
+                },
+            ]
         );
     }
 
@@ -801,14 +1042,38 @@ mod tests {
             s.write_all(resp.as_bytes()).await.unwrap();
             s.flush().await.unwrap();
         });
-        let deltas: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let messages = vec![message("p")];
+        let deltas: Arc<Mutex<Vec<InferenceDelta>>> = Arc::new(Mutex::new(Vec::new()));
         let d2 = deltas.clone();
-        send_inference_stream(port, "m", "k", "p", move |t| {
-            d2.lock().unwrap().push(t);
-        })
+        send_inference_stream(
+            port,
+            "m",
+            "k",
+            &messages,
+            InferenceEffort::Low,
+            move |delta| {
+                d2.lock().unwrap().push(delta);
+            },
+        )
         .await
         .unwrap();
-        assert_eq!(*deltas.lock().unwrap(), vec!["1", "2", "3"]);
+        assert_eq!(
+            *deltas.lock().unwrap(),
+            vec![
+                InferenceDelta {
+                    kind: InferenceDeltaKind::Content,
+                    text: "1".to_string(),
+                },
+                InferenceDelta {
+                    kind: InferenceDeltaKind::Content,
+                    text: "2".to_string(),
+                },
+                InferenceDelta {
+                    kind: InferenceDeltaKind::Content,
+                    text: "3".to_string(),
+                },
+            ]
+        );
     }
 
     /// [DONE] 前连接关闭：失败诊断标注断流且无明文凭据；已产 delta 不影响 Err。
@@ -825,7 +1090,15 @@ mod tests {
             s.flush().await.unwrap();
             drop(s); // 无 0 终帧、无 [DONE] 直接断
         });
-        let r = send_inference_stream(port, "m", "k", "p", |_| {}).await;
+        let r = send_inference_stream(
+            port,
+            "m",
+            "k",
+            &[message("p")],
+            InferenceEffort::None,
+            |_| {},
+        )
+        .await;
         let e = r.unwrap_err();
         assert!(e.contains("流中断"), "{e}");
         assert!(e.contains("未收到 [DONE]"), "{e}");
@@ -847,7 +1120,15 @@ mod tests {
             s.write_all(resp.as_bytes()).await.unwrap();
             s.flush().await.unwrap();
         });
-        let r = send_inference_stream(port, "m", "k", "p", |_| {}).await;
+        let r = send_inference_stream(
+            port,
+            "m",
+            "k",
+            &[message("p")],
+            InferenceEffort::None,
+            |_| {},
+        )
+        .await;
         let e = r.unwrap_err();
         assert!(e.contains("SSE data JSON 解析失败"), "{e}");
         assert!(e.contains("{not-json}"), "{e}");
@@ -871,7 +1152,15 @@ mod tests {
             s.write_all(resp.as_bytes()).await.unwrap();
             s.flush().await.unwrap();
         });
-        let r = send_inference_stream(port, "m", "k", "p", |_| {}).await;
+        let r = send_inference_stream(
+            port,
+            "m",
+            "k",
+            &[message("p")],
+            InferenceEffort::None,
+            |_| {},
+        )
+        .await;
         let e = r.unwrap_err();
         assert!(e.contains("WAF block"), "错误应带 body 摘要: {e}");
         assert!(e.contains("不是 SSE 数据流"), "{e}");
@@ -896,7 +1185,15 @@ mod tests {
             s.write_all(resp.as_bytes()).await.unwrap();
             s.flush().await.unwrap();
         });
-        let r = send_inference_stream(port, "m", "k", "p", |_| {}).await;
+        let r = send_inference_stream(
+            port,
+            "m",
+            "k",
+            &[message("p")],
+            InferenceEffort::None,
+            |_| {},
+        )
+        .await;
         let e = r.unwrap_err();
         assert!(e.starts_with("发送失败: HTTP 502"), "{e}");
         assert!(e.contains("HttpCipherTextBadResponse"), "{e}");
@@ -920,7 +1217,15 @@ mod tests {
                 }
             }
         });
-        let r = send_inference_stream(port, "m", "k", "p", |_| {}).await;
+        let r = send_inference_stream(
+            port,
+            "m",
+            "k",
+            &[message("p")],
+            InferenceEffort::None,
+            |_| {},
+        )
+        .await;
         let e = r.unwrap_err();
         assert!(e.contains("上限"), "{e}");
     }

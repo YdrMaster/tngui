@@ -1,17 +1,18 @@
 <script setup lang="ts">
-import { ref, computed, inject, onMounted, onBeforeUnmount, nextTick, watch } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick, watch } from "vue";
 import { message } from "ant-design-vue";
 import {
-  ExperimentOutlined, SendOutlined, InfoCircleOutlined, LockOutlined, LoadingOutlined,
+  ExperimentOutlined, SendOutlined, InfoCircleOutlined, LockOutlined,
   SafetyCertificateOutlined, CloudServerOutlined, ApiOutlined, StopOutlined, CheckCircleOutlined,
-  DownloadOutlined, ImportOutlined, ExportOutlined, GlobalOutlined,
 } from "@ant-design/icons-vue";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
 import { useIngressState } from "../composables/useIngressState";
-import { listModels, proxyEndpoint, sendInferenceStream } from "../tauri";
+import { listModels, proxyEndpoint, sendInferenceStream, stopInferenceStream, type InferenceDelta, type InferenceEffort, type InferenceMessage } from "../tauri";
 import SecureFlow from "../components/SecureFlow.vue";
 import ArchitectureFlow from "../components/ArchitectureFlow.vue";
 import ProtectionItem from "../components/ProtectionItem.vue";
+
+defineOptions({ name: "InferenceView" });
 
 const {
   apiKey,
@@ -24,27 +25,64 @@ const {
   failModelDiscovery,
 } = useInferenceConfig();
 const { tngRunning } = useIngressState();
-const navigate = inject<(target: "overview" | "inference" | "settings") => void>(
-  "navigate",
-  () => {},
-);
+type InferenceChatTab = "request" | "integration" | "security";
+type ChatRole = "user" | "assistant";
+type ChatStatus = "stage-playing" | "streaming" | "complete" | "failed" | "stopped";
 
-const activeTab = ref<"request" | "integration" | "security">("request");
-const prompt = ref("请用三点说明密态推理如何保护我的输入数据。");
-const output = ref("");
+interface UserChatMessage {
+  id: string;
+  role: "user";
+  content: string;
+}
+
+interface AssistantChatMessage {
+  id: string;
+  role: "assistant";
+  reasoning: string;
+  content: string;
+  status: ChatStatus;
+  phase: number;
+  diagnostic?: string;
+  hasDelta: boolean;
+  bufferedReasoning: string;
+  bufferedContent: string;
+  networkComplete: boolean;
+  finalStageAt?: number;
+}
+
+type ChatMessage = UserChatMessage | AssistantChatMessage;
+
+const STAGE_INTERVAL_MS = 520;
+const FINAL_STAGE_INDEX = 4;
+const FINAL_STAGE_HOLD_MS = 500;
+
+const activeTab = ref<InferenceChatTab>("request");
+const draft = ref("");
+const messages = ref<ChatMessage[]>([]);
 const sending = ref(false);
-// 流式状态：首个 delta 已到达（阶段卡冻结，响应区切渐进文本）。
-const streaming = ref(false);
-const phase = ref(4);
-const phaseTimer = ref<number | undefined>(undefined);
-const statusCode = ref(0);
-const failed = ref(false);
-// 失败诊断（与 output 分离：断流时保留已到达文本 + 诊断并示）。
-const errorDiagnostic = ref("");
-const responseText = ref<HTMLElement | null>(null);
-// 反代对外端口（取自 proxy_endpoint[0].port）：tng 未启动时为 null。
+const activeAssistantId = ref<string | undefined>(undefined);
+const transcriptEl = ref<HTMLElement | null>(null);
 const proxyPort = ref<number | null>(null);
 let proxyTimer: number | undefined;
+let scrollFrame: number | undefined;
+let messageSequence = 0;
+const stageTimers = new Map<string, number>();
+const revealTimers = new Map<string, number>();
+
+const thinkingLevels = [
+  { value: 0, label: "关", effort: "none" },
+  { value: 1, label: "低", effort: "low" },
+  { value: 2, label: "中", effort: "medium" },
+  { value: 3, label: "高", effort: "high" },
+] as const;
+const thinkingLevel = ref(2);
+const thinkingMarks: Record<number, string> = { 0: "关", 1: "低", 2: "中", 3: "高" };
+const thinkingEffort = computed(() => thinkingLevels[thinkingLevel.value].effort);
+
+function nextId(prefix: ChatRole): string {
+  messageSequence += 1;
+  return `${prefix}-${messageSequence}`;
+}
 
 async function fetchProxy() {
   try {
@@ -75,8 +113,17 @@ onMounted(() => {
   fetchProxy();
   proxyTimer = window.setInterval(fetchProxy, 2000);
 });
+onActivated(() => {
+  void nextTick(scrollToBottom);
+});
+onDeactivated(() => {
+  // Deliberately empty: switching pages must not reset state, stop timers,
+  // or cancel an in-flight stream.
+});
 onBeforeUnmount(() => {
   if (proxyTimer) window.clearInterval(proxyTimer);
+  clearAllTurnTimers();
+  if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
 });
 
 const localEndpoint = computed(() =>
@@ -105,12 +152,11 @@ const modelStateMessage = computed(() => {
 });
 
 const canSelectModel = computed(() => modelDiscoveryState.value === "loaded-nonempty");
-// 发送门锁：概览运行、apiKey、可用模型清单和清单内选中模型同时满足。
 const usable = computed(() => tngRunning.value && !!apiKey.value && canSelectModel.value && !!model.value);
 
-const curlExample = computed(() => `curl -N http://127.0.0.1:${proxyPort.value ?? 8080}/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <YOUR_API_KEY>" \
+const curlExample = computed(() => `curl -N http://127.0.0.1:${proxyPort.value ?? 8080}/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer <YOUR_API_KEY>" \\
   -d '{
     "model": "${modelStateMessage.value || model.value}",
     "messages": [{"role": "user", "content": "请分析这段文本"}],
@@ -122,54 +168,279 @@ API Base URL   ${localEndpoint.value}
 API Key        <从 1 号节点控制台获取>
 Model ID       ${modelStateMessage.value || model.value}`);
 
-/** 首个 delta 到达：结束阶段动画（冻结在当前阶段），切换为渐进文本渲染。 */
-function onFirstDelta() {
-  streaming.value = true;
-  statusCode.value = 200; failed.value = false; errorDiagnostic.value = "";
-  window.clearInterval(phaseTimer.value);
+function buildRequestMessages(history: ChatMessage[]): InferenceMessage[] {
+  const requestMessages: InferenceMessage[] = [];
+  for (const chatMessage of history) {
+    if (chatMessage.role === "user") {
+      requestMessages.push({ role: "user", content: chatMessage.content });
+    } else if (chatMessage.status === "complete" && chatMessage.content.length > 0) {
+      requestMessages.push({ role: "assistant", content: chatMessage.content });
+    }
+  }
+  return requestMessages;
 }
 
-async function onSend() {
-  if (!usable.value) { message.warning("请先在「概览」启动 TNG 网关（显示运行）、在「设置」配置 API Key，并确认存在可用的密态模型"); return; }
-  if (!prompt.value.trim()) { message.warning("请输入测试内容"); return; }
+function findAssistant(id: string): AssistantChatMessage | undefined {
+  const found = messages.value.find((chatMessage) => chatMessage.id === id);
+  return found?.role === "assistant" ? found : undefined;
+}
+
+function scrollToBottom(): void {
+  const el = transcriptEl.value;
+  if (el) el.scrollTop = el.scrollHeight;
+}
+
+function scheduleScrollToBottom(): void {
+  void nextTick(() => {
+    if (scrollFrame !== undefined) return;
+    scrollFrame = window.requestAnimationFrame(() => {
+      scrollFrame = undefined;
+      scrollToBottom();
+    });
+  });
+}
+
+function clearTurnTimers(id: string): void {
+  const stageTimer = stageTimers.get(id);
+  if (stageTimer !== undefined) {
+    window.clearInterval(stageTimer);
+    stageTimers.delete(id);
+  }
+  const revealTimer = revealTimers.get(id);
+  if (revealTimer !== undefined) {
+    window.clearTimeout(revealTimer);
+    revealTimers.delete(id);
+  }
+}
+
+function clearAllTurnTimers(): void {
+  for (const id of [...stageTimers.keys(), ...revealTimers.keys()]) {
+    clearTurnTimers(id);
+  }
+}
+
+function startStageAnimation(id: string): void {
+  clearTurnTimers(id);
+  const turn = findAssistant(id);
+  if (!turn) return;
+  turn.phase = 0;
+  turn.finalStageAt = undefined;
+  const timer = window.setInterval(() => {
+    const current = findAssistant(id);
+    if (!current || current.status !== "stage-playing") {
+      clearTurnTimers(id);
+      return;
+    }
+    current.phase = Math.min(current.phase + 1, FINAL_STAGE_INDEX);
+    if (current.phase === FINAL_STAGE_INDEX) {
+      const stageTimer = stageTimers.get(id);
+      if (stageTimer !== undefined) {
+        window.clearInterval(stageTimer);
+        stageTimers.delete(id);
+      }
+      current.finalStageAt = Date.now();
+      scheduleFinalHold(id);
+    }
+    scheduleScrollToBottom();
+  }, STAGE_INTERVAL_MS);
+  stageTimers.set(id, timer);
+}
+
+function scheduleFinalHold(id: string): void {
+  if (revealTimers.has(id)) return;
+  const timer = window.setTimeout(() => {
+    revealTimers.delete(id);
+    maybeReveal(id);
+  }, FINAL_STAGE_HOLD_MS);
+  revealTimers.set(id, timer);
+}
+
+function maybeReveal(id: string): void {
+  const turn = findAssistant(id);
+  if (!turn || turn.status !== "stage-playing") return;
+  const finalAt = turn.finalStageAt;
+  if (
+    turn.phase !== FINAL_STAGE_INDEX ||
+    finalAt === undefined ||
+    Date.now() - finalAt < FINAL_STAGE_HOLD_MS ||
+    !turn.hasDelta
+  ) {
+    return;
+  }
+  clearTurnTimers(id);
+  turn.reasoning = turn.bufferedReasoning;
+  turn.content = turn.bufferedContent;
+  turn.status = "streaming";
+  scheduleScrollToBottom();
+  if (turn.networkComplete) finalizeComplete(id);
+}
+
+function finalizeComplete(id: string): void {
+  const turn = findAssistant(id);
+  if (!turn || turn.status === "failed" || turn.status === "stopped") return;
+  clearTurnTimers(id);
+  turn.status = "complete";
+  if (activeAssistantId.value === id) {
+    activeAssistantId.value = undefined;
+    sending.value = false;
+  }
+  scheduleScrollToBottom();
+}
+
+function finalizeStopped(id: string): void {
+  const turn = findAssistant(id);
+  if (!turn || turn.status === "complete" || turn.status === "failed" || turn.status === "stopped") return;
+  clearTurnTimers(id);
+  if (turn.status === "stage-playing") {
+    // 阶段动画中的一切后台缓冲都不揭示；对用户而言本轮如同没有收到任何 chunk。
+    turn.reasoning = "";
+    turn.content = "";
+    turn.bufferedReasoning = "";
+    turn.bufferedContent = "";
+    turn.hasDelta = false;
+    turn.networkComplete = false;
+  }
+  turn.status = "stopped";
+  turn.diagnostic = undefined;
+  if (activeAssistantId.value === id) {
+    activeAssistantId.value = undefined;
+    sending.value = false;
+  }
+  scheduleScrollToBottom();
+}
+
+function finalizeFailure(id: string, diagnostic: string): void {
+  const turn = findAssistant(id);
+  if (!turn || turn.status === "complete" || turn.status === "failed" || turn.status === "stopped") return;
+  clearTurnTimers(id);
+  if (turn.status === "stage-playing") {
+    turn.reasoning = turn.bufferedReasoning;
+    turn.content = turn.bufferedContent;
+  }
+  turn.status = "failed";
+  turn.diagnostic = diagnostic;
+  if (activeAssistantId.value === id) {
+    activeAssistantId.value = undefined;
+    sending.value = false;
+  }
+  scheduleScrollToBottom();
+}
+
+function applyDelta(id: string, delta: InferenceDelta): void {
+  const turn = findAssistant(id);
+  if (!turn || delta.text.length === 0) return;
+  if (turn.status === "stage-playing") {
+    if (delta.kind === "reasoning") turn.bufferedReasoning += delta.text;
+    else turn.bufferedContent += delta.text;
+    turn.hasDelta = true;
+    maybeReveal(id);
+    return;
+  }
+  if (turn.status === "streaming") {
+    if (delta.kind === "reasoning") turn.reasoning += delta.text;
+    else turn.content += delta.text;
+  }
+  scheduleScrollToBottom();
+}
+
+async function onSend(): Promise<void> {
+  if (sending.value) return;
+  if (!usable.value) {
+    message.warning("请先在「概览」启动 TNG 网关（显示运行）、在「设置」配置 API Key，并确认存在可用的密态模型");
+    return;
+  }
+  if (!draft.value.trim()) { message.warning("请输入消息内容"); return; }
   if (proxyPort.value === null) { message.warning("网关对外端口未就绪，无法发送"); return; }
-  sending.value = true; streaming.value = false; output.value = "";
-  statusCode.value = 0; failed.value = false; errorDiagnostic.value = ""; phase.value = 0;
-  let step = 0;
-  phaseTimer.value = window.setInterval(() => {
-    step += 1; phase.value = step;
-    if (step >= 4) window.clearInterval(phaseTimer.value);
-  }, 520);
+
+  const originalInput = draft.value;
+  const requestMessages = buildRequestMessages(messages.value);
+  requestMessages.push({ role: "user", content: originalInput });
+
+  const userTurn: UserChatMessage = { id: nextId("user"), role: "user", content: originalInput };
+  const assistantId = nextId("assistant");
+  const assistantTurn: AssistantChatMessage = {
+    id: assistantId,
+    role: "assistant",
+    reasoning: "",
+    content: "",
+    status: "stage-playing",
+    phase: 0,
+    hasDelta: false,
+    bufferedReasoning: "",
+    bufferedContent: "",
+    networkComplete: false,
+  };
+  messages.value.push(userTurn, assistantTurn);
+  draft.value = "";
+  sending.value = true;
+  activeAssistantId.value = assistantId;
+  scheduleScrollToBottom();
+  startStageAnimation(assistantId);
+
   try {
-    await sendInferenceStream(
-      proxyPort.value, model.value, apiKey.value, prompt.value,
-      (delta) => {
-        if (!streaming.value) onFirstDelta();
-        output.value += delta;
-        void nextTick(() => {
-          const el = responseText.value;
-          if (el) el.scrollTop = el.scrollHeight;
-        });
-      },
+    const outcome = await sendInferenceStream(
+      assistantId,
+      proxyPort.value,
+      model.value,
+      apiKey.value,
+      requestMessages,
+      thinkingEffort.value,
+      (delta) => applyDelta(assistantId, delta),
     );
-    window.clearInterval(phaseTimer.value); phase.value = 4;
-    statusCode.value = 200; failed.value = false;
-  } catch (e) {
-    window.clearInterval(phaseTimer.value);
-    failed.value = true; errorDiagnostic.value = String(e);
-    // 断流/失败不改写已到达文本（spec：已渲染文本不得清空）；无 delta 时 statusCode 已是 0。
-    if (!streaming.value) { statusCode.value = 0; phase.value = 1; }
-  } finally { sending.value = false; streaming.value = false; }
+    const turn = findAssistant(assistantId);
+    if (!turn || turn.status === "failed" || turn.status === "stopped") return;
+    if (outcome === "stopped") {
+      finalizeStopped(assistantId);
+      return;
+    }
+    turn.networkComplete = true;
+    if (turn.status === "streaming") finalizeComplete(assistantId);
+    else maybeReveal(assistantId);
+  } catch (error) {
+    finalizeFailure(assistantId, String(error));
+  }
+}
+
+/** 用户主动停止：本地先进入 stopped 终态，再请求后端取消并忽略迟到 delta。 */
+async function onStop(): Promise<void> {
+  const id = activeAssistantId.value;
+  if (!id || !sending.value) return;
+  const turn = findAssistant(id);
+  if (!turn || turn.status === "complete" || turn.status === "failed" || turn.status === "stopped") return;
+  finalizeStopped(id);
+  try {
+    await stopInferenceStream(id);
+  } catch (error) {
+    message.error(`停止推理请求失败: ${String(error)}`);
+  }
+}
+
+function assistantStatusMeta(status: ChatStatus): { color: string; text: string } {
+  switch (status) {
+    case "stage-playing": return { color: "processing", text: "安全链路" };
+    case "streaming": return { color: "processing", text: "生成中" };
+    case "complete": return { color: "success", text: "200 OK" };
+    case "failed": return { color: "error", text: "请求失败" };
+    case "stopped": return { color: "warning", text: "已停止⚪响应不完整" };
+  }
+}
+
+/** 正常对话的进行中与完整状态共用淡绿色；停止和失败使用专用警示色。 */
+function assistantBubbleClass(status: ChatStatus): string {
+  if (status === "complete") return "assistant-bubble-complete";
+  if (status === "stopped") return "assistant-bubble-stopped";
+  if (status === "failed") return "assistant-bubble-failed";
+  return "assistant-bubble-pending";
 }
 </script>
 
 <template>
-  <div class="full-width" style="max-width:1540px;margin:0 auto">
+  <div class="full-width inference-shell" style="max-width:1540px;margin:0 auto">
     <!-- PageHeader -->
     <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start">
       <div>
         <h3 style="margin:0 0 4px;font-size:24px;font-weight:650">密态推理调试</h3>
-        <span style="color:var(--text-secondary)">在一个场景内完成单次请求验证、AI 客户端接入和安全机制了解。</span>
+        <span style="color:var(--text-secondary)">在一个场景内完成多轮推理对话、AI 客户端接入和安全机制了解。</span>
       </div>
       <a-tag><InfoCircleOutlined /> 演示与接入工具</a-tag>
     </div>
@@ -179,117 +450,128 @@ async function onSend() {
 
         <!-- Tab: 请求调试 -->
         <a-tab-pane key="request" tab="请求调试">
-          <div class="tab-intro" style="display:flex;justify-content:space-between;align-items:center">
-            <div>
-              <h4 style="margin:0 0 4px;font-size:16px;font-weight:600">单次请求调试</h4>
-              <span style="color:var(--text-secondary);font-size:13px">
-                模型清单经 capi `/v1/models` 直连获取；发送的推理请求仍通过 TNG 加密与远程证明链路。
-              </span>
+          <div class="chat-shell">
+            <div class="chat-toolbar">
+              <div class="model-control">
+                <a-select
+                  :value="model"
+                  :options="modelOptions"
+                  :disabled="!canSelectModel"
+                  :placeholder="modelStateMessage"
+                  :allow-clear="false"
+                  show-search
+                  :filter-option="filterModelOption"
+                  aria-label="选择推理模型"
+                  @update:value="selectModel"
+                />
+              </div>
+              <div class="thinking-control">
+                <span class="control-label">思考强度</span>
+                <a-slider
+                  v-model:value="thinkingLevel"
+                  class="thinking-slider"
+                  :min="0"
+                  :max="3"
+                  :step="1"
+                  :marks="thinkingMarks"
+                  :tooltip-open="false"
+                />
+              </div>
             </div>
-            <a-tag><InfoCircleOutlined /> 单次请求模式</a-tag>
-          </div>
-          <a-alert
-            v-if="!usable"
-            type="warning"
-            showIcon
-            style="margin-bottom:16px"
-            message="当前无法发送测试请求"
-            description="请先恢复网关、API Key 与模型清单状态。"
-          />
-          <a-row :gutter="[16, 16]">
-            <a-col :span="11">
-              <a-card title="请求">
-                <a-form layout="vertical">
-                  <a-form-item label="模型">
-                  <a-select
-                    :value="model"
-                    :options="modelOptions"
-                    :disabled="!canSelectModel"
-                    :placeholder="modelStateMessage"
-                    :allow-clear="false"
-                    show-search
-                    :filter-option="filterModelOption"
-                    @update:value="selectModel"
-                  />
-                </a-form-item>
-                  <a-form-item label="输入内容">
-                    <a-textarea
-                      v-model:value="prompt"
-                      class="prompt-textarea"
-                      :auto-size="{ minRows: 4, maxRows: 16 }"
-                      :maxlength="4000"
-                      showCount
-                      autocapitalize="off"
-                      autocorrect="off"
-                      spellcheck="false"
-                      placeholder="输入一段用于连通性测试的内容"
-                    />
-                  </a-form-item>
-                  <a-button
-                    block
-                    size="large"
-                    type="primary"
-                    class="send-button"
-                    :loading="sending"
-                    :disabled="!usable"
-                    @click="onSend"
-                  >
-                    <SendOutlined />
-                    <span>{{ sending ? "正在安全发送" : "发送测试请求" }}</span>
-                  </a-button>
-                </a-form>
-              </a-card>
-            </a-col>
-            <a-col :span="13">
-              <a-card title="响应">
-                <template #extra>
-                  <span v-if="streaming && sending" style="display:flex;gap:8px;align-items:center">
-                    <a-tag color="processing">200 OK</a-tag>
-                    <span style="color:var(--text-secondary)">正在生成，响应已在本地解密</span>
-                  </span>
-                  <span v-else-if="output && statusCode === 200 && !failed" style="display:flex;gap:8px;align-items:center">
-                    <a-tag color="success">200 OK</a-tag>
-                    <span style="color:var(--text-secondary)">响应已在本地解密</span>
-                  </span>
-                  <span v-else-if="failed" style="display:flex;gap:8px;align-items:center">
-                    <a-tag color="error">请求失败</a-tag>
-                    <span v-if="output" style="color:var(--text-secondary)">响应不完整（已保留部分文本）· 调试详情（Authorization 已脱敏）</span>
-                    <span v-else style="color:var(--text-secondary)">调试详情（Authorization 已脱敏）</span>
-                  </span>
-                </template>
-                <div class="response-panel">
-                  <div v-if="sending && !streaming" class="sending-state">
-                    <Spin size="large" />
-                    <a-progress :percent="(phase + 1) * 20" :showInfo="false" style="width:min(360px,100%)" />
-                    <SecureFlow :active-index="phase" />
+
+            <a-alert
+              v-if="!usable"
+              class="chat-gate"
+              type="warning"
+              show-icon
+              message="当前无法发送推理请求"
+              description="请先恢复网关运行状态、API Key 与模型清单。"
+            />
+
+            <div ref="transcriptEl" class="chat-transcript" aria-label="密态推理对话记录">
+              <div v-if="messages.length === 0" class="empty-chat">
+                <ExperimentOutlined />
+                <span>发送一条消息，开始多轮密态推理验证</span>
+              </div>
+              <template v-else>
+                <div
+                  v-for="chatMessage in messages"
+                  :key="chatMessage.id"
+                  :class="['chat-message', chatMessage.role === 'user' ? 'user-message' : 'assistant-message']"
+                >
+                  <div v-if="chatMessage.role === 'user'" class="chat-bubble user-bubble">
+                    {{ chatMessage.content }}
                   </div>
-                  <!-- 首个 delta 到达：阶段卡冻结在当前阶段，下方渐进渲染文本 -->
-                  <div v-else-if="sending && streaming" class="streaming-state">
-                    <SecureFlow :active-index="phase" />
-                    <div class="streaming-body">
-                      <p ref="responseText" class="response-text" style="margin:0">{{ output }}</p>
-                      <span class="stream-caret" />
+                  <div v-else :class="['chat-bubble', 'assistant-bubble', assistantBubbleClass(chatMessage.status)]">
+                    <div class="assistant-meta">
+                      <a-tag :color="assistantStatusMeta(chatMessage.status).color">
+                        {{ assistantStatusMeta(chatMessage.status).text }}
+                      </a-tag>
+                      <span v-if="chatMessage.status === 'stage-playing'">正在建立安全链路</span>
+                      <span v-else-if="chatMessage.status === 'streaming'">正在生成，响应已在本地解密</span>
+                      <span v-else-if="chatMessage.status === 'complete'">响应已在本地解密</span>
+                      <span v-else-if="chatMessage.status === 'stopped'">用户停止了本轮生成</span>
+                      <span v-else-if="chatMessage.content || chatMessage.reasoning">
+                        响应不完整（已保留部分输出）
+                      </span>
+                      <span v-else>流中断，未收到可显示输出</span>
                     </div>
-                  </div>
-                  <div v-else-if="output || errorDiagnostic" style="padding:8px">
-                    <p
-                      v-if="output"
-                      class="response-text"
-                      style="white-space:pre-line;font-size:15px;line-height:1.85;margin:0 0 8px;max-height:480px;overflow:auto"
-                    >{{ output }}</p>
-                    <pre v-if="failed" class="code-block response-debug" style="white-space:pre-wrap;overflow:auto;max-height:560px;margin:8px 0 0">{{ errorDiagnostic }}</pre>
-                  </div>
-                  <div v-else class="empty-response">
-                    <ExperimentOutlined style="font-size:46px;color:#bfbfbf" />
-                    <span style="color:var(--text-secondary)">发送一条请求以验证连接</span>
+
+                    <div v-if="chatMessage.status === 'stage-playing'" class="assistant-stage">
+                      <a-progress
+                        :percent="(chatMessage.phase + 1) * 20"
+                        :show-info="false"
+                      />
+                      <SecureFlow :active-index="chatMessage.phase" />
+                    </div>
+
+                    <template v-else>
+                      <section v-if="chatMessage.reasoning" class="reasoning-block">
+                        <span class="section-label">思考过程</span>
+                        <p class="reasoning-text">{{ chatMessage.reasoning }}</p>
+                      </section>
+                      <section
+                        v-if="chatMessage.content || chatMessage.status !== 'stopped'"
+                        class="assistant-content"
+                      >
+                        <span class="section-label">最终回答</span>
+                        <p v-if="chatMessage.content" class="response-text">{{ chatMessage.content }}</p>
+                        <p v-else class="empty-assistant-text">尚未返回最终回答</p>
+                      </section>
+                      <pre
+                        v-if="chatMessage.status === 'failed' && chatMessage.diagnostic"
+                        class="code-block assistant-debug"
+                      >{{ chatMessage.diagnostic }}</pre>
+                    </template>
                   </div>
                 </div>
-              </a-card>
-            </a-col>
-          </a-row>
-          <a-alert type="warning" showIcon style="margin-top:16px"
-            message="本客户端不是聊天工具"
-            description="不提供会话历史、多轮对话管理或长期内容存储。业务应用请通过本地 API Base URL 接入。" />
+              </template>
+            </div>
+
+            <div class="chat-composer">
+              <a-textarea
+                v-model:value="draft"
+                class="prompt-textarea"
+                :auto-size="{ minRows: 1, maxRows: 8 }"
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck="false"
+                placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+                @keydown.enter.exact.prevent="onSend"
+              />
+              <a-button
+                :type="sending ? 'default' : 'primary'"
+                :class="['send-button', { 'stop-button': sending }]"
+                :disabled="!sending && !usable"
+                :aria-label="sending ? '停止' : '发送'"
+                :title="sending ? '停止' : '发送'"
+                @click="sending ? onStop() : onSend()"
+              >
+                <span v-if="sending" class="stop-square-icon" aria-hidden="true"></span>
+                <SendOutlined v-else />
+              </a-button>
+            </div>
+          </div>
         </a-tab-pane>
 
         <!-- Tab: AI 客户端接入 -->

@@ -184,7 +184,7 @@ async fn handle_conn(
     // 3.1 direct capi model discovery exception：精确 GET /v1/models 不进入 tng。
     if is_exact_model_discovery(&method, &path) {
         return match models_origin.as_deref() {
-            Some(origin) => match direct_model_request(&origin, &path, &headers).await {
+            Some(origin) => match direct_model_request(origin, &path, &headers).await {
                 Ok(response) => write_direct_response(&mut client, response).await,
                 Err(message) => {
                     write_model_discovery_failure(&mut client, &format!("请求失败: {message}"))
@@ -388,7 +388,6 @@ fn resolve_model_path(method: &str, path_with_query: &str, body: &[u8]) -> Model
     };
     let (raw_path, query) = path_with_query
         .split_once('?')
-        .map(|(p, q)| (p, q))
         .unwrap_or((path_with_query, ""));
     let prefix = format!("/models/{}", encode_model_segment(&model));
     ModelOverride::Path(if query.is_empty() {
@@ -789,7 +788,7 @@ mod tests {
                 headers: parse_headers(&head),
                 body: buf[body_off..].to_vec(),
             });
-            let body = format!(r#"{{"object":"list","data":[{{"id":"model-a"}}]}}"#);
+            let body = r#"{"object":"list","data":[{"id":"model-a"}]}"#.to_string();
             let response = format!(
                 "HTTP/1.1 200 OK
 Content-Type: application/json

@@ -139,20 +139,19 @@ fn validate_user_ports(root: &serde_json::Map<String, Value>) -> Result<(), Prep
         if let Some(h) = obj
             .and_then(|o| o.get("http_proxy"))
             .and_then(Value::as_object)
+            && let Some(filters) = h.get("dst_filters")
         {
-            if let Some(filters) = h.get("dst_filters") {
-                if let Some(arr) = filters.as_array() {
-                    for (j, filter) in arr.iter().enumerate() {
-                        if let Some(f) = filter.as_object() {
-                            optional_port(
-                                f.get("port"),
-                                &at(&format!("http_proxy.dst_filters[{j}].port")),
-                            )?;
-                        }
+            if let Some(arr) = filters.as_array() {
+                for (j, filter) in arr.iter().enumerate() {
+                    if let Some(f) = filter.as_object() {
+                        optional_port(
+                            f.get("port"),
+                            &at(&format!("http_proxy.dst_filters[{j}].port")),
+                        )?;
                     }
-                } else if let Some(f) = filters.as_object() {
-                    optional_port(f.get("port"), &at("http_proxy.dst_filters[0].port"))?;
                 }
+            } else if let Some(f) = filters.as_object() {
+                optional_port(f.get("port"), &at("http_proxy.dst_filters[0].port"))?;
             }
         }
     }
@@ -320,7 +319,7 @@ fn ra_required(root: &serde_json::Map<String, Value>) -> bool {
 /// - 选空闲回环端口作为 tng 内部 ingress 本地监听端口，注入 `in.host=127.0.0.1`+
 ///   `in.port=自动端口`（覆盖用户任何 host/port）、`http_proxy` 的 `proxy_listen` 同理；
 /// - 剥离 `tngui_outward`（不进 tng 配置）。
-/// 返回反代路由（对外绑定 + 内部端口）。
+///   返回反代路由（对外绑定 + 内部端口）。
 fn prepare_ingress_entry(
     entry: &mut Value,
     internal_port: u16,
@@ -390,11 +389,11 @@ fn inject_ingress_listen(entry: &mut Value, port: u16) {
             in_ep.insert("host".to_string(), Value::String(LOCALHOST.to_string()));
             in_ep.insert("port".to_string(), Value::from(port));
         }
-    } else if let Some(h) = obj.get_mut("http_proxy").and_then(Value::as_object_mut) {
-        if let Some(pl) = h.get_mut("proxy_listen").and_then(Value::as_object_mut) {
-            pl.insert("host".to_string(), Value::String(LOCALHOST.to_string()));
-            pl.insert("port".to_string(), Value::from(port));
-        }
+    } else if let Some(h) = obj.get_mut("http_proxy").and_then(Value::as_object_mut)
+        && let Some(pl) = h.get_mut("proxy_listen").and_then(Value::as_object_mut)
+    {
+        pl.insert("host".to_string(), Value::String(LOCALHOST.to_string()));
+        pl.insert("port".to_string(), Value::from(port));
     }
 }
 
@@ -435,17 +434,17 @@ fn read_remote_host(entry: &Value) -> String {
                 .and_then(|arr| arr.first())
                 .and_then(Value::as_object)
                 .or_else(|| df.as_object());
-            if let Some(d) = objf {
-                if let Some(dom) = d.get("domain").and_then(Value::as_str) {
-                    let port = d
-                        .get("port")
-                        .and_then(Value::as_u64)
-                        .filter(|p| (1..=65535).contains(p));
-                    return match port {
-                        Some(p) => format!("{dom}:{p}"),
-                        None => dom.to_string(),
-                    };
-                }
+            if let Some(d) = objf
+                && let Some(dom) = d.get("domain").and_then(Value::as_str)
+            {
+                let port = d
+                    .get("port")
+                    .and_then(Value::as_u64)
+                    .filter(|p| (1..=65535).contains(p));
+                return match port {
+                    Some(p) => format!("{dom}:{p}"),
+                    None => dom.to_string(),
+                };
             }
         }
     }
@@ -496,15 +495,10 @@ fn read_models_origin(entry: &Value) -> Option<String> {
             "http"
         };
         let port = match dst.get("port") {
-            Some(port) => {
-                let port = port.as_u64().filter(|p| (1..=65535).contains(p));
-                if port.is_none() {
-                    return None;
-                }
-                port
-            }
+            Some(port) => port.as_u64().filter(|p| (1..=65535).contains(p)),
             None => None,
         };
+        port?;
         return Some(match port {
             Some(port) => format!("{scheme}://{domain}:{port}"),
             None => format!("{scheme}://{domain}"),

@@ -7,18 +7,22 @@
 //! - `proxy_endpoint`：暴露反代各 ingress 对外端点（供前端渲染 `API Base URL` 与推理目标）
 //! - `get_status`：轮询控制面 `/livez|/readyz|/status/`
 //! - `get_output`：取子进程 stdout/stderr 快照
-//! - `send_inference_stream`：经反代对外端点发流式推理（SSE delta 经 Channel 推送；`x-model` 由反代注入，此处不注）
+//! - `send_inference_stream`：经反代对外端点发流式多轮推理（reasoning/content typed delta 经 Channel 推送；`x-model` 由反代按 body.model 注入，此处不注）
+//! - `stop_inference_stream`：按请求 ID 取消进行中的推理流；成功停止返回 `stopped`，不是失败
 
+use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde_json::Value;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tauri::{Builder, generate_context, generate_handler};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 
 use tngui_core::{
-    ProxyHandle, StatusReport, TngSupervisor, fetch_status, pick_launch_ports, prepare_launch,
+    InferenceDelta, InferenceEffort, InferenceMessage, InferenceStreamOutcome, ProxyHandle,
+    StatusReport, TngSupervisor, fetch_status, pick_launch_ports, prepare_launch,
     sanitize_user_config_for_tng, start_proxy, write_runtime_config,
 };
 
@@ -41,6 +45,62 @@ pub struct AppState {
     port: PortCell,
     /// 反代句柄 + 对外端点。`None` = 未启动（tng 与反代互绑生命周期）。
     proxy: Arc<Mutex<Option<(ProxyHandle, ProxyEndpoints)>>>,
+    /// 进行中推理请求的取消注册表；仅存在于 GUI 进程内存，不落盘。
+    inference_cancellations: InferenceCancellationCell,
+}
+
+/// 推理请求 ID -> 取消信号。`oneshot::Sender` 与 send 命令同生命周期；send 命令
+/// 被 stop 发送信号或正常/失败返回时移除。
+type InferenceCancellationCell = Arc<StdMutex<HashMap<String, oneshot::Sender<()>>>>;
+
+/// 注册一个推理请求的取消通道。重复请求 ID 直接拒绝，避免同 ID 命令互相覆盖。
+fn register_inference_cancellation(
+    cell: &InferenceCancellationCell,
+    request_id: &str,
+) -> Result<oneshot::Receiver<()>, String> {
+    let mut registry = cell
+        .lock()
+        .map_err(|_| "推理取消注册表已锁定".to_string())?;
+    if registry.contains_key(request_id) {
+        return Err(format!("推理请求 ID 已存在: {request_id}"));
+    }
+    let (sender, receiver) = oneshot::channel();
+    registry.insert(request_id.to_string(), sender);
+    Ok(receiver)
+}
+
+/// 从注册表移除请求。返回 false 表示请求已由另一路径清理（幂等清理）。
+fn remove_inference_cancellation(cell: &InferenceCancellationCell, request_id: &str) -> bool {
+    cell.lock()
+        .map(|mut registry| registry.remove(request_id).is_some())
+        .unwrap_or(false)
+}
+
+/// 停止指定推理请求。返回 false 表示请求已不存在（已完成/已停止/已失败或未注册）。
+fn cancel_inference_request(cell: &InferenceCancellationCell, request_id: &str) -> bool {
+    let Some(sender) = cell
+        .lock()
+        .ok()
+        .and_then(|mut registry| registry.remove(request_id))
+    else {
+        return false;
+    };
+    sender.send(()).is_ok()
+}
+
+/// 让推理 future 与取消信号竞争。取消分支返回成功 `Stopped`；select 取消 inference
+/// future 时，其 TCP read/write half 被丢弃，连接随之关闭。
+async fn race_inference_stream_with_cancellation<F>(
+    mut cancellation: oneshot::Receiver<()>,
+    inference: F,
+) -> Result<InferenceStreamOutcome, String>
+where
+    F: Future<Output = Result<InferenceStreamOutcome, String>>,
+{
+    tokio::select! {
+        outcome = inference => outcome,
+        _ = &mut cancellation => Ok(InferenceStreamOutcome::Stopped),
+    }
 }
 
 /// 客户端信息：版本取自编译期 `CARGO_PKG_VERSION`、操作系统取自编译期平台常量
@@ -254,13 +314,19 @@ fn write_settings_cache_file(dir: &std::path::Path, payload: &Value) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::{
-        RA_BIN_MISSING, SETTINGS_CACHE_FILE, find_bin_under, format_process_log_lines,
-        ra_launch_precheck, read_settings_cache_file, tng_nora_resource_name_for,
-        tng_ra_resource_name_for, write_settings_cache_file,
+        InferenceCancellationCell, RA_BIN_MISSING, SETTINGS_CACHE_FILE, cancel_inference_request,
+        find_bin_under, format_process_log_lines, ra_launch_precheck,
+        race_inference_stream_with_cancellation, read_settings_cache_file,
+        register_inference_cancellation, tng_nora_resource_name_for, tng_ra_resource_name_for,
+        write_settings_cache_file,
     };
     use serde_json::{Value, json};
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tngui_core::InferenceStreamOutcome;
+    use tokio::sync::oneshot;
 
     fn test_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -418,6 +484,41 @@ mod tests {
         assert_eq!(error, "设置缓存 schemaVersion 须为 1");
         assert!(!error.contains("secret"));
     }
+
+    #[test]
+    fn inference_cancellation_registry_stops_once_and_is_idempotent() {
+        let cell: InferenceCancellationCell = Arc::new(StdMutex::new(HashMap::new()));
+        let mut receiver = register_inference_cancellation(&cell, "assistant-1").unwrap();
+        assert!(register_inference_cancellation(&cell, "assistant-1").is_err());
+
+        assert!(cancel_inference_request(&cell, "assistant-1"));
+        assert_eq!(receiver.try_recv(), Ok(()));
+        assert!(!cancel_inference_request(&cell, "assistant-1"));
+    }
+
+    #[tokio::test]
+    async fn raced_inference_stream_returns_stopped_on_cancellation() {
+        let (sender, receiver) = oneshot::channel();
+        sender.send(()).unwrap();
+        let outcome = race_inference_stream_with_cancellation(
+            receiver,
+            std::future::pending::<Result<InferenceStreamOutcome, String>>(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, InferenceStreamOutcome::Stopped);
+    }
+
+    #[tokio::test]
+    async fn raced_inference_stream_preserves_normal_completion() {
+        let (_sender, receiver) = oneshot::channel::<()>();
+        let outcome = race_inference_stream_with_cancellation(receiver, async {
+            Ok(InferenceStreamOutcome::Completed)
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome, InferenceStreamOutcome::Completed);
+    }
 }
 
 /// 导入配置：读用户所选文件路径，返回 JSON 字符串。
@@ -470,24 +571,51 @@ async fn save_config(app: AppHandle, config_json: String) -> Result<(), String> 
     Ok(())
 }
 
-/// 通过 tngui 反代对外端点发送流式推理请求（`x-model` 由反代按 body.model 注入，
-/// 此处不注），body 恒含 `"stream": true`。每节 `choices[0].delta.content` 经
-/// `on_delta` Channel 推送；收到 `data: [DONE]` 后命令成功返回。任何失败（连接
-/// 失败、非 2xx、非 SSE 响应、SSE 解析失败、`[DONE]` 前断流、响应超上限）返回
-/// 既有格式诊断（Authorization 脱敏）。`port` 为反代对外端口（前端取自
-/// `proxy_endpoint`）。
+/// 通过 tngui 反代对外端点发送流式多轮推理请求（`x-model` 由反代按 body.model 注入，
+/// 此处不注），body 恒含 `"stream": true` 与思考强度。每节非空
+/// `choices[0].delta.reasoning` / `choices[0].delta.content` 经 typed `on_delta`
+/// Channel 推送；收到 `data: [DONE]` 后命令成功返回。任何失败（连接失败、非 2xx、
+/// 非 SSE 响应、SSE 解析失败、`[DONE]` 前断流、响应超上限）返回既有格式诊断
+/// （Authorization 脱敏）。`port` 为反代对外端口（前端取自 `proxy_endpoint`）。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Flat parameters preserve the typed Tauri IPC contract.
 async fn send_inference_stream(
+    state: State<'_, AppState>,
+    request_id: String,
     port: u16,
     model: String,
     api_key: String,
-    prompt: String,
-    on_delta: Channel<String>,
-) -> Result<(), String> {
-    tngui_core::send_inference_stream(port, &model, &api_key, &prompt, |delta| {
-        let _ = on_delta.send(delta);
-    })
-    .await
+    messages: Vec<InferenceMessage>,
+    reasoning_effort: InferenceEffort,
+    on_delta: Channel<InferenceDelta>,
+) -> Result<InferenceStreamOutcome, String> {
+    let cancellation =
+        register_inference_cancellation(&state.inference_cancellations, &request_id)?;
+    let outcome = race_inference_stream_with_cancellation(
+        cancellation,
+        tngui_core::send_inference_stream(
+            port,
+            &model,
+            &api_key,
+            &messages,
+            reasoning_effort,
+            |delta| {
+                let _ = on_delta.send(delta);
+            },
+        ),
+    )
+    .await;
+    remove_inference_cancellation(&state.inference_cancellations, &request_id);
+    outcome
+}
+
+/// 按 request_id 请求停止进行中的推理流。无活跃请求时返回 false，不报错（幂等）。
+#[tauri::command]
+fn stop_inference_stream(state: State<'_, AppState>, request_id: String) -> Result<bool, String> {
+    Ok(cancel_inference_request(
+        &state.inference_cancellations,
+        &request_id,
+    ))
 }
 
 /// 从本地 pre-TNG proxy 获取模型清单，不发送 inference API Key。
@@ -578,6 +706,7 @@ pub fn run() {
                 supervisor: Arc::new(Mutex::new(TngSupervisor::new(nora, ra, 4000))),
                 port: Arc::new(StdMutex::new(None)),
                 proxy: Arc::new(Mutex::new(None)),
+                inference_cancellations: Arc::new(StdMutex::new(HashMap::new())),
             });
             Ok(())
         })
@@ -594,6 +723,7 @@ pub fn run() {
             flush_settings_cache,
             save_config,
             send_inference_stream,
+            stop_inference_stream,
             list_models,
             app_info
         ])

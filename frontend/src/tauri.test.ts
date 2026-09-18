@@ -19,6 +19,7 @@ const {
   exportRemoteAttestationReport,
   pickRemoteAttestationReportPath,
   sendInferenceStream,
+  stopInferenceStream,
 } = await import("./tauri");
 
 describe("remote attestation report Tauri wrappers", () => {
@@ -63,43 +64,83 @@ describe("sendInferenceStream Tauri wrapper", () => {
     invokeMock.mockReset();
   });
 
-  it("streams each delta through a per-invocation channel and resolves on completion", async () => {
-    const deltas: string[] = [];
+  it("streams each typed delta through a per-invocation channel and resolves on completion", async () => {
+    const deltas: unknown[] = [];
     invokeMock.mockImplementation(async (_cmd, args) => {
-      const channel = args.onDelta as { onmessage?: (delta: string) => void };
-      channel.onmessage?.("你");
-      channel.onmessage?.("好");
+      const channel = args.onDelta as { onmessage?: (delta: unknown) => void };
+      channel.onmessage?.({ kind: "reasoning", text: "先分析" });
+      channel.onmessage?.({ kind: "content", text: "回答" });
+      return "completed";
     });
 
-    await sendInferenceStream(18080, "model-a", "key-t", "hello", (d) => deltas.push(d));
+    const messages = [
+      { role: "user" as const, content: "第一轮" },
+      { role: "assistant" as const, content: "第一轮回答" },
+      { role: "user" as const, content: "第二轮" },
+    ];
+    await expect(
+      sendInferenceStream(
+        "assistant-1",
+        18080,
+        "model-a",
+        "key-t",
+        messages,
+        "medium",
+        (delta) => deltas.push(delta),
+      ),
+    ).resolves.toBe("completed");
 
-    expect(deltas).toEqual(["你", "好"]);
+    expect(deltas).toEqual([
+      { kind: "reasoning", text: "先分析" },
+      { kind: "content", text: "回答" },
+    ]);
     expect(invokeMock).toHaveBeenCalledTimes(1);
     const [command, payload] = invokeMock.mock.calls[0];
     expect(command).toBe("send_inference_stream");
     expect(payload).toEqual({
+      requestId: "assistant-1",
       port: 18080,
       model: "model-a",
       apiKey: "key-t",
-      prompt: "hello",
+      messages,
+      reasoningEffort: "medium",
       onDelta: expect.anything(),
     });
     // stream 由后端负责组装；调用层绝不发送 x-model。
     expect(Object.keys(payload).sort()).toEqual([
       "apiKey",
+      "messages",
       "model",
       "onDelta",
       "port",
-      "prompt",
+      "reasoningEffort",
+      "requestId",
     ]);
     expect(JSON.stringify(payload)).not.toContain("x-model");
     expect(JSON.stringify(payload)).not.toContain('"stream"');
+    expect(JSON.stringify(payload)).not.toContain("thinking_token_budget");
   });
 
   it("propagates failures as rejection so the UI keeps showing diagnostics", async () => {
     invokeMock.mockRejectedValue(new Error("发送失败: HTTP 502"));
     await expect(
-      sendInferenceStream(18081, "m", "k", "p", () => {}),
+      sendInferenceStream(
+        "assistant-2",
+        18081,
+        "m",
+        "k",
+        [{ role: "user", content: "p" }],
+        "low",
+        () => {},
+      ),
     ).rejects.toThrow("发送失败: HTTP 502");
+  });
+
+  it("invokes the stop command by request id and returns the backend idempotent result", async () => {
+    invokeMock.mockResolvedValue(true);
+    await expect(stopInferenceStream("assistant-1")).resolves.toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith("stop_inference_stream", {
+      requestId: "assistant-1",
+    });
   });
 });
