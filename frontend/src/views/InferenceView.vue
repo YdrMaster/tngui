@@ -54,6 +54,12 @@ const localEndpoint = computed(() =>
     ? `http://127.0.0.1:${proxyPort.value}/v1`
     : "未配置",
 );
+/** 模型输入统一扣首尾空白；请求、示例与预览共用同一规范化值。 */
+const normalizedInferenceModel = computed(() => inferenceModel.value.trim());
+/** 模型输入写入状态时立即规范化；纯空白归空。 */
+function setInferenceModel(value: string): void {
+  inferenceModel.value = value.trim();
+}
 // “可发”门锁：与概览左上角“运行状态”卡同口径（tngRunning）AND api-key 已配置；不再查 readyz/model/端口。
 const usable = computed(() => tngRunning.value && !!apiKey.value);
 
@@ -61,14 +67,14 @@ const curlExample = computed(() => `curl http://127.0.0.1:${proxyPort.value ?? 8
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <YOUR_API_KEY>" \
   -d '{
-    "model": "${inferenceModel.value || "model"}",
+    "model": "${normalizedInferenceModel.value || "model"}",
     "messages": [{"role": "user", "content": "请分析这段文本"}]
   }'`);
 
 const deepSeekClientConfig = computed(() => `API 类型       OpenAI Compatible
 API Base URL   ${localEndpoint.value}
 API Key        <从 1 号节点控制台获取>
-Model ID       ${inferenceModel.value || "model"}`);
+Model ID       ${normalizedInferenceModel.value || "model"}`);
 
 async function onSend() {
   if (!usable.value) { message.warning("请先在「概览」启动 TNG 网关（显示运行）并在「设置」配置 API Key"); return; }
@@ -82,7 +88,7 @@ async function onSend() {
   }, 520);
   try {
     const result = await invoke<string>("send_inference", {
-      port: proxyPort.value, model: inferenceModel.value, apiKey: apiKey.value, prompt: prompt.value,
+      port: proxyPort.value, model: normalizedInferenceModel.value, apiKey: apiKey.value, prompt: prompt.value,
     });
     window.clearInterval(phaseTimer.value); phase.value = 4; statusCode.value = 200; failed.value = false;
     output.value = result;
@@ -128,7 +134,7 @@ async function onSend() {
             <a-col :span="11">
               <a-card title="请求">
                 <a-form layout="vertical">
-                  <a-form-item label="模型"><a-input v-model:value="inferenceModel" placeholder="如 gpt-4 / vllm-model" autocapitalize="off" autocorrect="off" spellcheck="false" /></a-form-item>
+                  <a-form-item label="模型"><a-input :value="inferenceModel" @update:value="setInferenceModel" placeholder="如 gpt-4 / vllm-model" autocapitalize="off" autocorrect="off" spellcheck="false" /></a-form-item>
                   <a-form-item label="输入内容">
                     <a-textarea
                       v-model:value="prompt"

@@ -240,6 +240,7 @@ button, input, textarea { font: inherit; }
 .ingress-card-info { border-color: rgba(22,119,255,.22); background: #fbfdff; }
 .ingress-card-title { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .ingress-card-title b { font-size: 14px; font-weight: 650; }
+.ingress-card-actions { display: flex; align-items: center; flex-shrink: 0; }
 .ingress-card-pos { font-size: 10px; color: var(--text-tertiary); background: #f0f0f0; padding: 2px 6px; border-radius: 999px; }
 .ingress-state-line { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 .ingress-state-dot { width: 10px; height: 10px; border-radius: 50%; background: #8c8c8c; }

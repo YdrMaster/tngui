@@ -9,11 +9,13 @@ const props = withDefaults(
     required?: boolean;
     placeholder?: string;
     width?: string;
+    disabled?: boolean;
   }>(),
   {
     required: false,
     placeholder: '',
     width: '112px',
+    disabled: false,
   },
 );
 
@@ -89,6 +91,7 @@ function onUpdateValue(value: string): void {
     :value="draft"
     :placeholder="placeholder"
     :status="error ? 'error' : undefined"
+    :disabled="disabled"
     :maxlength="5"
     :aria-invalid="error ? 'true' : undefined"
     type="text"

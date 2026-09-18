@@ -9,23 +9,18 @@ import { isRemoteConfigured } from "../formspec";
 import { deriveIngressInfo } from "../ingressState";
 import { deriveGatewayStateViews } from "../ingressStateViews";
 import IngressStateCard from "../components/IngressStateCard.vue";
+import RemoteReportExportAction from "../components/RemoteReportExportAction.vue";
 import IngressInfoCard from "../components/IngressInfoCard.vue";
 
 const { serializeCurrent, model } = useTngConfig();
-const { statusReport, outputLines, states, tngRunning, pollError } = useIngressState();
+const { statusReport, outputLines, states, tngRunning, pollError, ingressKeys } = useIngressState();
 const gatewayViews = computed(() => deriveGatewayStateViews(states.value));
 const launching = ref(false);
 
-const ingressInfo = computed(() => {
-  const entries = model.value.add_ingress || [];
-  return deriveIngressInfo(entries[0]);
-});
+const ingressInfo = computed(() => deriveIngressInfo(model.value.ingress));
 
 // tng 本地监听对用户隐藏（tngui 启动时注入）；概览入口信息以反代对外绑定为"本机入口"。
-const entryOutward = computed(() => {
-  const e = model.value.add_ingress?.[0];
-  return e?.outward ?? null;
-});
+const entryOutward = computed(() => model.value.ingress.outward);
 
 const statusJsonText = computed(() => {
   const r = statusReport.value;
@@ -126,7 +121,11 @@ async function onToggle() {
         :state="gatewayViews.remoteProof.state"
         :state-text="gatewayViews.remoteProof.stateText"
         :subtitle="gatewayViews.remoteProof.subtitle"
-      />
+      >
+        <template #actions>
+          <RemoteReportExportAction :report="ingressKeys" />
+        </template>
+      </IngressStateCard>
     </div>
 
     <div class="ingress-debug-grid">

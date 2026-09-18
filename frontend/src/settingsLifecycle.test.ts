@@ -14,7 +14,7 @@ describe("settings bootstrap", () => {
   it("restores cached settings without exposing or calling a launch path", async () => {
     const target = makeTarget();
     const model = defaultModel();
-    model.add_ingress[0].outward = { host: "0.0.0.0", port: 9443 };
+    model.ingress.outward = { host: "0.0.0.0", port: 9443 };
     await bootstrapSettings(
       () => Promise.resolve({
         schemaVersion: 1,
@@ -27,7 +27,7 @@ describe("settings bootstrap", () => {
       target,
     );
     const restored = target.initialize.mock.calls[0][0];
-    expect(restored.add_ingress[0].outward).toEqual({ host: "0.0.0.0", port: 9443 });
+    expect(restored.ingress.outward).toEqual({ host: "0.0.0.0", port: 9443 });
     expect(target.initializeApiKey).toHaveBeenCalledWith("key");
     expect(target.initializeRvsUrl).toHaveBeenCalledWith(
       "https://private-rvs.example.com:8443",

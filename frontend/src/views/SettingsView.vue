@@ -4,7 +4,7 @@ import { message } from "ant-design-vue";
 import {
   ApiOutlined, ExperimentOutlined, ImportOutlined, ExportOutlined,
 } from "@ant-design/icons-vue";
-import { defaultFields, DEFAULT_OUTWARD, isRemoteAttestationEnabled } from "../formspec";
+import { isRemoteAttestationEnabled } from "../formspec";
 import { parse } from "../configmodel";
 import {
   pickLogPath, exportTngLog, pickImportPath, pickExportPath,
@@ -13,6 +13,7 @@ import {
 import EntryEditor from "../components/EntryEditor.vue";
 import RemoteAttestationServiceConfig from "../components/RemoteAttestationServiceConfig.vue";
 import IngressStateCard from "../components/IngressStateCard.vue";
+import RemoteReportExportAction from "../components/RemoteReportExportAction.vue";
 import { useTngConfig } from "../composables/useTngConfig";
 import { useIngressState } from "../composables/useIngressState";
 import { deriveGatewayStateViews } from "../ingressStateViews";
@@ -20,11 +21,12 @@ import { useInferenceConfig } from "../composables/useInferenceConfig";
 
 const { model, isDirty, markSaved, serializeCurrent } = useTngConfig();
 const { apiKey } = useInferenceConfig();
-const { states } = useIngressState();
+const { ingressKeys, states } = useIngressState();
 const gatewayViews = computed(() => deriveGatewayStateViews(states.value));
 const showRemoteAttestationServiceConfig = computed(() => isRemoteAttestationEnabled(model.value));
 const activeTab = ref<"form" | "raw">("form");
 const rawEditing = ref(serializeCurrent());
+const configLocked = ref(true);
 const exportingLog = ref(false);
 
 // 客户端信息：版本/操作系统取自后端编译期变量（app_info），不写死
@@ -51,18 +53,6 @@ function applyRaw() {
   if (r.warnings?.length) message.warning("已回填（部分条目被丢弃: " + r.warnings.join("; ") + "）");
   else message.success("已按原始 JSON 回填表单");
 }
-function addIngress() {
-  model.value.add_ingress.push({
-    mode: "mapping",
-    fields: defaultFields("mapping"),
-    no_ra: false,
-    verify: { model: "passport", as_provider: "tpm" },
-    outward: { ...DEFAULT_OUTWARD },
-    extra: {},
-  });
-}
-function removeIngress(i: number) { model.value.add_ingress.splice(i, 1); }
-
 async function onExportLog() {
   exportingLog.value = true;
   try {
@@ -123,7 +113,11 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
           :state="gatewayViews.remoteProof.state"
           :state-text="gatewayViews.remoteProof.stateText"
           :subtitle="gatewayViews.remoteProof.subtitle"
-        />
+        >
+          <template #actions>
+            <RemoteReportExportAction :report="ingressKeys" />
+          </template>
+        </IngressStateCard>
       </div>
       <div class="gateway-actions">
         <a-button :loading="exportingLog" @click="onExportLog">导出日志</a-button>
@@ -156,7 +150,11 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
     <!-- TNG 配置 -->
     <div class="settings-section-heading" style="margin-top:20px">
       <div><h4 style="margin:0 0 3px;font-size:16px;font-weight:600">TNG 配置</h4><span style="color:var(--text-secondary)">结构化编辑客户端 ingress（锁定 OHTTP 形态）；本机不承载 egress。</span></div>
-      <span style="display:flex;gap:8px">
+      <span style="display:flex;gap:14px;align-items:center">
+        <span style="display:flex;gap:8px;align-items:center">
+          <a-switch v-model:checked="configLocked" aria-label="锁定 TNG 配置" />
+          <span style="color:var(--text-secondary);font-size:13px;white-space:nowrap">配置锁定</span>
+        </span>
         <a-button @click="onImport"><ImportOutlined /> 导入 JSON</a-button>
         <a-button @click="onExport"><ExportOutlined /> 导出 JSON</a-button>
       </span>
@@ -165,24 +163,22 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
     <a-tabs v-model:activeKey="activeTab" @change="onTabChange">
       <a-tab-pane key="form" tab="结构化">
         <a-form layout="vertical">
-          <a-card size="small" title="add_ingress（客户端 OHTTP 形态）" style="margin-top:12px">
-            <EntryEditor v-for="(e, i) in model.add_ingress" :key="i" :entry="e" @remove="removeIngress(i)" />
-            <a-button style="margin-top:8px" @click="addIngress">添加 ingress</a-button>
-          </a-card>
+          <EntryEditor :entry="model.ingress" :disabled="configLocked" />
         </a-form>
       </a-tab-pane>
       <a-tab-pane key="raw" tab="原始 JSON" force-render>
         <a-space style="margin-bottom:8px">
-          <a-button type="primary" @click="applyRaw">应用回填表单</a-button>
+          <a-button type="primary" :disabled="configLocked" @click="applyRaw">应用回填表单</a-button>
           <span style="color:var(--text-secondary)">编辑后点"应用"回填；未结构化字段（RA 等）在此编辑不丢；add_egress 与 ohttp 会被丢弃并由锁定值替代。</span>
         </a-space>
-        <a-textarea v-model:value="rawEditing" :rows="18" class="json-editor" autocapitalize="off" autocorrect="off" spellcheck="false" />
+        <a-textarea v-model:value="rawEditing" :disabled="configLocked" :rows="18" class="json-editor" autocapitalize="off" autocorrect="off" spellcheck="false" />
       </a-tab-pane>
     </a-tabs>
 
     <RemoteAttestationServiceConfig
       v-model:value="model.rvsUrl"
       :visible="showRemoteAttestationServiceConfig"
+      :disabled="configLocked"
     />
 
     <!-- 客户端信息 -->

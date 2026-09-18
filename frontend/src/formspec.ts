@@ -1,14 +1,17 @@
 // form-spec：结构化配置字段模型——客户端 ingress 锁定 OHTTP 形态。
 // 客户端侧只配 add_ingress（mapping 地址端口 / http_proxy 域名两种远端形态），不承载 add_egress。
 // ohttp 常开、path_rewrites 与 credential header_passthrough 写死；
-// no_ra/verify 互斥序列化（见 configmodel.ts）。
+// no_ra/固定默认 verify 互斥序列化（见 configmodel.ts）。
 // 据真实 cmaas-deploy 客户端配置（publish/docs/03-使用.md §2），不链接 tng 代码。
 
 /** 回环地址：ingress 本地监听 host 由前后端共同强制为回环（与 control_interface.restful 同法）。 */
 export const LOCALHOST = "127.0.0.1";
 
 /** RVS 默认地址。仅首次启动、缓存缺失/无效或 RVS 值非法时使用，绝不覆盖有效缓存值。 */
-export const DEFAULT_RVS_URL = "https://rvs.tsk.com:9443";
+export const DEFAULT_RVS_URL = "https://rvs.tsk.com";
+
+/** 默认域名代理目标。https 前缀用于保留 TLS 语义。 */
+export const DEFAULT_HTTP_PROXY_DOMAIN = "https://inference.cloud.misuan.com";
 
 export type IngressMode = "mapping" | "http_proxy";
 export const INGRESS_MODES: IngressMode[] = ["mapping", "http_proxy"];
@@ -82,7 +85,7 @@ export interface DstFilters {
   port: number | null;
 }
 
-/** 一条 ingress 条目的模型。fields 为各模式的嵌套字段；verify 仅在 no_ra=false 时有效；
+/** 一条 ingress 条目的模型。fields 为各模式的嵌套字段；`no_ra` 是唯一远程证明配置控件；
  * `outward` 为 tngui 反代对外绑定（tngui 侧、不进 tng 配置）；
  * `tls` 仅 http_proxy 使用——由域名框的 `https://` 前缀派生
  * （`http://`/无前缀均 false）；serialize 时据此决定是否在 `ohttp` 注入 `tls: true`。 */
@@ -90,7 +93,6 @@ export interface EntryModel {
   mode: IngressMode;
   fields: Record<string, unknown>;
   no_ra: boolean;
-  verify?: VerifyConfig;
   outward: OutwardBind;
   tls?: boolean;
   extra: Record<string, unknown>;
@@ -99,14 +101,15 @@ export interface EntryModel {
 /** 配置模型。control_interface 仅留同级 extra（ttrpc 等），restful 子段由 tngui 启动时注入（auto-manage-control-port）。 */
 export interface ConfigModel {
   control_interface_extra: Record<string, unknown>;
-  add_ingress: EntryModel[];
+  /** GUI 侧仅保留一条 ingress；序列化时包装为 TNG 兼容的单元素 add_ingress 数组。 */
+  ingress: EntryModel;
   /** GUI 侧全局 RVS 地址。序列化为用户态 `tngui_rvs_url`，启动 tng 前由后端剥离。 */
   rvsUrl: string;
   extra: Record<string, unknown>;
 }
 
 // —— form-spec：驱动 EntryEditor/FieldRenderer 渲染 ——
-export type FieldType = "listenHostPort" | "outHostPort" | "domainHostPort" | "verifyFields";
+export type FieldType = "listenHostPort" | "outHostPort" | "domainHostPort";
 
 export interface FieldSpec {
   key: string;
@@ -138,35 +141,32 @@ export function defaultFields(mode: string): Record<string, unknown> {
   if (mode === "http_proxy") {
     return {
       proxy_listen: { host: LOCALHOST, port: DEFAULT_LISTEN_PORT },
-      dst_filters: { domain: "https://", port: DEFAULT_HTTP_PROXY_DST_PORT },
+      dst_filters: { domain: DEFAULT_HTTP_PROXY_DOMAIN, port: DEFAULT_HTTP_PROXY_DST_PORT },
     };
   }
   return {};
 }
 
-/** 内置默认开局模板：一条锁定形态的 OHTTP mapping ingress（no_ra=false → verify on，默认 passport/tpm）。
+/** 内置默认开局模板：一条锁定形态的 OHTTP 域名代理 ingress（no_ra=false → RA on）。
  * 不含 add_egress、不含 control_interface.restful（restful 由 tngui 拉起 tng 时注入）。 */
 export function defaultModel(): ConfigModel {
   return {
     control_interface_extra: {},
-    add_ingress: [
-      {
-        mode: "mapping",
-        fields: defaultFields("mapping"),
-        no_ra: false,
-        verify: { ...DEFAULT_VERIFY },
-        outward: { ...DEFAULT_OUTWARD },
-        extra: {},
-      },
-    ],
+    ingress: {
+      mode: "http_proxy",
+      fields: defaultFields("http_proxy"),
+      no_ra: false,
+      outward: { ...DEFAULT_OUTWARD },
+      extra: {},
+    },
     rvsUrl: DEFAULT_RVS_URL,
     extra: {},
   };
 }
 
-/** 任意 ingress 开启远程证明时显示“远程证明服务配置”。 */
+/** 当前唯一 ingress 开启远程证明时显示“远程证明服务配置”。 */
 export function isRemoteAttestationEnabled(model: ConfigModel): boolean {
-  return model.add_ingress.some((entry) => !entry.no_ra);
+  return !model.ingress.no_ra;
 }
 
 
@@ -179,18 +179,17 @@ export function isRemoteAttestationEnabled(model: ConfigModel): boolean {
  *   0-255、**拒绝前导零**）；`rules` 为空数组视为"不拦"（与后端一致）。
  * - `http_proxy`：`dst_filters.domain` 即便为空，tng 仍加载（仅匹配不到远端），与后端
  *   一致——不因此禁用启动。
- * 缺省模板（out.host 留空）→ false，故启动按钮禁用并引导用户去设置填网关 IPv4。
+ * 端点映射模式（out.host 留空）→ false，故启动按钮禁用并引导用户去设置填网关 IPv4；域名代理默认视为已配置。
  */
 export function isRemoteConfigured(model: ConfigModel): boolean {
-  for (const e of model.add_ingress) {
-    if (e.mode !== "mapping") continue;
-    const raw = e.fields["rules"];
-    const rules = (Array.isArray(raw) ? raw : []) as Array<{ out?: { host?: string } }>;
-    if (rules.length === 0) continue;
-    for (const r of rules) {
-      const h = (r?.out?.host ?? "").trim();
-      if (!h || !isValidIpv4(h)) return false;
-    }
+  const e = model.ingress;
+  if (e.mode !== "mapping") return true;
+  const raw = e.fields["rules"];
+  const rules = (Array.isArray(raw) ? raw : []) as Array<{ out?: { host?: string } }>;
+  if (rules.length === 0) return true;
+  for (const r of rules) {
+    const h = (r?.out?.host ?? "").trim();
+    if (!h || !isValidIpv4(h)) return false;
   }
   return true;
 }

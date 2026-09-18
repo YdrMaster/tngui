@@ -49,8 +49,6 @@
 
 - **WHEN** GUI 启动的 tng 进程已在运行，且用户触发启动/重启控件
 - **THEN** 系统在以当前配置拉起新进程之前先终止既有 tng 子进程
-
-
 ### Requirement: 控制面 host 强制走回环地址
 
 系统须（SHALL）在拉起 tng 时由 tngui 自行注入 `control_interface.restful`：`host` 强制为 `127.0.0.1`、`port` 为 tngui 自动选取的空闲回环端口（见"管控端口自动选取"），无论用户配置中是否提供或写为何值，一律以此注入值覆盖。`control_interface.restful` 不出现在任何用户可见的配置控件或原始 JSON 视图中（tng 控制面无鉴权，须仅回环可达且对用户隐藏）。
@@ -69,8 +67,6 @@
 
 - **WHEN** 渲染"设置"视图的结构化控件或原始 JSON 视图
 - **THEN** 界面不展示 `control_interface.restful`（host 或 port）
-
-
 ### Requirement: 从控制面只读 tng 状态
 
 系统须（SHALL）周期性轮询 `127.0.0.1:<端口>` 上的 `GET /livez`、`GET /readyz`、`GET /status/` 以及 ingress 的 OHTTP keys 只读状态，并把这些结果提供给首页状态卡。运行状态卡依据探针和控制面可达性显示"关停 / 运行 / 错误"；原始状态数据面板渲染状态接口返回的 JSON。远端链路和远端证明不得由就绪探针单独推断。
@@ -104,8 +100,6 @@
 
 - **WHEN** `/status/` 或 ingress OHTTP keys 接口没有返回 JSON body
 - **THEN** 原始状态数据面板显示明确的空态，状态卡按无数据规则回落显示
-
-
 ### Requirement: 以只读方式呈现 tng 进程输出
 
 系统须（SHALL）捕获所拉起 tng 进程的 stdout 与 stderr 并在只读区展示，使用户能看到配置被拒的错误——这类错误发生在 tng 的配置解析阶段，早于日志文件初始化。
@@ -114,8 +108,6 @@
 
 - **WHEN** 用户配置违反 tng 的严格 JSON 解析，tng 非零退出并把错误打到 stderr
 - **THEN** 该错误文本出现在只读输出区
-
-
 ### Requirement: 对 tng 的松耦合
 
 系统须（SHALL）仅通过 (A) 拉起 `tng` CLI、(B) 对只读控制面的 HTTP `GET` 请求、(C) 捕获进程 stdout/stderr 与 tng 交互。系统绝不（MUST NOT）链接、import 或编译任何 TNG Rust crate。
@@ -124,8 +116,6 @@
 
 - **WHEN** `tng` 二进制被替换为仍遵循启动 CLI 参数与只读 REST 路由的更新构建
 - **THEN** GUI 无需重新编译即可继续工作
-
-
 ### Requirement: 结构化配置控件
 
 系统须（SHALL）在"设置"视图提供结构化控件，仅承载客户端 ingress（一条或多条 `add_ingress`），不承载 `add_egress`。每条 ingress 锁定为客户端 OHTTP 形态：
@@ -185,26 +175,40 @@
 - **THEN** tng 以 TLS 连接该上游，反代转发的 `Host` 为 `<域名>:<端口>`，密态推理页面发起的推理请求可获真实回复
 ### Requirement: 原始 JSON 高级视图
 
-系统须（SHALL）在"设置"视图提供与结构化表单双向同步的原始 JSON 视图，供高级编辑与兜底。该视图的序列化结果不含 `control_interface.restful`、不含 `add_egress`，且每条 ingress 必含锁定 OHTTP 配置。
+系统须（SHALL）在“设置”视图提供与结构化表单双向同步的原始 JSON 视图，供高级编辑与兜底。该视图在进行编辑时须（SHALL）与结构化表单保持同步；当 TNG 配置锁定开启时，原始 JSON 输入区域与“应用回填表单”操作须（SHALL）不可交互。该视图的序列化结果不含 `control_interface.restful`、不含 `add_egress`，且当前唯一 ingress 必含锁定 OHTTP 配置。对 RA 开启的 ingress，原始 JSON 中的自定义 `verify.model` / `verify.as_provider` 须（SHALL）在应用回填时被忽略并统一为默认值。
 
 #### Scenario: 表单到 JSON 同步
+
 - **WHEN** 用户在结构化控件中编辑
-- **THEN** 原始 JSON 视图反映其序列化结果：结果不含 `control_interface.restful`、不含 `add_egress`，每条 ingress 含锁定的 `ohttp.path_rewrites` 和 credential 请求头白名单
+- **THEN** 原始 JSON 视图反映其序列化结果：结果不含 `control_interface.restful`、不含 `add_egress`，当前唯一 ingress 含锁定的 `ohttp.path_rewrites` 和 credential 请求头白名单
 
 #### Scenario: JSON 到表单回填
+
 - **WHEN** 用户在原始 JSON 视图编辑为合法 JSON 并确认
-- **THEN** 结构化控件按该 JSON 回填：`control_interface.restful` 的 `host`/`port` 被丢弃、`add_egress` 被丢弃、ingress 的 `ohttp` 被丢弃（回填用锁定值）、`verify` 回填到 `no_ra`/verify 控件；仅 `mapping`/`http_proxy` 形态 ingress 被回填，其余形态被丢弃并提示
+- **THEN** 结构化控件按该 JSON 回填：`control_interface.restful` 的 `host`/`port` 被丢弃、`add_egress` 被丢弃、ingress 的 `ohttp` 被丢弃（回填用锁定值）、RA 开启条目的 `verify` 被重置为 `model=passport` 与 `as_provider=tpm`；仅第一条 `mapping`/`http_proxy` 形态 ingress 被保留，其余形态或多余条目被丢弃并提示
+
+#### Scenario: 锁定时原始 JSON 不可编辑
+
+- **WHEN** TNG 配置锁定开启
+- **THEN** 原始 JSON 输入区域与“应用回填表单”操作不可交互；关闭锁定后恢复可编辑
 ### Requirement: JSON 配置导入导出
 
-系统须（SHALL）通过原生文件对话框支持导入与导出 JSON。导入/导出的内容为用户侧配置：不含 `control_interface.restful`、不含 `add_egress`。导入时丢弃文件中的 `add_egress` 与 ingress 自定义 `ohttp`，并仅认 `mapping`/`http_proxy` 形态的 ingress。
+系统须（SHALL）通过原生文件对话框支持导入与导出 JSON。导入/导出的内容为用户侧配置：不含 `control_interface.restful`、不含 `add_egress`。导入时须（SHALL）丢弃文件中的 `add_egress` 与 ingress 自定义 `ohttp`，仅认 `mapping`/`http_proxy` 形态的 ingress，并将 RA 开启条目的自定义 `verify.model` / `verify.as_provider` 重置为默认值；系统须（SHALL）只保留第一条 ingress，多余条目须（SHALL）被丢弃并提示。导入/导出按钮本身须（SHALL）不受 TNG 配置锁定影响。
 
 #### Scenario: 导入填充
+
 - **WHEN** 用户经原生打开文件对话框选择 JSON 文件并导入
-- **THEN** 系统解析该文件并填充结构化控件与原始 JSON 视图；`control_interface.restful`、`add_egress`、ingress 自定义 `ohttp` 被丢弃或由锁定值回填；解析失败时显示错误且不改变当前配置
+- **THEN** 系统解析该文件并填充结构化控件与原始 JSON 视图；`control_interface.restful`、`add_egress`、ingress 自定义 `ohttp` 被丢弃或由锁定值回填；RA 开启条目的 `verify` 序列化为 `model=passport`、`as_provider=tpm`；仅第一条 `mapping`/`http_proxy` ingress 被保留，多余 ingress 被丢弃并提示；解析失败时显示错误且不改变当前配置
 
 #### Scenario: 导出写入
+
 - **WHEN** 用户经原生另存为对话框选择路径并导出
-- **THEN** 系统将当前配置的 pretty JSON 写入该路径，其中不含 `control_interface.restful`、不含 `add_egress`，每条 ingress 含锁定 OHTTP 配置
+- **THEN** 系统将当前配置的 pretty JSON 写入该路径，其中不含 `control_interface.restful`、不含 `add_egress`，当前唯一 ingress 含锁定 OHTTP 配置，RA 开启条目含默认 `verify`
+
+#### Scenario: 导入导出不受锁定影响
+
+- **WHEN** TNG 配置锁定开启
+- **THEN** “导入配置”与“导出配置”按钮仍可交互
 ### Requirement: 默认开局模板
 
 系统须（SHALL）以内置默认配置模板初始化"设置"视图的 TNG 配置：一条锁定形态的 OHTTP `mapping` ingress，行 1 为 tngui 反代对外绑定（默认 `127.0.0.1` 和内置默认 port），远端 `out` 为占位；`no_ra=false` 并带默认 `verify`，且含锁定 OHTTP `path_rewrites` 与 credential passthrough。模板不含 `add_egress`、`control_interface.restful`、`x-model` 或 tng ingress 本地监听 `host`/`port`。该模板仅在设置缓存缺失、不支持、损坏或未通过设置缓存校验时使用；存在有效设置缓存时，GUI 须（SHALL）改为恢复缓存中的设置状态。
@@ -228,7 +232,6 @@
 
 - **WHEN** 用户在原始 JSON 视图编辑但未点击"应用回填表单"即关闭 GUI
 - **THEN** 该未应用草稿不在本地持久化；下次启动按缓存校验规则恢复已提交设置或默认模板
-
 ### Requirement: tng 二进制随软件分发并从资源目录发现
 
 系统须（SHALL）随 GUI 分发并区分两套 tng 二进制，并在每次启动/重启 tng 时依据远程证明开关选择其一：
@@ -267,8 +270,6 @@
 
 - **WHEN** 全部 ingress 为 `no_ra=true`（普通版运行中）时，用户开启任一条 ingress 的远程证明后保存/重启
 - **THEN** 重启完成后的本次会话由 RA 版二进制承载；反向把全部 ingress 关闭远程证明并重启后，会话改由普通版承载
-
-
 ### Requirement: 概览展示进程、连接与 RA 状态并启停 tng
 
 系统须（SHALL）在"概览"视图按"运行状态、入口信息、远端链路、远端证明"四卡呈现入口状态，并保留"原始状态数据"和"进程日志"两个调试面板；提供启动/停止 tng 的操作按钮。概览视图不含 TNG 配置编辑控件、不含密态推理 model/API Key 输入字段，不显示本地访问可达或本地访问错误，不把本地网关状态、XMPP 控制信道或就绪探针表达为远端健康。
@@ -297,8 +298,6 @@
 
 - **WHEN** 用户处于概览视图
 - **THEN** 界面不出现 TNG 配置编辑控件/原始 JSON/导入导出/密态推理 model+API Key 输入字段；仅含启动/停止按钮 + 四状态卡 + 原始状态数据 + 进程日志输出区
-
-
 ### Requirement: 密态推理页面发送并显示推理请求
 
 系统须（SHALL）在密态推理视图提供单次作用的推理请求面板。面板的“可发”门锁只认概览“运行状态”为“运行”AND 本机已配置 api-key。发送时按 OpenAI 兼容格式 POST 到 tngui 反代对外端点，携带 `Authorization: Bearer <apiKey>` 和 `{model, messages}` body。系统绝不（MUST NOT）在前端或反代中另发 `x-model` 头；模型身份由反代按 body.model 改写请求 path。model 为会话内内存、不持久化、不入 tng 配置。输出区只显示当次响应；RA 过程保持占位。
@@ -368,8 +367,6 @@
 
 - **WHEN** 用户系统偏好为减少动态效果
 - **THEN** 阶段切换不随动垂直位移或淡入淡出，内容直接切换，并不横向展开五节点
-
-
 ### Requirement: 设置页离开时自动保存并自动重启 tng
 
 系统须（SHALL）在用户从“设置”视图切换到其他视图时检测 TNG 配置是否变化（与最后一次已保存的序列化对比 dirty）；dirty 则写 tng-runtime.json；若 tng 当前正在运行 THEN 自动终止旧进程并拉起新配置下的 tng；未在运行 THEN 仅写盘不 spawn。设置视图不得（MUST NOT）提供 TNG 配置保存按钮；自动保存成功或配置未变化时绝不（MUST NOT）弹出成功、提示或确认弹窗，保存失败仍必须给出明确错误提示。修改 apiKey 不计入 dirty（模型名 `model` 现于“密态推理”视图编辑，不在“设置”视图，本身不构成设置页 dirty 因素）。
@@ -403,16 +400,19 @@
 
 - **WHEN** 用户仅改 apiKey 并切出设置，或仅改“密态推理”视图的 model
 - **THEN** 不触发 TNG 配置 dirty / tng 写盘/重启逻辑
-
-
 ### Requirement: 设置页网关状态卡与概览同源
 
-系统须（SHALL）在设置页 TNG Gateway 区域展示与概览视图第 1、3、4 张状态卡相同的“运行状态”“远端链路”“远端证明”三张卡。三张卡的状态判定、状态文本、副标题和颜色语义须（SHALL）与概览对应卡完全同源；设置页绝不（MUST NOT）另行使用独立的就绪判定、展示“控制信道已连接/已断开”摘要，或展示 TNG 版本概要。设置页 Gateway 区域不展示概览第 2 张“入口信息”卡，也不因此新增配置编辑控件。
+系统须（SHALL）在设置页 TNG Gateway 区域展示与概览视图第 1、3、4 张状态卡相同的“运行状态”“远端链路”“远端证明”三张卡。三张卡的状态判定、状态文本、副标题和颜色语义须（SHALL）与概览对应卡完全同源；设置页“远端证明”卡 SHALL 具有与概览相同的图标-only 导出报告动作，且可用性、报告来源与导出结果语义与概览完全一致。设置页绝不（MUST NOT）另行使用独立的就绪判定、展示“控制信道已连接/已断开”摘要，或展示 TNG 版本概要。设置页 Gateway 区域不展示概览第 2 张“入口信息”卡，也不因此新增配置编辑控件。
 
 #### Scenario: 设置页三卡与概览一致
 
 - **WHEN** 概览与设置页在同一个 TNG 状态快照下渲染
 - **THEN** 设置页显示“运行状态”“远端链路”“远端证明”三张卡，且每张卡的标题、状态文本、副标题和颜色语义分别与概览第 1、3、4 张卡一致
+
+#### Scenario: 远端证明导出入口同源
+
+- **WHEN** 概览与设置页在同一个 TNG 状态快照下渲染
+- **THEN** 两处“远端证明”卡均显示同一图标-only 导出动作，该动作的可用状态与导出的报告 JSON 相同
 
 #### Scenario: 不显示独立连接摘要
 
@@ -423,7 +423,6 @@
 
 - **WHEN** TNG 的运行、远端链路或远端证明状态变化
 - **THEN** 设置页对应状态卡与概览在同一次状态快照轮询后呈现相同结果
-
 ### Requirement: 导出 TNG 进程日志
 
 系统须（SHALL）在设置页提供“导出日志”功能：点击后弹出原生“另存为”对话框；用户选择目标路径后，系统把概览“进程日志”所展示的当前 TNG 子进程 stdout/stderr 快照写入该路径。日志内容须（SHALL）与概览“进程日志”同源，按日志原始顺序连接；没有日志时写入空日志内容。用户取消对话框时绝不（MUST NOT）创建或覆盖目标文件。写入失败时须（SHALL）明确提示错误；导出日志不修改 TNG 进程、TNG 配置或调试面板内容。
@@ -447,7 +446,6 @@
 
 - **WHEN** 目标路径不可写或保存命令失败
 - **THEN** 设置页显示导出错误，原始日志内容不变
-
 ### Requirement: 密态推理不可用时直接引导到设置
 
 系统须（SHALL）在密态推理视图的可发门锁不满足时，在请求面板的引导区提供“前往设置”动作，并让该动作直接切换到设置视图。该动作绝不（MUST NOT）只显示要求用户自行点击左侧导航的提示弹窗；也不得因跳转动作本身新增确认对话框。
@@ -461,7 +459,6 @@
 
 - **WHEN** 用户触发“前往设置”
 - **THEN** 视图切换前不出现该跳转专属的确认对话框
-
 ### Requirement: 桌面默认窗口与紧凑布局
 
 系统须（SHALL）在桌面端启动时把主窗口呈现为最大化窗口，而不是以 1440×960 逻辑像素直接呈现；系统绝不（MUST NOT）使用全屏模式代替窗口最大化。系统可以保留 1440×960 作为还原/取消最大化时的基准尺寸。最小可调整窗口尺寸仍为 1120×720 逻辑像素。全局内容最小逻辑宽度不得超过 1120 像素；界面在最大化及最小窗口尺寸下均须（SHALL）避免因全局内容最小宽度超视口而横向滚动，概览的四卡与调试面板不因窗口过小而退化为不可读排布。设置页与入口编辑控件须（SHALL）采用紧凑但可用的宽度、高度和间距：主要输入控件不得横向截断；长内容页可保留纵向滚动。
@@ -485,7 +482,6 @@
 
 - **WHEN** 用户在最大化或最小窗口中打开设置页
 - **THEN** 入口编辑器与 API Key 等主要输入控件完整可见、可交互，不因控件固定宽度过大而被迫横向滚动
-
 ### Requirement: 设置页密态推理功能卡布局
 
 设置页“密态推理”功能卡标题区须（SHALL）使用比原有标题区高约 50% 的专门布局，且标题区最小高度不小于 66 逻辑像素；功能图标、标题和副标题在该标题行内保持相对位置并整体垂直居中。该卡内容区的应用字号一般的输入行上下留白须（SHALL）比原有布局约缩短 50%：卡片分隔线到 API Key 行上缘的额外间距和 API Key 行下缘到卡片内容底缘的额外间距均不超过 12 逻辑像素。API Key 输入框使用默认/普通表单行高，不使用大号输入框。这些调整仅作用于“密态推理”功能卡，绝不（MUST NOT）改变其他卡片、入口编辑行或全局卡片基础布局。
@@ -504,7 +500,6 @@
 
 - **WHEN** 渲染其他设置页卡片、TNG 配置入口编辑器或客户端信息卡
 - **THEN** 这些区域不因“密态推理”功能卡布局调整而改变标题高度、内容留白或输入框尺寸
-
 ### Requirement: Ingress 新建与重置默认远端端口
 
 当 GUI 初始化默认模板、新增 ingress 或用户切换 ingress 远端类型并重置远端字段时，mapping 形态的远端 `out.port` 须（SHALL）默认填充 `80`，http_proxy 形态的远端 `dst_filters.port` 须（SHALL）默认填充 `443`。该默认值只作用于远端目标端口，绝不（MUST NOT）改变 tngui 反代对外绑定默认端口 `9443` 或 TNG 内部注入端口。导入 JSON、用户显式修改后的端口和已有配置中的显式端口不被该默认值覆盖；http_proxy 域名前缀决定 `ohttp.tls` 的语义保持不变。
@@ -528,7 +523,6 @@
 
 - **WHEN** 用户导入或编辑一条远端端口为其他有效值的 ingress
 - **THEN** 该显式端口保持不变；反代对外绑定仍默认使用 `9443`，TNG 内部注入端口逻辑不变
-
 ### Requirement: 可编辑文本输入禁用自动改写
 
 对应用中用户可编辑、可输入英文文本的文本框和文本域，系统须（SHALL）通过输入控件属性禁用 WebKit/WebView 的自动首字母大写，并禁用自动更正；英文文本输入须（SHALL）按用户实际键入内容保留大小写。相关控件须（SHALL）携带 `autocapitalize=off` 与 `autocorrect=off`；通常还应禁用拼写检查以免平台辅助行为改写结果。该要求须（SHALL）覆盖设置页 API Key、ingress 远端主机名/域名、verify 字段、密态推理 model 与 prompt 以及原始 JSON 编辑器；纯数值控件可按数值输入实现。系统绝不（MUST NOT）在应用层自动将英文首字母改为大写。
@@ -547,7 +541,6 @@
 
 - **WHEN** 用户在禁用自动改写的输入框中配置主机名或 JSON
 - **THEN** 配置校验、TLS 前缀派生和 JSON 序列化仍按原语义执行，不因禁用平台输入辅助而改变
-
 ### Requirement: 密态推理凭据只在 GUI 会话内
 
 系统须（SHALL）将密态推理的 model 作为仅 GUI 会话内的内存态：model 在"密态推理"视图的请求面板内编辑，供发送使用，关闭 GUI 后不保留，也绝不（MUST NOT）写入 tng 配置或设置缓存。设置页的 apiKey 须（SHALL）随应用关闭流程写入设置缓存，并在下次 GUI 启动且缓存有效时恢复；apiKey 绝不（MUST NOT）写入 tng 配置或 `tng-runtime.json`。设置页"密态推理"卡 SHALL 只保留一个 API Key 输入框；该输入框 SHALL 默认以密码式遮盖渲染，并提供明确的显隐切换按钮。用户未显式切换前绝不（MUST NOT）明文展示；切换后 SHALL 显示真实值。该卡不得提供复制本地 URL、保存并验证、配置导入/导出、清除本机凭据或中心侧管理说明等额外控件与说明。
@@ -586,7 +579,6 @@
 
 - **WHEN** 用户修改 model（在"密态推理"视图）或 apiKey（在"设置"视图）
 - **THEN** 不触发 TNG 配置 dirty / tng 进程重启；apiKey 边界仅在应用关闭 flush 时写入设置缓存
-
 ### Requirement: 管控端口自动选取
 
 系统须（SHALL）在拉起 tng 前由 tngui 自行选取一个空闲的回环端口（绑定 `127.0.0.1` 探测得到），将其作为 `control_interface.restful.port` 注入传给 tng 的配置；`control_interface` 的其余同级字段（如 `ttrpc` 等）保留不变。若 tngui 无法分配空闲回环端口，系统须（SHALL）拒绝启动 tng 并在界面展示说明性错误。
@@ -600,8 +592,6 @@
 
 - **WHEN** tngui 未能分配到空闲回环端口（绑定探测失败）
 - **THEN** 系统不拉起 tng，并在界面中展示说明性错误
-
-
 ### Requirement: 客户端 ingress 锁定 OHTTP 协议
 
 系统须（SHALL）对每条 ingress 强制启用 seg1 的 OHTTP 加密与 capi path 模型鉴权契　约：`ohttp.path_rewrites` 固定为
@@ -645,25 +635,24 @@
 
 - **WHEN** 渲染"设置"视图的结构化控件或原始 JSON 视图
 - **THEN** 界面不展示 tng ingress 本地监听的 `host` 或 `port`（对用户隐藏，由 tngui 启动时注入）；用户可见的"本机端口"是 tngui 反代对外绑定
-
-
 ### Requirement: ingress 的 no_ra 与 verify 互斥序列化
 
-系统须（SHALL）为每条 ingress 提供 `no_ra` 开关，并按以下互斥规则序列化（与 cmaas-deploy 客户端配置一致）：`no_ra=false`（默认）时序列化含 `verify = {model, as_provider}`（默认 `model=passport`、`as_provider=tpm`，二者可由用户配置）且不含 `no_ra` 键；`no_ra=true` 时序列化含 `"no_ra": true` 且不含 `verify`。系统绝不（MUST NOT）同时输出 `no_ra` 与 `verify`，也绝不（MUST NOT）恒定平铺 `no_ra` 布尔。
+系统须（SHALL）为当前唯一 ingress 提供远程证明开关，并按以下互斥规则序列化：开关开启即 `no_ra=false`（默认）时序列化含 `verify = { model: "passport", as_provider: "tpm" }` 且不含 `no_ra` 键；开关关闭即 `no_ra=true` 时序列化含 `"no_ra": true` 且不含 `verify`。系统绝不（MUST NOT）同时输出 `no_ra` 与 `verify`，也绝不（MUST NOT）恒定平铺 `no_ra` 布尔，且绝不（MUST NOT）向用户提供编辑 `verify.model` / `verify.as_provider` 的结构化控件。导入 JSON、原始 JSON 应用回填或既有设置中的自定义 verify 字段须（SHALL）被标准化为默认值。
 
 #### Scenario: verify 开（no_ra=false）
-- **WHEN** 一条 ingress 的 `no_ra` 关闭
-- **THEN** 序列化该 ingress 含 `verify = {model, as_provider}`，且不含 `no_ra` 键
+
+- **WHEN** 当前唯一 ingress 的远程证明开关开启，即 `no_ra=false`
+- **THEN** 序列化该 ingress 含 `verify = { model: "passport", as_provider: "tpm" }`，且不含 `no_ra` 键
 
 #### Scenario: verify 关（no_ra=true）
-- **WHEN** 一条 ingress 的 `no_ra` 打开
+
+- **WHEN** 当前唯一 ingress 的远程证明开关关闭，即 `no_ra=true`
 - **THEN** 序列化该 ingress 含 `"no_ra": true`，且不含 `verify`
 
 #### Scenario: verify 可配置两条字段
-- **WHEN** 用户在 `no_ra=false` 下编辑 `verify`
-- **THEN** 系统提供 `model` 与 `as_provider` 两个可编辑字段，默认 `passport`/`tpm`
 
-
+- **WHEN** 渲染 RA 开启的 ingress，或导入/回填带有自定义 `verify.model` / `verify.as_provider` 的配置
+- **THEN** 界面不提供两条 verify 可编辑字段，下一次用户侧序列化统一输出 `model=passport`、`as_provider=tpm`
 ### Requirement: 密态推理视图准确描述加密链路
 
 密态推理视图对加密链路与"建立加密通道"步骤的描述 SHALL 与真实链路一致：Seg1（客户端→网关）为 OHTTP（RFC 9458）/ HPKE 消息级加密、单向远程证明（客户端验证网关）；Seg2（网关→引擎）为 RA-TLS（TLS 1.3 + 远程证明）、双向互证。系统 MUST NOT 把 Seg1 标为 RATS-TLS 或 RA-TLS，也不得在"建立加密通道"步骤说明中称"RATS-TLS 会话绑定"。可信环境与 CPU-GPU 链路保护 SHALL 以原理表述、不绑定具体技术名：可信环境以"可信执行环境 + 远程证明"表述，不写具体 TEE/硬件/证明后端技术名、不以"硬件可信环境"作为字段名；CPU-GPU 链路以"PCIe 链路加密"原理表述，不写具体协议名（不写 TDX-IO、PCIe IDE）。
@@ -692,8 +681,6 @@
 
 - **WHEN** 渲染密态推理发送流程"建立加密通道"步骤的说明文案（步骤数据与发送进度动画）
 - **THEN** 文案表述为以 OHTTP 加密并绑定网关证明后再发送，不出现"RATS-TLS 会话绑定"
-
-
 ### Requirement: 映射远端出口须合法 IPv4 否则拒绝启动
 
 系统须（SHALL）在拉起 tng 前校验每条 `mapping` ingress 的远端 `out.host`：经首尾空格 trim 后须为合法 IPv4 地址（恰好 4 段、每段 0-255、拒绝前导零——与该字段在 tng 侧 `Option<Ipv4Addr>` 的解析一致）。任一 `mapping` 规则的 `out.host` 缺失、为空串/全空白、或非合法 IPv4 时，系统绝不（MUST NOT）写盘 `tng-runtime.json`、绝不（MUST NOT）拉起 tng，并须（SHALL）以明确错误拒绝该次启动。`http_proxy` 形态不因 `dst_filters.domain` 为空被拒（tng 仍加载该形态，空 domain 仅匹配不到远端）；`mapping` 的 `rules` 为空数组时不被拒（不携带生效规则不构成远端缺失）。
@@ -727,8 +714,6 @@
 
 - **WHEN** 某条 `mapping` 的 `rules` 为空数组
 - **THEN** 该条不触发"远端未配置"拒绝
-
-
 ### Requirement: 远端未配置时概览禁用启动并引导设置
 
 系统须（SHALL）在概览视图，于 tng 未运行且远端未配置（按"映射远端出口须合法 IPv4 否则拒绝启动"的同一判定为"远端未配置"）时，禁用启动控件、保持停止控件可用，并通过引导式提示告知用户去设置视图填写远端网关地址；该引导须（SHALL）提供可直接跳转到设置视图的动作。远端已配置或 tng 运行中时不出现该禁用与引导。前端判定远端是否配置须（SHALL）与后端启动拒绝语义一致，使"启动控件可用"当且仅当"后端会接受"以避免按钮可点击却在点击后才报错。系统绝不（MUST NOT）以因远端未配置而弹出的启动失败弹窗作为其主引导方式——引导须在启动控件被禁用前完成。
@@ -752,33 +737,44 @@
 
 - **WHEN** 概览启动控件处于可交互状态且用户触发启动
 - **THEN** 对同一配置经任意启动入口触发，后端均接受并启动，不产生因远端未配置的"启动失败"弹窗
-
-
 ### Requirement: ingress 控件按行分组呈现
 
-系统须（SHALL）在 ingress 的结构化编辑器中按以下三行分组呈现一条 ingress 的控件：第一行为本机端口/反代对外绑定（`host` 在 `127.0.0.1`（仅本机）/`0.0.0.0`（对外网卡）间 toggle + 对外 `port`，为 tngui 反代对外绑定、非 tng ingress 本地监听），独占一行；第二行为远端类型选择（`mapping`/`http_proxy`）与其当前远端类型对应的远端字段（`mapping` → 地址端口 IP+port，`http_proxy` → 域名主机名 + 端口，分两控件），二者在同一横排依次出现，且远端类型切换须（SHALL）即时生效——直接切换控件显示状态与对应远端字段、将字段重置为该类型的默认值，绝不（MUST NOT）弹窗要求用户确认；第三行为远程证明开关（表示"ra"——是否启用远程证明，标签为"远程证明"）与其 verify 配置（model / as_provider，仅在开关开启即 `no_ra=false` 时出现），二者在同一横排依次出现；开关关闭即 `no_ra=true` 时该行仅显示开关，不渲染 verify。该分组不得改变锁定的字段集、不改变 ingress 仅为 `mapping`/`http_proxy` 两种形态、不改变 `no_ra`/`verify` 的互斥序列化语义——仅是呈现排布与切换交互的变化。窄屏下允许单一横排内换行，但不得把上述同一横排的两个控件错位到不相关行。
+系统须（SHALL）在设置页为当前唯一 ingress 呈现结构化编辑控件：卡片标题行显示“入口配置”标识与远程证明开关；内容第一行为本机端口/反代对外绑定（`host` 在 `127.0.0.1`（仅本机）/`0.0.0.0`（对外网卡）间 toggle + 对外 `port`，为 tngui 反代对外绑定、非 tng ingress 本地监听），独占一行；内容第二行为远端类型选择与其当前远端类型对应的远端字段，二者在同一横排依次出现。远端类型选项须（SHALL）为中文文案“端点映射”与“域名代理”，且不显示英文 `mapping` / `http_proxy`。系统默认须（SHALL）选中“域名代理”，并默认填写 `https://inference.cloud.misuan.com` 与远端端口 `443`。远端类型切换须（SHALL）即时生效，直接切换控件显示状态与对应字段值，绝不（MUST NOT）弹窗要求确认。系统绝不（MUST NOT）渲染独立的远程证明/verify 内容行，也绝不（MUST NOT）渲染 `verify.model` / `verify.as_provider` 输入框；设置页不得（MUST NOT）显示 `add_ingress` 管理层级、说明性文字 `（客户端 OHTTP 形态）`、新增 ingress 操作或删除 ingress 操作。
 
 #### Scenario: 远端类型与远端字段同行
 
-- **WHEN** 渲染一条 ingress 的远端配置
-- **THEN** 远端类型选择与当前类型对应的远端字段出现在同一横排（`mapping` → 地址端口，`http_proxy` → 域名主机名 + 端口）
+- **WHEN** 渲染当前唯一 ingress 的远端配置
+- **THEN** 远端类型选择与当前类型对应的远端字段出现在同一横排
+
+#### Scenario: 远端类型文案仅中文
+
+- **WHEN** 渲染远端类型选择
+- **THEN** 可选项显示为“端点映射”和“域名代理”，不显示英文 `mapping` 或 `http_proxy`
+
+#### Scenario: 默认选中域名代理
+
+- **WHEN** 用户未导入、未回填且无有效缓存配置
+- **THEN** 远端类型默认选中“域名代理”，域名为 `https://inference.cloud.misuan.com`，远端端口为 `443`
 
 #### Scenario: 远端类型切换即时生效无弹窗
 
 - **WHEN** 用户在远端类型选择中从当前类型切换为另一类型
-- **THEN** 控件即时切换为该类型的显示状态、远端字段重置为该类型默认值，且不出现任何确认对话框
+- **THEN** 控件即时切换为该类型的显示状态、当前远端字段更新为该类型默认值，且不出现任何确认对话框
 
 #### Scenario: 远程证明开关表示 ra
 
-- **WHEN** 渲染一条 ingress 的远程证明配置
-- **THEN** 远程证明开关标签为"远程证明"，表示"是否启用远程证明"（ra）；开关开启（ra=on/`no_ra=false`）时 verify 配置出现在同一横排；开关关闭（ra=off/`no_ra=true`）时该行仅显示开关，不渲染 verify
+- **WHEN** 渲染当前唯一 ingress 的远程证明配置
+- **THEN** 远程证明开关位于 ingress 卡片标题行，表示“是否启用远程证明”（ra）；开关开启（ra=on/`no_ra=false`）时序列化使用默认 verify，开关关闭（ra=off/`no_ra=true`）时不渲染 verify，内容区不出现独立远程证明行或 verify 输入框
 
 #### Scenario: 本地监听独立成行
 
-- **WHEN** 渲染一条 ingress 的行 1
-- **THEN** 行 1 独占一行，呈现 tngui 反代对外绑定（`host` `127.0.0.1`/`0.0.0.0` toggle + 对外 `port`），不与远端类型/远端字段或远程证明/verify 同行；tng ingress 本地监听不在此行出现
+- **WHEN** 渲染当前唯一 ingress 的内容第一行
+- **THEN** 该行独占一行，呈现 tngui 反代对外绑定（`host` `127.0.0.1`/`0.0.0.0` toggle + 对外 `port`），不与远端类型/远端字段或远程证明开关同行；tng ingress 本地监听不在此行出现
 
+#### Scenario: 不显示 add_ingress 管理层级
 
+- **WHEN** 渲染设置页 ingress 配置
+- **THEN** 界面显示当前唯一入口的“入口配置”卡片，不出现 `add_ingress` 管理标题、`（客户端 OHTTP 形态）` 说明文字、新增 ingress 按钮或删除 ingress 按钮
 ### Requirement: 设置页客户端信息展示编译期版本与操作系统
 
 系统须（SHALL）在设置页“客户端信息”中以编译期变量驱动“客户端版本”与“操作系统”两项，不得写硬编码业务字面量：客户端版本取自编译期 `CARGO_PKG_VERSION`（`tngui-app` crate 版本）；操作系统取自编译期平台常量，并以平台友好名展示（windows→Windows、macos→macOS、linux→Linux；可附带架构）。该两项经系统对外命令暴露给前端，前端在渲染“客户端信息”时取自该命令返回值而非硬编码字面量。客户端信息 SHALL 只包含“客户端版本”和“操作系统”两项，绝不（MUST NOT）展示“更新通道”“稳定版(OTA)”或其他渠道字段。
@@ -802,8 +798,6 @@
 
 - **WHEN** 在 Windows/Linux/macOS 任一平台编译并运行相应构建产物
 - **THEN** 该产物“客户端版本”一致（同一 `CARGO_PKG_VERSION`），“操作系统”反映其编译期平台
-
-
 ### Requirement: tngui 反向代理作为 pre-TNG path 注入代理
 
 系统须（SHALL）在 tng 运行期间由 tngui 自身运行常驻 HTTP 反向代理作为推理对外入口。反代随 tng 启动/停止而启/停，反代把请求转发到 tng 内部 ingress 本地监听，并按 TNG OHTTP path 模型契约执行 pre-TNG path 注入；响应原样回传。系统绝不（MUST NOT）把 tng ingress 本地监听端口直接暴露给外部客户端，也绝不（MUST NOT）链接任何 tng crate。
@@ -914,7 +908,6 @@ tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`
 
 - **WHEN** 用户清空 `http_proxy` 目标端口
 - **THEN** 端口控件不呈现错误态，序列化结果省略 `dst_filters.port`
-
 ### Requirement: 设置页跨会话缓存
 
 系统须（SHALL）在正常应用关闭流程中，于关闭完成前将设置页的已提交状态 flush 到本机应用数据目录内独立的设置缓存文件。缓存内容限定为当前结构化配置模型序列化出的用户侧 TNG 配置与设置页 apiKey；系统绝不（MUST NOT）缓存未点"应用回填表单"的原始 JSON 草稿、`model`、`control_interface.restful` 注入端口、tng 内部监听端口或其他推理 prompt。系统不得（MUST NOT）把该独立缓存文件用作 `tng-runtime.json`，也不得将 tng 内部注入值写入该缓存。
@@ -950,7 +943,6 @@ GUI 启动时系统须（SHALL）在渲染设置状态前读取该缓存，并�
 
 - **WHEN** 应用关闭中设置缓存 flush 因文件系统错误失败
 - **THEN** 系统记录可诊断的失败信息并继续既有关闭流程；下次启动按无有效缓存处理
-
 ### Requirement: 远程证明服务配置与 RVS 地址一致性
 
 系统须（SHALL）在“设置”视图的 TNG 配置区域中，为远程证明提供标题为“远程证明服务配置”的配置块；当任意一条 ingress 开启远程证明时，该配置块展示在 TNG 配置内容下方，并承载一个可编辑的 RVS 地址输入。首次启动、设置缓存缺失/损坏、schema不支持或校验失败时，该地址必须预填为 `https://rvs.tsk.com:9443`；存在有效设置缓存时，系统必须直接恢复缓存中的用户填写值，不得覆盖为默认地址。该值必须被视为 TNG 配置状态的一部分，并随设置缓存跨会话保存。
@@ -991,3 +983,87 @@ GUI 启动时系统须（SHALL）在渲染设置状态前读取该缓存，并�
 
 - **WHEN** 所有 ingress 均关闭远程证明
 - **THEN** “设置”视图不展示“远程证明服务配置”作为当前生效的配置块，同时已保存的 RVS 地址值仍可留在设置缓存中供后续 RA 开启时恢复
+
+### Requirement: 单一 ingress 与默认远端配置
+
+系统须（SHALL）只允许配置一条 ingress。设置页不得（MUST NOT）展示 `add_ingress` 层级或多 ingress 列表，也不得（MUST NOT）提供新增 ingress 操作。导入 JSON、应用原始 JSON 回填或恢复设置缓存时，系统须（SHALL）仅保留第一条 ingress；若不存在可识别的 `mapping` / `http_proxy` 条目，系统须（SHALL）回退到默认单 ingress 配置。序列化结果仍须（SHALL）使用 TNG 兼容的 `add_ingress` 数组，且仅含一个元素。默认远端类型须（SHALL）为“域名代理”，默认域名为 `https://inference.cloud.misuan.com`，默认远端端口为 `443`。RVS 地址默认值须（SHALL）为 `https://rvs.tsk.com`，且仅在缺少导入值、回填值或有效缓存值时使用，不得（MUST NOT）覆盖用户显式配置。
+
+#### Scenario: 仅保留一条 ingress
+
+- **WHEN** 导入或回填的 JSON 中存在多条 ingress
+- **THEN** 系统仅保留第一条 ingress，并在 UI 上仍只呈现一条配置
+
+#### Scenario: 无可识别 ingress 时回退默认
+
+- **WHEN** 导入、回填或缓存中没有可识别的 `mapping` / `http_proxy` ingress
+- **THEN** 系统回退到默认单 ingress 配置，并选中“域名代理”，默认域名与端口按默认值填充
+
+#### Scenario: 序列化仍为数组
+
+- **WHEN** 系统导出或应用配置
+- **THEN** 生成的 JSON 中 `add_ingress` 为数组且仅含一个元素，保持 TNG wire format 兼容
+
+#### Scenario: RVS 默认值不覆盖用户配置
+
+- **WHEN** 导入的 JSON、回填的原始 JSON 或有效设置缓存中已有 RVS 地址
+- **THEN** RVS 地址使用该显式值，不使用默认 `https://rvs.tsk.com`
+
+### Requirement: 设置页 TNG 配置锁定
+
+系统须（SHALL）在设置页“导入配置”与“导出配置”按钮左侧提供锁定 toggle。锁定 toggle 默认须（SHALL）为开启状态。锁定开启时，TNG 配置区域内所有编辑控件须（SHALL）不可交互，包括远程证明开关、RVS 地址、远端类型选择、远端字段、本机绑定、端口输入和原始 JSON 编辑。锁定关闭时，上述控件须（SHALL）恢复可交互。锁定 toggle 本身、导入配置按钮和导出配置按钮不因锁定而不可交互；该状态仅影响配置控件，不影响概览状态卡、报告导出或 tng 进程管理。
+
+#### Scenario: 默认锁定开启
+
+- **WHEN** 用户打开设置页
+- **THEN** TNG 配置锁定 toggle 默认开启
+
+#### Scenario: 锁定生效
+
+- **WHEN** 锁定开启
+- **THEN** TNG 配置区域内的远程证明开关、RVS 地址、远端类型选择、远端字段、本机绑定、端口输入与原始 JSON 编辑均不可交互
+
+#### Scenario: 解锁恢复可编辑
+
+- **WHEN** 用户关闭锁定
+- **THEN** 上述配置控件恢复可交互
+
+#### Scenario: 不影响导入导出与报告导出
+
+- **WHEN** 锁定开启
+- **THEN** “导入配置”“导出配置”按钮与远端证明卡右侧图标-only 导出动作仍可正常使用
+
+#### Scenario: 锁定状态不写入 TNG JSON
+
+- **WHEN** 用户切换锁定状态并导出配置
+- **THEN** 导出的 TNG 配置 JSON 不包含锁定状态字段
+
+### Requirement: 文本输入首尾空白规范化
+
+系统须（SHALL）对以下文本输入框的字符串值执行首尾 trim：ingress `http_proxy` 形态的域名 / 主机名输入框，以及密态推理请求面板的模型输入框。trim 须（SHALL）在值进入对应前端状态、配置序列化、推理请求或接入示例前完成，且仅删除前导与尾部空白字符；系统不得（MUST NOT）删除字符串内部字符、改变大小写或做其它格式化。系统不得（MUST NOT）把该 trim 行为扩展到 prompt textarea、API Key、RVS 地址或端口输入控件。
+
+导入 JSON、原始 JSON 回填或设置缓存恢复得到的 `dst_filters.domain` 值也须（SHALL）按同一规则扣除首尾空白，避免隐藏空白状态。纯空白模型值须（SHALL）规范化为空字符串，并沿用现有空模型语义；模型是否填写仍不得（MUST NOT）影响密态推理请求面板的可发送门锁。
+
+#### Scenario: 域名输入去除首尾空白
+
+- **WHEN** 用户在 `http_proxy` ingress 的域名输入框输入或粘贴包含首尾空白的值
+- **THEN** 文本框提交到配置模型与序列化结果的域名不含首尾空白；字符串内部字符保持原样，`https://` 前缀仍按现有规则剥离并派生 `ohttp.tls: true`
+
+#### Scenario: 导入或恢复的域名规范化
+
+- **WHEN** 导入 JSON、应用原始 JSON 回填或恢复设置缓存时，某条 `http_proxy` ingress 的 `dst_filters.domain` 带有首尾空白
+- **THEN** 结构化域名输入框和下一次用户侧序列化结果不保留这些空白
+
+#### Scenario: 模型输入去除首尾空白
+
+- **WHEN** 用户在密态推理请求面板的模型输入框输入或粘贴包含首尾空白的值
+- **THEN** 前端使用 trim 后的值作为请求 `body.model`、curl 示例与 Model ID 预览中的模型值
+
+#### Scenario: 纯空白模型按空值处理
+
+- **WHEN** 模型输入框只包含空白字符
+- **THEN** 该输入规范化为空字符串，并沿用现有空模型语义；不得（MUST NOT）以纯空白字符串作为模型身份发送，且可发送门锁仍不因模型未填写而关闭
+
+#### Scenario: Prompt 不被该规则处理
+
+- **WHEN** 用户在 prompt textarea 中输入首尾空白
+- **THEN** prompt 内容保持原样，不套用域名 / 模型输入框的 trim 行为

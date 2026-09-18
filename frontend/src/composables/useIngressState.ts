@@ -4,6 +4,7 @@ import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { getStatus, getOutput } from "../tauri";
 import {
   deriveIngressStates,
+  hasServerAttestation,
   type IngressObservation,
   type IngressStates,
 } from "../ingressState";
@@ -27,6 +28,10 @@ export function useIngressState(intervalMs = 1500) {
     };
     return deriveIngressStates(observation);
   });
+
+  /** 当前首个 ingress 的 OHTTP keys 快照；没有数据时为 null。 */
+  const ingressKeys = computed<unknown>(() => statusReport.value?.ingress_keys ?? null);
+  const hasRemoteAttestation = computed(() => hasServerAttestation(ingressKeys.value));
 
   // 与概览左上角“运行状态”卡同口径：runtime === "running"。
   const tngRunning = computed(() => states.value.runtime === "running");
@@ -56,5 +61,5 @@ export function useIngressState(intervalMs = 1500) {
     if (timer) window.clearInterval(timer);
   });
 
-  return { statusReport, outputLines, states, tngRunning, pollError, poll };
+  return { statusReport, ingressKeys, hasRemoteAttestation, outputLines, states, tngRunning, pollError, poll };
 }

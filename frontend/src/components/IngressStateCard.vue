@@ -12,6 +12,9 @@ defineProps<{
     <div class="ingress-card-body">
       <div class="ingress-card-title">
         <b>{{ title }}</b>
+        <div v-if="$slots.actions" class="ingress-card-actions">
+          <slot name="actions" />
+        </div>
       </div>
       <div v-if="stateText" class="ingress-state-line">
         <span :class="['ingress-state-dot', state ? `ingress-dot-${state}` : '']" />

@@ -84,6 +84,23 @@ export async function importConfig(path: string): Promise<string> {
 export async function exportConfig(path: string, json: string): Promise<void> {
   return invoke<void>("export_config", { path, json });
 }
+
+/** 原生“另存为”对话框，返回远程证明报告 JSON 目标路径或 null（取消）。 */
+export async function pickRemoteAttestationReportPath(): Promise<string | null> {
+  const p = await saveDialog({
+    filters: [{ name: "JSON", extensions: ["json"] }],
+    defaultPath: "remote-attestation-report.json",
+  });
+  return p ?? null;
+}
+
+/** 把当前远程证明 keys 快照以 pretty JSON 写入用户所选路径。 */
+export async function exportRemoteAttestationReport(
+  path: string,
+  report: unknown,
+): Promise<void> {
+  return exportConfig(path, JSON.stringify(report, null, 2));
+}
 /** 独立设置缓存 payload；后端只校验信封，不解析 `tng` 字段。 */
 export interface SettingsCachePayload {
   schemaVersion: 1;

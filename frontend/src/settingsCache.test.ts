@@ -24,9 +24,9 @@ describe("settings cache parsing", () => {
     expect(state.apiKey).toBe("secret");
     expect(state.rvsUrl).toBe("https://private-rvs.example.com:8443");
     expect(state.config.rvsUrl).toBe("https://private-rvs.example.com:8443");
-    expect(state.config.add_ingress[0].mode).toBe("mapping");
-    expect(state.config.add_ingress[0].outward).toEqual(
-      validSerializedModel.add_ingress[0].outward,
+    expect(state.config.ingress.mode).toBe("http_proxy");
+    expect(state.config.ingress.outward).toEqual(
+      validSerializedModel.ingress.outward,
     );
   });
 
@@ -53,14 +53,16 @@ describe("settings cache parsing", () => {
     }
   });
 
-  it("falls back to defaults for config and RVS address when the config cache is invalid", () => {
+  it("falls back only the config while preserving an explicit cached RVS address", () => {
     const state = parseSettingsCache({
       schemaVersion: 1,
       tng: { configJson: "{invalid", apiKey: "secret", rvsUrl: "https://private-rvs.example.com:8443" },
     });
-    expect(state.config).toEqual(defaultModel());
+    const expected = defaultModel();
+    expected.rvsUrl = "https://private-rvs.example.com:8443";
+    expect(state.config).toEqual(expected);
     expect(state.apiKey).toBe("secret");
-    expect(state.rvsUrl).toBe(DEFAULT_RVS_URL);
+    expect(state.rvsUrl).toBe("https://private-rvs.example.com:8443");
   });
 
   it("falls back only tng config when its content is invalid", () => {
@@ -144,5 +146,27 @@ describe("close flush", () => {
     expect(close).toHaveBeenCalledTimes(1);
     expect(errorSpy.mock.calls.map(String).join(" ")).not.toContain("secret-config");
     expect(errorSpy.mock.calls.map(String).join(" ")).not.toContain("secret-key");
+  });
+});
+
+describe("cached domain normalization", () => {
+  it("trims a cached http_proxy domain while preserving the https TLS semantics", () => {
+    const configJson = JSON.stringify({
+      add_ingress: [{
+        http_proxy: {
+          proxy_listen: {},
+          dst_filters: [{ domain: "  https://cached.example.com  ", port: 443 }],
+        },
+        no_ra: true,
+        tngui_outward: { host: "127.0.0.1", port: 9443 },
+      }],
+    });
+    const state = parseSettingsCache({
+      schemaVersion: 1,
+      tng: { configJson, apiKey: "secret", rvsUrl: "https://private-rvs.example.com:8443" },
+    });
+    const df = state.config.ingress.fields.dst_filters as { domain: string };
+    expect(df.domain).toBe("https://cached.example.com");
+    expect(state.config.ingress.tls).toBe(true);
   });
 });

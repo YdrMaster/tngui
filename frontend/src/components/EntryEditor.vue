@@ -3,7 +3,6 @@ import { computed } from "vue";
 import {
   INGRESS_FIELDS,
   defaultFields,
-  DEFAULT_VERIFY,
   DEFAULT_MAPPING_OUT_PORT,
   DEFAULT_LISTEN_PORT,
   LOCALHOST,
@@ -13,12 +12,10 @@ import {
 import FieldRenderer from "./FieldRenderer.vue";
 import PortInput from "./PortInput.vue";
 
-const props = defineProps<{ entry: EntryModel }>();
-const emit = defineEmits<{ remove: [] }>();
-
+const props = withDefaults(defineProps<{ entry: EntryModel; disabled?: boolean }>(), { disabled: false });
 const remoteTypeOptions = [
-  { value: "mapping", label: "地址端口 (mapping)" },
-  { value: "http_proxy", label: "域名 (http_proxy)" },
+  { value: "mapping", label: "端点映射" },
+  { value: "http_proxy", label: "域名代理" },
 ];
 
 const remoteSpec = computed(() => INGRESS_FIELDS[props.entry.mode][1]);
@@ -49,7 +46,7 @@ function ensureDstFilters() {
   if (typeof df !== "object" || df === null) props.entry.fields.dst_filters = { domain: "https://", port: null };
 }
 
-// 锁定形态的嵌套子对象（供 FieldRenderer 绑定 remote / verify）
+// 锁定形态的嵌套子对象（供 FieldRenderer 绑定 remote 字段）。
 const remoteFields = computed<Record<string, any>>(() => {
   if (props.entry.mode === "mapping") {
     ensureMappingRule();
@@ -58,11 +55,6 @@ const remoteFields = computed<Record<string, any>>(() => {
   ensureDstFilters();
   return props.entry.fields.dst_filters as Record<string, any>;
 });
-const verifyFields = computed<Record<string, any>>(() => {
-  if (!props.entry.verify) props.entry.verify = { ...DEFAULT_VERIFY };
-  return props.entry.verify;
-});
-
 // 行1：反代对外绑定——host 在 127.0.0.1/0.0.0.0 间 toggle（off=仅本机、on=对外网卡）+ 对外 port。
 const outwardExternal = computed<boolean>({
   get: () => props.entry.outward.host === "0.0.0.0",
@@ -71,7 +63,7 @@ const outwardExternal = computed<boolean>({
   },
 });
 
-// 远程证明开关表示 "ra"（是否启用远程证明）：开=ra/`no_ra=false` 渲染 verify；关=`no_ra=true` 仅开关。
+// 远程证明开关表示 "ra"（是否启用远程证明）：开=ra/`no_ra=false`；关=`no_ra=true`。
 const raEnabled = computed<boolean>({
   get: () => !props.entry.no_ra,
   set: (v: boolean) => {
@@ -88,9 +80,12 @@ function onRemTypeChange(val: string | number) {
 </script>
 
 <template>
-  <a-card size="small" :title="'ingress · ' + entry.mode">
+  <a-card size="small" title="入口配置">
     <template #extra>
-      <a-button size="small" danger @click="emit('remove')">删除</a-button>
+      <div style="display:flex;align-items:center;gap:12px">
+        <span style="font-size:12px;color:var(--text-secondary);white-space:nowrap">远程证明</span>
+        <a-switch v-model:checked="raEnabled" :disabled="disabled" aria-label="远程证明" />
+      </div>
     </template>
 
     <a-form layout="vertical">
@@ -99,12 +94,14 @@ function onRemTypeChange(val: string | number) {
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a-switch
             v-model:checked="outwardExternal"
+            :disabled="disabled"
             checked-children="0.0.0.0"
             un-checked-children="127.0.0.1"
           />
           <PortInput
             v-model="entry.outward.port"
             required
+            :disabled="disabled"
             width="112px"
             placeholder="端口（必填）"
           />
@@ -122,29 +119,16 @@ function onRemTypeChange(val: string | number) {
               :value="entry.mode"
               style="width:100%"
               :options="remoteTypeOptions"
+              :disabled="disabled"
               @update:value="onRemTypeChange"
             />
           </a-form-item>
         </div>
         <div style="flex:1;min-width:220px">
-          <FieldRenderer :fields="remoteFields" :spec="remoteSpec" />
+          <FieldRenderer :fields="remoteFields" :spec="remoteSpec" :disabled="disabled" />
         </div>
       </div>
 
-      <!-- 行3：远程证明开关（表示 ra）+ verify 配置 同一横排（开关开=no_ra=false 渲染 verify） -->
-      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start">
-        <div style="flex:0 0 118px;max-width:118px">
-          <a-form-item label="远程证明">
-            <a-switch v-model:checked="raEnabled" />
-          </a-form-item>
-        </div>
-        <div v-if="raEnabled" style="flex:1;min-width:220px">
-          <FieldRenderer
-            :fields="verifyFields"
-            :spec="{ key: 'verify', label: 'verify（model / as_provider，默认 passport / tpm）', type: 'verifyFields' }"
-          />
-        </div>
-      </div>
     </a-form>
   </a-card>
 </template>

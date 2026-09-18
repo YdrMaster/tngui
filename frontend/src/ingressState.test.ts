@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { deriveIngressInfo, deriveIngressStates } from "./ingressState";
+import {
+  deriveIngressInfo,
+  deriveIngressStates,
+  hasServerAttestation,
+} from "./ingressState";
 
 const base = {
   reachable: true,
@@ -41,6 +45,20 @@ describe("deriveIngressStates", () => {
       remoteLink: "established",
       remoteProof: "verified",
     });
+  });
+
+  it("结构性失败后仍保留历史凭据的可导出判断", () => {
+    const historicalReport = {
+      servers: [{ server_public_key: "key", server_attestation: "jwt" }],
+    };
+    const states = deriveIngressStates({
+      ...base,
+      ingressKeys: historicalReport,
+      outputLines: ["ERROR attestation verification failed"],
+    });
+
+    expect(states.remoteProof).toBe("failed");
+    expect(hasServerAttestation(historicalReport)).toBe(true);
   });
 
   it("keys 采集错误不改写未初始化/未获取，也不编造远端失败", () => {
@@ -111,6 +129,27 @@ describe("deriveIngressStates", () => {
     expect(["not-obtained", "verified", "refresh-due", "failed"]).toContain(
       states.remoteProof,
     );
+  });
+});
+
+describe("hasServerAttestation", () => {
+  it("在没有快照、servers 缺失或凭据为空时返回 false", () => {
+    expect(hasServerAttestation(null)).toBe(false);
+    expect(hasServerAttestation({})).toBe(false);
+    expect(
+      hasServerAttestation({ servers: [{ server_attestation: "" }] }),
+    ).toBe(false);
+  });
+
+  it("在任一 server 凭据非空时返回 true", () => {
+    expect(
+      hasServerAttestation({
+        servers: [
+          { server_attestation: "" },
+          { server_attestation: "jwt" },
+        ],
+      }),
+    ).toBe(true);
   });
 });
 

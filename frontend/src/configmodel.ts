@@ -1,9 +1,9 @@
 // 配置模型的序列化/解析（客户端 ingress 锁定 OHTTP 形态）。
 // - serialize：不输出 add_egress、不输出 control_interface.restful；每条 ingress 注入锁定 ohttp；
-//   按 no_ra/verify 互斥产出（no_ra=true → "no_ra":true 且无 verify；no_ra=false → verify 且无 no_ra）；
+//   按 no_ra/verify 互斥产出（no_ra=true → "no_ra":true 且无 verify；no_ra=false → 固定默认 verify 且无 no_ra）；
 //   tng 本地监听 host/port 不进用户序列化（in/proxy_listen 输出为空对象，由 tngui 启动时注入）；
 //   反代对外绑定作 tngui 侧 `tngui_outward` 与 add_ingress 平级 sibling 输出（不进 tng 的 mapping.in）。
-// - parse：丢弃 add_egress（warning）、丢弃 ingress 的 ohttp（用锁定值）、读 verify 回填、
+// - parse：丢弃 add_egress（warning）、丢弃 ingress 的 ohttp（用锁定值）、用 verify 存在与否判定 RA 开启但丢弃其字段值、
 //   读/校验 `tngui_outward.port`（必填有效 TCP 端口）；仅认 mapping/http_proxy 两种 ingress。
 // control_interface.restful 子段由 tngui 启动时注入（auto-manage-control-port），这里丢弃/不输出。
 import {
@@ -16,11 +16,11 @@ import {
   PORT_MAX,
   PORT_MIN,
   isValidPort,
+  defaultModel,
   type ConfigModel,
   type EntryModel,
   type IngressMode,
   type OutwardBind,
-  type VerifyConfig,
 } from "./formspec";
 
 /** GUI 侧 RVS 字段名。用户态配置保留该字段便于模型往返；后端写 tng runtime 前统一剥离。 */
@@ -31,7 +31,7 @@ export function serialize(model: ConfigModel): string {
   if (Object.keys(model.control_interface_extra).length > 0) {
     out.control_interface = { ...model.control_interface_extra };
   }
-  out.add_ingress = model.add_ingress.map(serializeEntry);
+  out.add_ingress = [serializeEntry(model.ingress)];
   out[TNGUI_RVS_URL_FIELD] = model.rvsUrl || DEFAULT_RVS_URL;
   for (const [k, v] of Object.entries(model.extra)) out[k] = v;
   return JSON.stringify(out, null, 2);
@@ -43,7 +43,7 @@ function serializeEntry(e: EntryModel): Record<string, unknown> {
   if (e.no_ra) {
     obj.no_ra = true;
   } else {
-    obj.verify = e.verify ? { ...e.verify } : { ...DEFAULT_VERIFY };
+    obj.verify = { ...DEFAULT_VERIFY };
   }
   const ohttp = JSON.parse(JSON.stringify(LOCKED_OHTTP)) as Record<string, unknown>;
   // http_proxy：`ohttp.tls` 由域名框前缀派生——带 `https://` 前缀 → `tls: true`（tng 以
@@ -89,7 +89,7 @@ function schemePrefix(domain: string): "https" | "http" | null {
  *  （parse 从 `ohttp.tls` 回填）。mapping 不涉及。 */
 function deriveHttpProxyTls(e: EntryModel): boolean {
   const d = (e.fields.dst_filters ?? {}) as Record<string, unknown>;
-  const prefix = schemePrefix(strOr(d.domain, ""));
+  const prefix = schemePrefix(strOr(d.domain, "").trim());
   if (prefix === "https") return true;
   if (prefix === "http") return false;
   return e.tls === true;
@@ -104,7 +104,7 @@ function serializeFields(mode: IngressMode, fields: Record<string, unknown>): Re
   if (mode === "mapping") return mappingFields(fields);
   const df = (fields.dst_filters ?? {}) as Record<string, unknown>;
   // 剥离域名框可写的 scheme 前缀——tng `dst_filters.domain` 只认主机名，前缀仅驱动 tls。
-  const domain = strOr(df.domain, "").replace(/^https?:\/\//i, "");
+  const domain = strOr(df.domain, "").trim().replace(/^https?:\/\//i, "");
   const dst: Record<string, unknown> = { domain };
   const p = df.port;
   if (p !== undefined && p !== null && p !== "") dst.port = p;
@@ -121,7 +121,7 @@ function normalizeFields(mode: IngressMode, fields: Record<string, unknown>): Re
   // http_proxy 目标端口可选；JSON 中缺省或 UI 留空都表示不限定端口。
   let port: number | null = null;
   const readFrom = (d: Record<string, unknown>): void => {
-    domain = strOr(d.domain, "");
+    domain = strOr(d.domain, "").trim();
     const pp = d.port;
     port = isValidPort(pp) ? pp : null;
   };
@@ -169,7 +169,7 @@ export function parse(json: string): ParseResult {
     warnings.push("已丢弃 add_egress（客户端不承载 egress）");
   }
 
-  const entries: EntryModel[] = [];
+  let ingress: EntryModel | undefined;
   for (let i = 0; i < ingressArr.length; i++) {
     const r = parseEntry(ingressArr[i], `add_ingress[${i}]`);
     if (r.unsupported) {
@@ -177,7 +177,15 @@ export function parse(json: string): ParseResult {
       continue;
     }
     if (r.error) return { error: r.error };
-    entries.push(r.model!);
+    if (ingress !== undefined) {
+      warnings.push(`已丢弃 add_ingress[${i}]（仅支持一条 ingress）`);
+      continue;
+    }
+    ingress = r.model!;
+  }
+  if (ingress === undefined) {
+    ingress = defaultModel().ingress;
+    warnings.push("无可识别的 ingress，已回退默认域名代理配置");
   }
 
   // GUI 侧全局 RVS 地址：从用户 JSON 取出，不落入顶层 extra；序列化时再写回用户态 JSON。
@@ -191,7 +199,7 @@ export function parse(json: string): ParseResult {
   delete topExtra[TNGUI_RVS_URL_FIELD];
 
   return {
-    model: { control_interface_extra, add_ingress: entries, rvsUrl, extra: topExtra },
+    model: { control_interface_extra, ingress, rvsUrl, extra: topExtra },
     warnings: warnings.length ? warnings : undefined,
   };
 }
@@ -223,7 +231,7 @@ function parseEntry(
       const first = Array.isArray(dfRaw) ? (dfRaw[0] as Record<string, unknown> | undefined) : (dfRaw as Record<string, unknown> | undefined);
       return first && typeof first === "object" ? strOr(first.domain, "") : "";
     };
-    const raw = readDom();
+    const raw = readDom().trim();
     const prefix = schemePrefix(raw);
     tls = prefix === "https" ? true : prefix === "http" ? false : ohttpObj["tls"] === true;
     const boxed = prefix !== null ? raw : tls ? `https://${raw}` : raw;
@@ -237,16 +245,11 @@ function parseEntry(
   if (portError) return { error: portError };
   const fields = normalizeFields(mode, fieldsRaw);
 
-  let no_ra: boolean;
-  let verify: VerifyConfig | undefined;
-  if (typeof e.verify === "object" && e.verify !== null) {
-    const vs = e.verify as Record<string, unknown>;
-    no_ra = false;
-    verify = { model: strOr(vs.model, DEFAULT_VERIFY.model), as_provider: strOr(vs.as_provider, DEFAULT_VERIFY.as_provider) };
-  } else {
-    no_ra = e.no_ra === true;
-    verify = undefined;
-  }
+  // `verify` object is the historical RA-on representation. It only determines that RA is
+  // enabled; custom model/as_provider values are intentionally discarded. Serialization
+  // always writes DEFAULT_VERIFY so no invisible state survives import/raw-JSON round trips.
+  const raEnabled = typeof e.verify === "object" && e.verify !== null;
+  const no_ra = raEnabled ? false : e.no_ra === true;
 
   // 反代对外绑定：tngui 侧 `tngui_outward`（端口必填有效；缺失不静默回退）
   const outwardResult = parseOutward(e.tngui_outward, at);
@@ -260,7 +263,7 @@ function parseEntry(
   delete extra.ohttp;
   delete extra.tngui_outward;
 
-  return { model: { mode, fields, no_ra, verify, outward, tls, extra } };
+  return { model: { mode, fields, no_ra, outward, tls, extra } };
 }
 
 /** 校验一条 ingress 中用户可编辑端口；只关注端口，不改变 host/结构语义。 */

@@ -67,8 +67,8 @@ function hasServerPublicKey(ingressKeys: unknown): boolean {
   );
 }
 
-/** keys 快照中任一 server 有非空校验凭据即视为已验证。 */
-function hasServerAttestation(ingressKeys: unknown): boolean {
+/** keys 快照中任一 server 有非空校验凭据，即存在可导出的远程证明报告。 */
+export function hasServerAttestation(ingressKeys: unknown): boolean {
   if (!isRecord(ingressKeys)) return false;
   const servers = ingressKeys.servers;
   return (

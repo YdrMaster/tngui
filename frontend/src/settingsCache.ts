@@ -49,7 +49,11 @@ export function parseSettingsCache(payload: unknown): SettingsState {
   const apiKey = typeof cachedTng?.apiKey === "string" ? cachedTng.apiKey : "";
   const rvsUrl = restoredRvsUrl(cachedTng?.rvsUrl);
   if (parsedConfig.error) {
-    return { config: defaultModel(), apiKey, rvsUrl: DEFAULT_RVS_URL };
+    // 配置 JSON 无效只回退 TNG 配置；独立缓存中的有效 RVS 地址仍属于用户显式值，
+    // 不得被默认值覆盖。
+    const config = defaultModel();
+    config.rvsUrl = rvsUrl;
+    return { config, apiKey, rvsUrl };
   }
   const config = parsedConfig.model!;
   config.rvsUrl = rvsUrl;

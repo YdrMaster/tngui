@@ -2,6 +2,7 @@
 defineProps<{
   visible: boolean;
   value: string;
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -23,7 +24,8 @@ const emit = defineEmits<{
       >
         <a-input
           :value="value"
-          placeholder="https://rvs.tsk.com:9443"
+          :disabled="disabled"
+          placeholder="https://rvs.tsk.com"
           autocapitalize="off"
           autocorrect="off"
           spellcheck="false"
