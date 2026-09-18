@@ -10,6 +10,7 @@
 pub mod config;
 pub mod inference;
 pub mod log;
+pub mod models;
 pub mod process;
 pub mod proxy;
 pub mod status;
@@ -21,6 +22,7 @@ pub use config::{
 };
 pub use inference::send_inference;
 pub use log::BoundedLog;
+pub use models::{list_models, parse_model_list};
 pub use process::{ManagedChild, TngSupervisor, kill_group, spawn_managed};
 pub use proxy::{ProxyHandle, ProxyRoute, start_proxy};
 pub use status::{StatusReport, fetch_status};

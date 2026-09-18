@@ -17,6 +17,7 @@ import {
   Col,
   Step,
   Steps,
+  Select,
   TabPane,
   Tabs,
   Tag,
@@ -33,26 +34,20 @@ const messageMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("ant-design-vue", async () => {
-  const actual = await vi.importActual<typeof import("ant-design-vue")>(
-    "ant-design-vue",
-  );
+  const actual = await vi.importActual<typeof import("ant-design-vue")>("ant-design-vue");
   return { ...actual, message: messageMocks };
 });
 
 const invokeMock = vi.hoisted(() => vi.fn());
-
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: invokeMock,
-}));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 const tauriMocks = vi.hoisted(() => ({
   proxyEndpoint: vi.fn(),
+  listModels: vi.fn(),
 }));
-
 vi.mock("../tauri", () => tauriMocks);
 
 const tngRunningState = vi.hoisted(() => ({ value: true }));
-
 vi.mock("../composables/useIngressState", () => ({
   useIngressState: () => ({ tngRunning: tngRunningState }),
 }));
@@ -73,6 +68,7 @@ const globalComponents = {
     "a-progress": Progress,
     "a-result": Result,
     "a-row": Row,
+    "a-select": Select,
     "a-step": Step,
     "a-steps": Steps,
     "a-tab-pane": TabPane,
@@ -87,15 +83,12 @@ function mountView() {
   return mount(InferenceView, { global: globalComponents });
 }
 
-async function preparePromptAndModel(model: string, prompt = "  hello prompt  ") {
+async function mountAndLoadModels(models: string[]) {
+  tauriMocks.listModels.mockResolvedValueOnce(models);
   const wrapper = mountView();
   await flushPromises();
-
-  const modelInput = wrapper.find("input.ant-input");
-  await modelInput.setValue(model);
   const promptInput = wrapper.find("textarea.ant-input");
-  await promptInput.setValue(prompt);
-
+  await promptInput.setValue("请分析这段文本");
   return { wrapper, promptInput };
 }
 
@@ -103,75 +96,125 @@ describe("InferenceView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     tngRunningState.value = true;
-    useInferenceConfig().initializeApiKey("test-key");
-    useInferenceConfig().model.value = "";
+    const inference = useInferenceConfig();
+    inference.initializeApiKey("test-key");
+    inference.model.value = "";
+    inference.failModelDiscovery();
     tauriMocks.proxyEndpoint.mockReset().mockResolvedValue([{ port: 18080 }]);
+    tauriMocks.listModels.mockReset().mockResolvedValue(["model-a"]);
     invokeMock.mockReset().mockResolvedValue("ok");
   });
 
-  it("trims the model input and uses that value in the request and examples", async () => {
-    const { wrapper, promptInput } = await preparePromptAndModel("  gpt-4  ");
+  it("disables the dropdown and send button when no models are detected", async () => {
+    const { wrapper } = await mountAndLoadModels([]);
+    const select = wrapper.findComponent(Select);
+    expect(select.props("disabled")).toBe(true);
+    expect(select.props("placeholder")).toBe("未检测到密态模型");
+    const sendButton = wrapper.find("button.send-button");
+    expect(sendButton.attributes("disabled")).toBeDefined();
+    await sendButton.trigger("click");
+    await flushPromises();
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(messageMocks.warning).not.toHaveBeenCalled();
+  });
 
-    expect((promptInput.element as HTMLTextAreaElement).value).toBe("  hello prompt  ");
-    expect(useInferenceConfig().model.value).toBe("gpt-4");
+  it("auto selects a single model and sends exactly that ID", async () => {
+    const { wrapper } = await mountAndLoadModels(["capi-model"]);
+    const select = wrapper.findComponent(Select);
+    expect(select.props("value")).toBe("capi-model");
+    await wrapper.find("button.send-button").trigger("click");
+    await flushPromises();
+    expect(invokeMock).toHaveBeenCalledWith("send_inference", {
+      port: 18080,
+      model: "capi-model",
+      apiKey: "test-key",
+      prompt: "请分析这段文本",
+    });
+  });
 
-    const integrationTab = wrapper
-      .findAll('[role="tab"]')
-      .find((tab) => tab.text() === "AI 客户端接入");
-    await integrationTab!.trigger("click");
+  it("defaults to the first of multiple models, preserves only in-list switches, and blocks custom text", async () => {
+    const { wrapper } = await mountAndLoadModels(["first-model", "second-model"]);
+    const select = wrapper.findComponent(Select);
+    expect(select.props("value")).toBe("first-model");
+
+    select.vm.$emit("update:value", "second-model");
     await nextTick();
+    expect(useInferenceConfig().model.value).toBe("second-model");
 
-    const output = JSON.parse(serializeInferenceRequestDebug(wrapper));
-    expect(output.model).toBe("gpt-4");
-    expect(wrapper.find(".client-config").text()).toContain("Model ID       gpt-4");
+    select.vm.$emit("update:value", "not-from-capi");
+    await nextTick();
+    expect(useInferenceConfig().model.value).toBe("second-model");
 
     await wrapper.find("button.send-button").trigger("click");
     await flushPromises();
-
     expect(invokeMock).toHaveBeenCalledWith("send_inference", {
       port: 18080,
-      model: "gpt-4",
+      model: "second-model",
       apiKey: "test-key",
-      prompt: "  hello prompt  ",
+      prompt: "请分析这段文本",
     });
-    expect(messageMocks.warning).not.toHaveBeenCalledWith(
-      expect.stringContaining("模型"),
-    );
   });
 
-  it("normalizes a whitespace-only model to empty without changing the send gate", async () => {
-    const { wrapper } = await preparePromptAndModel("   ", "  keep prompt  ");
-    const sendButton = wrapper.find("button.send-button");
-
-    expect(sendButton.attributes("disabled")).toBeUndefined();
-    expect(useInferenceConfig().model.value).toBe("");
-    const integrationTab = wrapper
-      .findAll('[role="tab"]')
-      .find((tab) => tab.text() === "AI 客户端接入");
-    await integrationTab!.trigger("click");
+  it("falls back to the first model when a refreshed list removes current selection", async () => {
+    const { wrapper } = await mountAndLoadModels(["first-model", "second-model"]);
+    expect(useInferenceConfig().model.value).toBe("first-model");
+    useInferenceConfig().replaceModelList(["new-model"]);
     await nextTick();
-    expect(wrapper.find(".client-config").text()).toContain("Model ID       model");
+    expect(useInferenceConfig().model.value).toBe("new-model");
+    const select = wrapper.findComponent(Select);
+    expect(select.props("value")).toBe("new-model");
+  });
 
-    await sendButton.trigger("click");
+  it("keeps an in-list choice through a refresh and falls back only when it disappears", async () => {
+    const { wrapper } = await mountAndLoadModels(["old-model", "second-model"]);
+    useInferenceConfig().selectModel("second-model");
+    useInferenceConfig().replaceModelList(["second-model", "third-model"]);
+    await nextTick();
+    expect(useInferenceConfig().model.value).toBe("second-model");
+    expect(wrapper.findComponent(Select).props("value")).toBe("second-model");
+
+    useInferenceConfig().replaceModelList(["third-model"]);
+    await nextTick();
+    expect(useInferenceConfig().model.value).toBe("third-model");
+    expect(wrapper.findComponent(Select).props("value")).toBe("third-model");
+  });
+
+  it("shows the loading state before model discovery completes", async () => {
+    let resolveModels: (ids: string[]) => void = () => {};
+    tauriMocks.listModels.mockImplementationOnce(
+      () => new Promise<string[]>((resolve) => { resolveModels = resolve; }),
+    );
+    const wrapper = mountView();
     await flushPromises();
+    const select = wrapper.findComponent(Select);
+    expect(select.props("disabled")).toBe(true);
+    expect(select.props("placeholder")).toBe("正在获取模型列表…");
+    expect(wrapper.find("button.send-button").attributes("disabled")).toBeDefined();
 
-    expect(invokeMock).toHaveBeenCalledWith("send_inference", {
-      port: 18080,
-      model: "",
-      apiKey: "test-key",
-      prompt: "  keep prompt  ",
-    });
+    resolveModels(["loaded-model"]);
+    await flushPromises();
+    expect(select.props("value")).toBe("loaded-model");
+    expect(select.props("disabled")).toBe(false);
+  });
+
+  it("treats a missing proxy endpoint as discovery failure without selectable options", async () => {
+    tauriMocks.proxyEndpoint.mockReset().mockResolvedValue([]);
+    const wrapper = mountView();
+    await flushPromises();
+    const select = wrapper.findComponent(Select);
+    expect(select.props("disabled")).toBe(true);
+    expect(select.props("placeholder")).toBe("模型列表加载失败");
+    expect(tauriMocks.listModels).not.toHaveBeenCalled();
+    expect(wrapper.find("button.send-button").attributes("disabled")).toBeDefined();
+  });
+
+  it("shows a distinct discovery failure instead of pretending the list is empty", async () => {
+    tauriMocks.listModels.mockReset().mockRejectedValueOnce(new Error("gateway down"));
+    const wrapper = mountView();
+    await flushPromises();
+    const select = wrapper.findComponent(Select);
+    expect(select.props("disabled")).toBe(true);
+    expect(select.props("placeholder")).toBe("模型列表加载失败");
+    expect(messageMocks.error).toHaveBeenCalledWith(expect.stringContaining("gateway down"));
   });
 });
-
-/** Extract the JSON body from the cURL example rendered by the integration tab. */
-function serializeInferenceRequestDebug(wrapper: ReturnType<typeof mountView>): string {
-  const curlText = wrapper
-    .findAll("pre.code-block")
-    .map((code) => code.text())
-    .find((text) => text.includes("curl http://127.0.0.1:18080/v1/chat/completions"));
-  if (!curlText) throw new Error("cURL example was not rendered");
-  const start = curlText.indexOf("-d '") + 4;
-  const end = curlText.lastIndexOf("}'");
-  return curlText.slice(start, end + 1);
-}

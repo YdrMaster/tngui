@@ -342,12 +342,15 @@ fn prepare_ingress_entry(
 
     // 远端目标 host（转发 tng 时作 Host 头，避开 recursion 检测）。
     let remote_host = read_remote_host(entry);
+    // 模型发现 direct capi origin；无法确定时置空，模型发现请求 fail-closed。
+    let models_origin = read_models_origin(entry);
 
     Ok(crate::proxy::ProxyRoute {
         out_host: out_host.to_string(),
         out_port,
         internal_port,
         remote_host,
+        models_origin,
     })
 }
 
@@ -447,6 +450,67 @@ fn read_remote_host(entry: &Value) -> String {
         }
     }
     String::new()
+}
+
+/// 从当前 ingress 读取 `/v1/models` direct capi origin。
+///
+/// - `http_proxy`：`ohttp.tls=true` 表示 HTTPS，否则 HTTP；
+/// - `mapping`：现有配置没有 TLS 语义，保持 HTTP；
+/// - 必须有 host/domain，若远端 host 或有效端口缺失则模型发现地址不可用。
+fn read_models_origin(entry: &Value) -> Option<String> {
+    if let Some(mapping) = entry.get("mapping").and_then(Value::as_object) {
+        let out = mapping
+            .get("rules")
+            .and_then(Value::as_array)
+            .and_then(|rules| rules.first())
+            .and_then(|rule| rule.get("out"))
+            .and_then(Value::as_object)?;
+        let host = out.get("host").and_then(Value::as_str)?.trim();
+        let port = out.get("port")?.as_u64()?;
+        if host.is_empty() || !(1..=65535).contains(&port) {
+            return None;
+        }
+        return Some(format!("http://{host}:{port}"));
+    }
+
+    if let Some(http_proxy) = entry.get("http_proxy").and_then(Value::as_object) {
+        let dst = http_proxy.get("dst_filters")?;
+        let dst = dst
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(Value::as_object)
+            .or_else(|| dst.as_object())?;
+        let domain = dst.get("domain").and_then(Value::as_str)?.trim();
+        if domain.is_empty() {
+            return None;
+        }
+        let scheme = if entry
+            .get("ohttp")
+            .and_then(Value::as_object)
+            .and_then(|ohttp| ohttp.get("tls"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            "https"
+        } else {
+            "http"
+        };
+        let port = match dst.get("port") {
+            Some(port) => {
+                let port = port.as_u64().filter(|p| (1..=65535).contains(p));
+                if port.is_none() {
+                    return None;
+                }
+                port
+            }
+            None => None,
+        };
+        return Some(match port {
+            Some(port) => format!("{scheme}://{domain}:{port}"),
+            None => format!("{scheme}://{domain}"),
+        });
+    }
+    None
 }
 
 /// 拦截 tng 加载期必然拒绝的 ingress 远端配置：`mapping` 每条规则（序列化形态
@@ -1072,5 +1136,96 @@ mod tests {
             !all.contains(&18443) && !all.contains(&18444),
             "应避让对外端口: {all:?}"
         );
+    }
+
+    #[test]
+    fn prepare_launch_derives_https_models_origin() {
+        let src = r#"{"add_ingress":[{"http_proxy":{"proxy_listen":{},"dst_filters":[{"domain":"inference.cloud.misuan.com","port":443}]},"ohttp":{"tls":true},"tngui_outward":{"host":"127.0.0.1","port":18080}}]}"#;
+        let ports = pick_free_ports(1).unwrap();
+        let (_, routes, _) = prepare_launch(src, 40200, &ports).unwrap();
+        assert_eq!(
+            routes[0].models_origin.as_deref(),
+            Some("https://inference.cloud.misuan.com:443")
+        );
+    }
+
+    #[test]
+    fn prepare_launch_derives_http_models_origin() {
+        let src = serde_json::json!({
+            "add_ingress": [{
+                "http_proxy": {
+                    "proxy_listen": {},
+                    "dst_filters": [
+                        {"domain": "inference.example.com", "port": 8080}
+                    ]
+                },
+                "ohttp": {},
+                "tngui_outward": {"host": "127.0.0.1", "port": 18081}
+            }]
+        })
+        .to_string();
+        let ports = pick_free_ports(1).unwrap();
+        let (_, routes, _) = prepare_launch(&src, 40201, &ports).unwrap();
+        assert_eq!(
+            routes[0].models_origin.as_deref(),
+            Some("http://inference.example.com:8080")
+        );
+    }
+
+    #[test]
+    fn prepare_launch_derives_mapping_models_origin() {
+        let src = serde_json::json!({
+            "add_ingress": [{
+                "mapping": {
+                    "rules": [
+                        {"in": {}, "out": {"host": "10.0.0.1", "port": 80}}
+                    ]
+                },
+                "ohttp": {},
+                "tngui_outward": {"host": "127.0.0.1", "port": 18082}
+            }]
+        })
+        .to_string();
+        let ports = pick_free_ports(1).unwrap();
+        let (_, routes, _) = prepare_launch(&src, 40202, &ports).unwrap();
+        assert_eq!(
+            routes[0].models_origin.as_deref(),
+            Some("http://10.0.0.1:80")
+        );
+    }
+
+    #[test]
+    fn read_models_origin_treats_invalid_metadata_as_absent() {
+        let invalid_port = serde_json::json!({
+            "http_proxy": {
+                "dst_filters": [{"domain": "inference.example.com", "port": 70000}]
+            },
+            "ohttp": {"tls": true}
+        });
+        assert_eq!(read_models_origin(&invalid_port), None);
+
+        let missing_domain = serde_json::json!({
+            "http_proxy": {"dst_filters": [{"port": 443}]},
+            "ohttp": {"tls": true}
+        });
+        assert_eq!(read_models_origin(&missing_domain), None);
+    }
+
+    #[test]
+    fn prepare_launch_accepts_empty_models_origin() {
+        let src = serde_json::json!({
+            "add_ingress": [{
+                "http_proxy": {
+                    "proxy_listen": {},
+                    "dst_filters": [{"domain": ""}]
+                },
+                "ohttp": {"tls": true},
+                "tngui_outward": {"host": "127.0.0.1", "port": 18083}
+            }]
+        })
+        .to_string();
+        let ports = pick_free_ports(1).unwrap();
+        let (_, routes, _) = prepare_launch(&src, 40203, &ports).unwrap();
+        assert_eq!(routes[0].models_origin, None);
     }
 }

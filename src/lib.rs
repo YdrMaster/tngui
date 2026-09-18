@@ -481,6 +481,12 @@ async fn send_inference(
     tngui_core::send_inference(port, &model, &api_key, &prompt).await
 }
 
+/// 从本地 pre-TNG proxy 获取模型清单，不发送 inference API Key。
+#[tauri::command]
+async fn list_models(port: u16) -> Result<Vec<String>, String> {
+    tngui_core::list_models(port).await
+}
+
 /// 普通版 tng（远程证明全关时使用）的随包资源名：Windows 为 `tng-nora.exe`、其余平台
 /// 为 `tng-nora`。CI release 下载官方 tng 产物后放此名——与 RA 版的 `tng.exe` 撞名规避。
 fn tng_nora_resource_name_for(os: &str) -> &'static str {
@@ -579,6 +585,7 @@ pub fn run() {
             flush_settings_cache,
             save_config,
             send_inference,
+            list_models,
             app_info
         ])
         .run(generate_context!())

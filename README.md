@@ -5,6 +5,8 @@ TNG（可信网络网关）的桌面 GUI 包装器：配置编辑 + 启停 + 只
 
 tngui 自带 pre-TNG reverse proxy：对 `POST /v1/chat/completions` 与 `POST /v1/messages`，从请求体顶层 `body.model` 读取模型身份，生成 `/models/{模型名}/...` 的 pre-TNG path，并保留 query、credential header 和原始 body 字节。远端必须按 capi 的 path 模型机制路由与鉴权；支持的模型请求必须携带有效的 `body.model`。
 
+对精确的 `GET /v1/models`，tngui 保留原始 query 与 `Authorization` / `x-api-key` 业务认证头，并忽略 `x-model`，直接发往当前 ingress 对应的 capi origin。该例外不经过 tng ingress，也不进入 OHTTP / 远程证明链路，不做模型 path 注入或 body 改写；若 capi origin 缺失、无效或不可达，返回明确的模型发现失败响应，而不是空模型清单。推理请求仍保持原有路径，并继续通过 TNG 加密与远程证明链路。
+
 ## 开发
 
 ```bash

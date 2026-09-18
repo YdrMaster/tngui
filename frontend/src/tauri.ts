@@ -31,6 +31,11 @@ export async function proxyEndpoint(): Promise<ProxyEndpoint[]> {
   return invoke<ProxyEndpoint[]>("proxy_endpoint");
 }
 
+/** 从本地 pre-TNG proxy 的 \/v1\/models 获取模型清单。 */
+export async function listModels(port: number): Promise<string[]> {
+  return invoke<string[]>("list_models", { port });
+}
+
 export async function launchTng(configJson: string, rvsUrl: string): Promise<number> {
   return invoke<number>("launch_tng", { configJson, rvsUrl });
 }

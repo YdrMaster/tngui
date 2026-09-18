@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, inject, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, inject, onMounted, onBeforeUnmount, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { message } from "ant-design-vue";
 import {
@@ -9,12 +9,21 @@ import {
 } from "@ant-design/icons-vue";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
 import { useIngressState } from "../composables/useIngressState";
-import { proxyEndpoint } from "../tauri";
+import { listModels, proxyEndpoint } from "../tauri";
 import SecureFlow from "../components/SecureFlow.vue";
 import ArchitectureFlow from "../components/ArchitectureFlow.vue";
 import ProtectionItem from "../components/ProtectionItem.vue";
 
-const { model: inferenceModel, apiKey } = useInferenceConfig();
+const {
+  apiKey,
+  model,
+  modelIds,
+  modelDiscoveryState,
+  selectModel,
+  replaceModelList,
+  startModelDiscovery,
+  failModelDiscovery,
+} = useInferenceConfig();
 const { tngRunning } = useIngressState();
 const navigate = inject<(target: "overview" | "inference" | "settings") => void>(
   "navigate",
@@ -41,6 +50,23 @@ async function fetchProxy() {
     proxyPort.value = null;
   }
 }
+
+watch(
+  proxyPort,
+  async (port) => {
+    if (port === null) { failModelDiscovery(); return; }
+    startModelDiscovery();
+    try {
+      const ids = await listModels(port);
+      replaceModelList(ids);
+    } catch (error) {
+      failModelDiscovery();
+      message.error(`模型列表加载失败: ${String(error)}`);
+    }
+  },
+  { immediate: true },
+);
+
 onMounted(() => {
   fetchProxy();
   proxyTimer = window.setInterval(fetchProxy, 2000);
@@ -54,30 +80,45 @@ const localEndpoint = computed(() =>
     ? `http://127.0.0.1:${proxyPort.value}/v1`
     : "未配置",
 );
-/** 模型输入统一扣首尾空白；请求、示例与预览共用同一规范化值。 */
-const normalizedInferenceModel = computed(() => inferenceModel.value.trim());
-/** 模型输入写入状态时立即规范化；纯空白归空。 */
-function setInferenceModel(value: string): void {
-  inferenceModel.value = value.trim();
-}
-// “可发”门锁：与概览左上角“运行状态”卡同口径（tngRunning）AND api-key 已配置；不再查 readyz/model/端口。
-const usable = computed(() => tngRunning.value && !!apiKey.value);
+
+const modelOptions = computed(() =>
+  modelIds.value.map((modelId) => ({ value: modelId, label: modelId })),
+);
+
+/** 搜索只用于过滤服务端返回的选项；任意输入文本永远不会成为模型 ID。 */
+const filterModelOption = (input: string, option: unknown): boolean => {
+  const label = (option as { label?: unknown } | undefined)?.label;
+  return typeof label === "string" && label.toLowerCase().includes(input.toLowerCase());
+};
+
+const modelStateMessage = computed(() => {
+  switch (modelDiscoveryState.value) {
+    case "loading": return "正在获取模型列表…";
+    case "loaded-empty": return "未检测到密态模型";
+    case "failed": return "模型列表加载失败";
+    default: return "";
+  }
+});
+
+const canSelectModel = computed(() => modelDiscoveryState.value === "loaded-nonempty");
+// 发送门锁：概览运行、apiKey、可用模型清单和清单内选中模型同时满足。
+const usable = computed(() => tngRunning.value && !!apiKey.value && canSelectModel.value && !!model.value);
 
 const curlExample = computed(() => `curl http://127.0.0.1:${proxyPort.value ?? 8080}/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <YOUR_API_KEY>" \
   -d '{
-    "model": "${normalizedInferenceModel.value || "model"}",
+    "model": "${modelStateMessage.value || model.value}",
     "messages": [{"role": "user", "content": "请分析这段文本"}]
   }'`);
 
 const deepSeekClientConfig = computed(() => `API 类型       OpenAI Compatible
 API Base URL   ${localEndpoint.value}
 API Key        <从 1 号节点控制台获取>
-Model ID       ${normalizedInferenceModel.value || "model"}`);
+Model ID       ${modelStateMessage.value || model.value}`);
 
 async function onSend() {
-  if (!usable.value) { message.warning("请先在「概览」启动 TNG 网关（显示运行）并在「设置」配置 API Key"); return; }
+  if (!usable.value) { message.warning("请先在「概览」启动 TNG 网关（显示运行）、在「设置」配置 API Key，并确认存在可用的密态模型"); return; }
   if (!prompt.value.trim()) { message.warning("请输入测试内容"); return; }
   if (proxyPort.value === null) { message.warning("网关对外端口未就绪，无法发送"); return; }
   sending.value = true; output.value = ""; statusCode.value = 0; failed.value = false; phase.value = 0;
@@ -88,7 +129,7 @@ async function onSend() {
   }, 520);
   try {
     const result = await invoke<string>("send_inference", {
-      port: proxyPort.value, model: normalizedInferenceModel.value, apiKey: apiKey.value, prompt: prompt.value,
+      port: proxyPort.value, model: model.value, apiKey: apiKey.value, prompt: prompt.value,
     });
     window.clearInterval(phaseTimer.value); phase.value = 4; statusCode.value = 200; failed.value = false;
     output.value = result;
@@ -119,22 +160,36 @@ async function onSend() {
           <div class="tab-intro" style="display:flex;justify-content:space-between;align-items:center">
             <div>
               <h4 style="margin:0 0 4px;font-size:16px;font-weight:600">单次请求调试</h4>
-              <span style="color:var(--text-secondary);font-size:13px">关闭页面后不保留测试内容和响应，不提供多轮对话。</span>
+              <span style="color:var(--text-secondary);font-size:13px">
+                模型清单经 capi `/v1/models` 直连获取；发送的推理请求仍通过 TNG 加密与远程证明链路。
+              </span>
             </div>
             <a-tag><InfoCircleOutlined /> 单次请求模式</a-tag>
           </div>
-          <a-result v-if="!usable" status="warning" title="当前无法发送测试请求"
-            subTitle="请先恢复网关、API Key 与可信通道状态。"
-          >
-            <template #extra>
-              <a-button type="primary" @click="navigate('settings')">前往设置</a-button>
-            </template>
-          </a-result>
-          <a-row v-else :gutter="[16, 16]">
+          <a-alert
+            v-if="!usable"
+            type="warning"
+            showIcon
+            style="margin-bottom:16px"
+            message="当前无法发送测试请求"
+            description="请先恢复网关、API Key 与模型清单状态。"
+          />
+          <a-row :gutter="[16, 16]">
             <a-col :span="11">
               <a-card title="请求">
                 <a-form layout="vertical">
-                  <a-form-item label="模型"><a-input :value="inferenceModel" @update:value="setInferenceModel" placeholder="如 gpt-4 / vllm-model" autocapitalize="off" autocorrect="off" spellcheck="false" /></a-form-item>
+                  <a-form-item label="模型">
+                  <a-select
+                    :value="model"
+                    :options="modelOptions"
+                    :disabled="!canSelectModel"
+                    :placeholder="modelStateMessage"
+                    :allow-clear="false"
+                    show-search
+                    :filter-option="filterModelOption"
+                    @update:value="selectModel"
+                  />
+                </a-form-item>
                   <a-form-item label="输入内容">
                     <a-textarea
                       v-model:value="prompt"
@@ -148,7 +203,15 @@ async function onSend() {
                       placeholder="输入一段用于连通性测试的内容"
                     />
                   </a-form-item>
-                  <a-button block size="large" type="primary" class="send-button" :loading="sending" @click="onSend">
+                  <a-button
+                    block
+                    size="large"
+                    type="primary"
+                    class="send-button"
+                    :loading="sending"
+                    :disabled="!usable"
+                    @click="onSend"
+                  >
                     <SendOutlined />
                     <span>{{ sending ? "正在安全发送" : "发送测试请求" }}</span>
                   </a-button>

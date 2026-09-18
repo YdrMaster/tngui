@@ -19,6 +19,7 @@
 
 use std::time::Duration;
 
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -39,6 +40,9 @@ pub struct ProxyRoute {
     /// tng 的 http_proxy 上游目标跟随 Host 头 host 与端口，须带 dst 端口才能路由到
     /// 非 `:80` 的上游，如 https 的 443/30090）。须为非本机地址，避开 recursion 检测。
     pub remote_host: String,
+    /// 模型发现 direct capi origin，如 `https://inference.cloud.misuan.com:443`。
+    /// `None` 表示当前 ingress 无法得出有效模型发现目标。
+    pub models_origin: Option<String>,
 }
 
 /// 一个对外监听器的运行句柄；`stop` 即停该监听。
@@ -105,6 +109,7 @@ async fn start_one(route: ProxyRoute) -> Result<ProxyListener, String> {
         .map_err(|e| format!("反代绑定 {bind} 失败: {e}"))?;
     let internal_port = route.internal_port;
     let remote_host = route.remote_host.clone();
+    let models_origin = route.models_origin.clone();
     let (abort_tx, mut abort_rx) = oneshot::channel::<()>();
     let join = tokio::spawn(async move {
         loop {
@@ -118,8 +123,9 @@ async fn start_one(route: ProxyRoute) -> Result<ProxyListener, String> {
                     };
                     let port = internal_port;
                     let rh = remote_host.clone();
+                    let mo = models_origin.clone();
                     tokio::spawn(async move {
-                        let _ = handle_conn(stream, port, rh).await;
+                        let _ = handle_conn(stream, port, rh, mo).await;
                     });
                 }
             }
@@ -140,6 +146,7 @@ async fn handle_conn(
     mut client: TcpStream,
     internal_port: u16,
     remote_host: String,
+    models_origin: Option<String>,
 ) -> std::io::Result<()> {
     // 1. 读请求头（到 \r\n\r\n）
     let (buf, body_off) = match read_until_double_crlf(&mut client).await? {
@@ -172,6 +179,26 @@ async fn handle_conn(
             body.extend_from_slice(&tail);
         }
         body.truncate(n);
+    }
+
+    // 3.1 direct capi model discovery exception：精确 GET /v1/models 不进入 tng。
+    if is_exact_model_discovery(&method, &path) {
+        return match models_origin.as_deref() {
+            Some(origin) => match direct_model_request(&origin, &path, &headers).await {
+                Ok(response) => write_direct_response(&mut client, response).await,
+                Err(message) => {
+                    write_model_discovery_failure(&mut client, &format!("请求失败: {message}"))
+                        .await
+                }
+            },
+            None => {
+                write_model_discovery_failure(
+                    &mut client,
+                    "当前 ingress 未提供有效的 capi 模型发现地址",
+                )
+                .await
+            }
+        };
     }
 
     // 3. pre-TNG 模型 path：只从 supported endpoint 的原始 body 语义决定 path。
@@ -395,6 +422,137 @@ fn encode_model_segment(model: &str) -> String {
     encoded
 }
 
+/// 精确 `GET /v1/models` 判定：只匹配 query 之前的完整 path。
+fn is_exact_model_discovery(method: &str, path_with_query: &str) -> bool {
+    if method != "GET" {
+        return false;
+    }
+    path_with_query
+        .split_once('?')
+        .map(|(p, _)| p)
+        .unwrap_or(path_with_query)
+        == "/v1/models"
+}
+
+/// 直连 capi 的模型发现响应。保留状态、安全可回传的响应头与响应体字节。
+struct DirectModelResponse {
+    status: u16,
+    reason: &'static str,
+    headers: HeaderMap,
+    body: Vec<u8>,
+}
+
+fn is_model_request_header(key: &str) -> bool {
+    !matches!(
+        key.to_ascii_lowercase().as_str(),
+        "connection"
+            | "keep-alive"
+            | "transfer-encoding"
+            | "upgrade"
+            | "proxy-authorization"
+            | "host"
+            | "content-length"
+            | "x-model"
+    )
+}
+
+async fn direct_model_request(
+    origin: &str,
+    path: &str,
+    headers: &Headers,
+) -> Result<DirectModelResponse, String> {
+    let url = reqwest::Url::parse(&format!("{origin}{path}"))
+        .map_err(|e| format!("capi 模型发现地址无效: {e}"))?;
+    let mut request_headers = HeaderMap::new();
+    for (key, value) in headers {
+        if !is_model_request_header(key) {
+            continue;
+        }
+        let name = HeaderName::from_bytes(key.as_bytes())
+            .map_err(|e| format!("模型发现请求头无效: {key} {e}"))?;
+        let val =
+            HeaderValue::from_str(value).map_err(|e| format!("模型发现请求头值无效: {key} {e}"))?;
+        request_headers.insert(name, val);
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("构建模型发现客户端失败: {e}"))?;
+    let response = client
+        .get(url)
+        .headers(request_headers)
+        .send()
+        .await
+        .map_err(|e| format!("请求 capi 模型列表失败: {e}"))?;
+    let status = response.status().as_u16();
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        502 => "Bad Gateway",
+        _ => "",
+    };
+    let response_headers = response.headers().clone();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| format!("读取 capi 模型列表响应失败: {e}"))?
+        .to_vec();
+    Ok(DirectModelResponse {
+        status,
+        reason,
+        headers: response_headers,
+        body,
+    })
+}
+
+async fn write_model_discovery_failure(
+    client: &mut TcpStream,
+    message: &str,
+) -> std::io::Result<()> {
+    let body = format!("模型发现失败: {message}");
+    let response = format!(
+        "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    client.write_all(response.as_bytes()).await?;
+    client.flush().await
+}
+
+async fn write_direct_response(
+    client: &mut TcpStream,
+    response: DirectModelResponse,
+) -> std::io::Result<()> {
+    let reason = if response.reason.is_empty() {
+        "Reason"
+    } else {
+        response.reason
+    };
+    let mut out = format!("HTTP/1.1 {} {}\r\n", response.status, reason);
+    for (name, value) in response.headers.iter() {
+        let lower = name.as_str().to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "transfer-encoding" | "connection" | "content-length"
+        ) {
+            continue;
+        }
+        if let Ok(value) = std::str::from_utf8(value.as_bytes()) {
+            out.push_str(&format!("{}: {}\r\n", name.as_str(), value));
+        }
+    }
+    out.push_str(&format!(
+        "content-length: {}\r\nconnection: close\r\n\r\n",
+        response.body.len()
+    ));
+    client.write_all(out.as_bytes()).await?;
+    client.write_all(&response.body).await?;
+    client.flush().await?;
+    Ok(())
+}
+
 fn build_request_bytes(method: &str, path: &str, headers: &Headers, body: &[u8]) -> Vec<u8> {
     let mut s = format!("{method} {path} HTTP/1.1\r\n");
     for (k, v) in headers {
@@ -432,6 +590,7 @@ mod tests {
     struct MockReceived {
         method: String,
         path: String,
+        headers: Headers,
         body: Vec<u8>,
     }
 
@@ -451,6 +610,7 @@ mod tests {
         *received.lock().await = Some(MockReceived {
             method,
             path: path.clone(),
+            headers: parse_headers(&head),
             body: body_recvd,
         });
         let body = r#"{"ok":true,"path":"PATH_PLACEHOLDER"}"#.replace("PATH_PLACEHOLDER", &path);
@@ -492,6 +652,7 @@ mod tests {
             out_port,
             internal_port: up_port,
             remote_host: "10.0.0.1".to_string(),
+            models_origin: None,
         }])
         .await
         .unwrap();
@@ -614,6 +775,153 @@ mod tests {
         );
     }
 
+    async fn start_capi_mock(received: Arc<Mutex<Option<MockReceived>>>) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (buf, body_off) = read_until_double_crlf(&mut stream).await.unwrap().unwrap();
+            let head = String::from_utf8_lossy(&buf[..body_off]);
+            let (method, path) = parse_request_line(&head).unwrap();
+            received.lock().await.replace(MockReceived {
+                method,
+                path: path.clone(),
+                headers: parse_headers(&head),
+                body: buf[body_off..].to_vec(),
+            });
+            let body = format!(r#"{{"object":"list","data":[{{"id":"model-a"}}]}}"#);
+            let response = format!(
+                "HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.flush().await.unwrap();
+        });
+        port
+    }
+
+    #[test]
+    fn exact_model_discovery_match_and_non_match() {
+        assert!(is_exact_model_discovery("GET", "/v1/models"));
+        assert!(is_exact_model_discovery("GET", "/v1/models?trace=1"));
+        assert!(!is_exact_model_discovery("GET", "/v1/models/other"));
+        assert!(!is_exact_model_discovery("POST", "/v1/models"));
+        assert!(!is_model_request_header("x-model"));
+        assert!(is_model_request_header("Authorization"));
+        assert!(is_model_request_header("x-api-key"));
+    }
+
+    #[tokio::test]
+    async fn non_exact_model_discovery_paths_go_to_existing_upstream() {
+        for (method, path) in [("POST", "/v1/models"), ("GET", "/v1/models/other")] {
+            let (response, received) = run_once_at(method, path, &[], vec![]).await;
+            assert!(
+                response.starts_with("HTTP/1.1 200"),
+                "{method} {path} response={response}"
+            );
+            let received = received.expect("upstream should receive request");
+            assert_eq!(received.method, method);
+            assert_eq!(received.path, path);
+        }
+    }
+
+    #[tokio::test]
+    async fn model_discovery_directly_reaches_capi_and_not_tng() {
+        let received = Arc::new(Mutex::new(None));
+        let capi_port = start_capi_mock(received.clone()).await;
+        let proxy_port = unique_port();
+        let handle = start_proxy(vec![ProxyRoute {
+            out_host: BIND_LOCALHOST.to_string(),
+            out_port: proxy_port,
+            internal_port: 1,
+            remote_host: "10.0.0.1".to_string(),
+            models_origin: Some(format!("http://127.0.0.1:{capi_port}")),
+        }])
+        .await
+        .unwrap();
+        let response = send_request_bytes(
+            proxy_port,
+            "GET",
+            "/v1/models?trace=1",
+            &[
+                ("Authorization", "Bearer key"),
+                ("x-api-key", "api-key"),
+                ("x-model", "ignored-model"),
+            ],
+            vec![],
+        )
+        .await;
+        handle.stop().await;
+        assert!(response.starts_with("HTTP/1.1 200"), "response={response}");
+        assert!(response.contains("model-a"));
+        let got = received
+            .lock()
+            .await
+            .clone()
+            .expect("capi should receive request");
+        assert_eq!(got.method, "GET");
+        assert_eq!(got.path, "/v1/models?trace=1");
+        assert!(
+            got.headers
+                .iter()
+                .any(|(k, v)| k == "authorization" && v == "Bearer key")
+        );
+        assert!(
+            got.headers
+                .iter()
+                .any(|(k, v)| k == "x-api-key" && v == "api-key")
+        );
+        assert!(
+            !got.headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("x-model"))
+        );
+    }
+
+    #[tokio::test]
+    async fn unreachable_models_origin_returns_explicit_failure() {
+        let capi_port = unique_port();
+        let out_port = unique_port();
+        let handle = start_proxy(vec![ProxyRoute {
+            out_host: BIND_LOCALHOST.to_string(),
+            out_port,
+            internal_port: 1,
+            remote_host: "10.0.0.1".to_string(),
+            models_origin: Some(format!("http://127.0.0.1:{capi_port}")),
+        }])
+        .await
+        .unwrap();
+        let response = send_request_bytes(out_port, "GET", "/v1/models", &[], vec![]).await;
+        handle.stop().await;
+        assert!(response.starts_with("HTTP/1.1 502"), "response={response}");
+        assert!(
+            response.contains("请求 capi 模型列表失败"),
+            "response={response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_discovery_without_origin_returns_explicit_failure() {
+        let out_port = unique_port();
+        let handle = start_proxy(vec![ProxyRoute {
+            out_host: BIND_LOCALHOST.to_string(),
+            out_port,
+            internal_port: 1,
+            remote_host: "10.0.0.1".to_string(),
+            models_origin: None,
+        }])
+        .await
+        .unwrap();
+        let response = send_request_bytes(out_port, "GET", "/v1/models", &[], vec![]).await;
+        handle.stop().await;
+        assert!(response.starts_with("HTTP/1.1 502"), "response={response}");
+        assert!(response.contains("当前 ingress 未提供有效的 capi 模型发现地址"));
+    }
     #[tokio::test]
     async fn injects_model_path_and_preserves_query_body_credentials() {
         let json = br#"{"model":" model-a ", "messages":[]}"#;
