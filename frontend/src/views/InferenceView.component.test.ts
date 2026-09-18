@@ -849,11 +849,82 @@ describe("InferenceView", () => {
     expect(themeCss).not.toContain("clamp(500px, calc(100vh - 360px), 720px)");
   });
 
-  it("renders the cURL example with stream true on the integration tab", async () => {
+  it("renders the Hermes Agent integration guide with a dynamic local endpoint", async () => {
     const wrapper = await mountAndLoadModels(["model-curl"]);
     wrapper.findComponent(Tabs).vm.$emit("update:activeKey", "integration");
     await nextTick();
-    expect(wrapper.text()).toContain('"stream": true');
-    expect(wrapper.text()).toContain("curl -N");
+
+    const renderedText = wrapper.text();
+    expect(renderedText).toContain("Hermes Agent");
+    expect(renderedText).toContain("Nous Research 开源自主 AI Agent");
+    expect(renderedText).not.toContain("运行模型配置命令");
+    expect(wrapper.find("a-steps").exists()).toBe(false);
+    expect(renderedText).toContain("不要填写云端服务地址");
+
+    const homeLink = wrapper.get('a[href="https://hermes-agent.nousresearch.com/"]');
+    expect(homeLink.attributes("target")).toBe("_blank");
+    expect(homeLink.attributes("rel")).toBe("noopener noreferrer");
+
+    const configExample = wrapper.get("pre.client-config").text();
+    expect(configExample).toContain("default: model-curl");
+    expect(configExample).toContain("provider: custom");
+    expect(configExample).toContain("base_url: http://127.0.0.1:18080/v1");
+    expect(configExample).toContain("api_key: sk-************************************");
+
+    expect(wrapper.text()).not.toContain("请先恢复网关运行状态、API Key 与模型清单。");
+    expect(wrapper.find(".integration-panel .chat-gate").exists()).toBe(false);
+
+    const themeCss = readFileSync("src/assets/theme.css", "utf8");
+    const screenshot = wrapper.get("img.client-screenshot");
+    const screenshotWrapCss = themeCss.match(/\n\.client-screenshot-wrap \{[\s\S]*?\}/);
+    expect(screenshotWrapCss?.[0]).toContain("max-width: 100%");
+    expect(screenshotWrapCss?.[0]).toContain("overflow: hidden");
+    expect(screenshot.attributes("src")).toBeTruthy();
+    expect(screenshot.attributes("alt")).toContain("Hermes Agent custom endpoint 配置示例");
+
+    expect(wrapper.find(".hermes-mark").text()).toBe("H");
+    expect(renderedText).not.toContain(["DeepSeek", "Client"].join(" "));
+    expect(renderedText).toContain('"stream": true');
+    expect(renderedText).toContain("curl -N");
+  });
+
+  it("shows the integration readiness gate before TNG is running", async () => {
+    tngRunningState.value = false;
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(Tabs).vm.$emit("update:activeKey", "integration");
+    await nextTick();
+
+    const gate = wrapper.get(".integration-panel .chat-gate");
+    expect(gate.text()).toContain("当前无法发送推理请求");
+    expect(gate.text()).toContain("请先恢复网关运行状态、API Key 与模型清单。");
+  });
+
+  it("shows an unavailable endpoint as unconfigured in the Hermes example", async () => {
+    tauriMocks.proxyEndpoint.mockReset().mockResolvedValue([]);
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(Tabs).vm.$emit("update:activeKey", "integration");
+    await nextTick();
+
+    const configExample = wrapper.get("pre.client-config").text();
+    expect(configExample).toContain("default: 模型列表加载失败");
+    expect(configExample).toContain("base_url: 未配置");
+    expect(configExample).not.toContain("http://127.0.0.1:");
+    expect(configExample).not.toContain("model-curl");
+  });
+
+  it("keeps Hermes model discovery failures visible without inventing a model ID", async () => {
+    tauriMocks.listModels.mockRejectedValueOnce(new Error("model discovery unavailable"));
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(Tabs).vm.$emit("update:activeKey", "integration");
+    await nextTick();
+
+    const configExample = wrapper.get("pre.client-config").text();
+    expect(configExample).toContain("default: 模型列表加载失败");
+    expect(configExample).toContain("base_url: http://127.0.0.1:18080/v1");
+    expect(configExample).not.toContain("model-a");
+    expect(configExample).not.toContain("model-curl");
   });
 });
