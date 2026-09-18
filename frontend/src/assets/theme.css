@@ -26,6 +26,12 @@
     --success: #16a34a;
     --warning: #d97706;
     --error: #dc2626;
+    --chat-bubble-success-bg: #f4faee;
+    --chat-bubble-success-border: rgba(82, 196, 26, .22);
+    --chat-bubble-stopped-bg: #fff6df;
+    --chat-bubble-stopped-border: rgba(217, 119, 6, .22);
+    --chat-bubble-failed-bg: #fff1ef;
+    --chat-bubble-failed-border: rgba(255, 77, 79, .22);
     --text: rgba(0, 0, 0, .88);
     --text-secondary: rgba(0, 0, 0, .62);
     --text-tertiary: rgba(0, 0, 0, .42);
@@ -42,6 +48,67 @@ html, body, #app {
     margin: 0; padding: 0; min-height: 100%;
     font-family: var(--font-family);
     color-scheme: light;
+}
+
+.overview-shell,
+.inference-shell {
+  height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
+}
+
+.overview-shell .ingress-debug-grid {
+  flex: 1;
+  min-height: 0;
+}
+
+.overview-shell .ingress-debug-grid > .ant-card {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.overview-shell .ingress-debug-grid > .ant-card > .ant-card-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.overview-shell .overview-log {
+  flex: 1;
+  max-height: none;
+}
+
+.inference-shell .debug-workbench {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.inference-shell .debug-workbench > .ant-card-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.inference-shell .debug-workbench > .ant-card-body > .ant-tabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.inference-shell .debug-workbench .ant-tabs-content-holder {
+  flex: 1;
+  min-height: 0;
+}
+
+.inference-shell .debug-workbench .ant-tabs-content,
+.inference-shell .debug-workbench .ant-tabs-tabpane {
+  height: 100%;
 }
 
 body { min-width: 1120px; min-height: 100vh; background: #e9edf2; }
@@ -173,22 +240,194 @@ button, input, textarea { font: inherit; }
 .compare-grid .compare-head { background: #f7f8fa; font-weight: 650; }
 .compare-grid .rats { background: #f0f7ff; color: #0958d9; }
 .compare-grid .negative { color: var(--error); }
-.prompt-textarea { resize: none; }
-.send-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
-.send-button .anticon { display: inline-flex; align-items: center; line-height: 1; }
-.response-panel { min-height: 340px; }
-/* 流式生成中：阶段卡冻结（紧凑高度）+ 渐进文本 */
-.streaming-state { display: flex; flex-direction: column; gap: 10px; padding: 18px 18px 14px; min-height: 320px; }
-.streaming-state .stage-viewport { height: 92px; margin-top: 10px; }
-.streaming-state .stage-card-desc { display: none; }
-.streaming-body { position: relative; flex: 1; min-height: 90px; padding: 4px 8px; overflow: auto; text-align: left; font-size: 15px; line-height: 1.85; white-space: pre-line; }
-.stream-caret { display: inline-block; width: 8px; height: 18px; margin-left: 2px; vertical-align: -3px; background: var(--primary); animation: stream-caret 1s steps(1) infinite; }
-.sending-state, .empty-response { min-height: 320px; padding: 28px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; }
-.sending-state .ant-progress { max-width: 360px; }
-.sending-state h4 { margin: 6px 0 0 !important; }
-.empty-response > .anticon, .empty-response > svg { font-size: 46px; color: #bfbfbf; }
-.response-text { white-space: pre-line; font-size: 15px; line-height: 1.85; }
-.history-notice { margin-top: 16px; }
+.chat-shell {
+  height: 100%;
+  min-height: 500px;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  border: 1px solid var(--split);
+  border-radius: 12px;
+  background: #fff;
+}
+.chat-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding-bottom: 12px;
+}
+.model-control {
+  flex: 0 0 200px;
+  min-width: 200px;
+}
+.thinking-control {
+  flex: 0 0 140px;
+  min-width: 140px;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+.control-label {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+.thinking-slider { min-width: 0; margin: 0; }
+.chat-gate { flex: 0 0 auto; margin-bottom: 12px; }
+.chat-transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px 4px 8px;
+}
+.empty-chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+.empty-chat > .anticon, .empty-chat > svg { font-size: 46px; color: #bfbfbf; }
+.chat-message { flex: 0 0 auto; display: flex; width: 100%; }
+.user-message { justify-content: flex-end; }
+.assistant-message { justify-content: flex-start; }
+.chat-bubble {
+  min-width: 0;
+  max-width: 78%;
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.7;
+  word-break: break-word;
+  white-space: pre-line;
+}
+.assistant-bubble {
+  border: 1px solid var(--split);
+  border-bottom-left-radius: 4px;
+}
+/* 正常对话（用户、进行中 assistant、完整 assistant）共用同一淡绿色气泡基底。 */
+.user-bubble,
+.assistant-bubble-pending,
+.assistant-bubble-complete {
+  color: var(--text);
+  border: 1px solid var(--chat-bubble-success-border);
+  background: var(--chat-bubble-success-bg);
+  box-shadow: 0 4px 12px rgba(82, 196, 26, .10);
+}
+.user-bubble {
+  border-bottom-right-radius: 4px;
+}
+.assistant-bubble-stopped {
+  border-color: var(--chat-bubble-stopped-border);
+  background: var(--chat-bubble-stopped-bg);
+}
+.assistant-bubble-failed {
+  border-color: var(--chat-bubble-failed-border);
+  background: var(--chat-bubble-failed-bg);
+}
+.assistant-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.assistant-stage { width: 100%; }
+.assistant-stage .ant-progress { max-width: 360px; margin: 0; }
+.section-label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: .3px;
+}
+.reasoning-block {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-left: 3px solid rgba(22,119,255,.32);
+  border-radius: 6px;
+  background: #f7f9fc;
+}
+.reasoning-text {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.75;
+  white-space: pre-line;
+}
+.assistant-content { min-width: 0; }
+.response-text {
+  margin: 0;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.85;
+  white-space: pre-line;
+}
+.empty-assistant-text {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+.assistant-debug {
+  margin-top: 12px;
+  border-radius: 8px;
+  overflow: visible;
+}
+.chat-composer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--split);
+}
+.chat-composer { --composer-control-size: 32px; }
+.prompt-textarea {
+  min-height: var(--composer-control-size, 32px);
+}
+.send-button {
+  width: var(--composer-control-size, 32px);
+  min-width: var(--composer-control-size, 32px);
+  height: var(--composer-control-size, 32px);
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.send-button .anticon { display: inline-flex; align-items: center; justify-content: center; line-height: 1; font-size: 15px; }
+.stop-button,
+.stop-button:hover,
+.stop-button:focus,
+.stop-button:active {
+  color: var(--error);
+  background: transparent;
+  border-color: var(--error);
+  box-shadow: none;
+}
+.stop-square-icon {
+  width: 10px;
+  height: 10px;
+  display: block;
+  background: currentColor;
+  border-radius: 1px;
+}
+@media (max-width: 1280px) {
+  .chat-toolbar { flex-direction: column; align-items: stretch; }
+  .model-control, .thinking-control { flex: 1; }
+}
 .gateway-settings-card { margin-bottom: 18px; }
 .gateway-status-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .gateway-actions { display: flex; justify-content: flex-end; margin-top: 16px; }

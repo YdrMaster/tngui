@@ -63,7 +63,7 @@ async function onToggle() {
 </script>
 
 <template>
-  <div class="full-width" style="max-width:1540px;margin:0 auto">
+  <div class="full-width overview-shell" style="max-width:1540px;margin:0 auto">
     <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:22px">
       <div>
         <h3 style="margin:0 0 4px;font-size:24px;font-weight:650">概览</h3>
@@ -130,10 +130,10 @@ async function onToggle() {
 
     <div class="ingress-debug-grid">
       <a-card size="small" title="原始状态数据">
-        <pre class="mono" style="font-size:12px;white-space:pre-wrap;word-break:break-all;min-height:64px;max-height:260px;overflow:auto">{{ statusJsonText }}</pre>
+        <pre class="mono overview-log" style="font-size:12px;white-space:pre-wrap;word-break:break-all;min-height:64px;overflow:auto">{{ statusJsonText }}</pre>
       </a-card>
       <a-card size="small" title="进程日志">
-        <pre class="mono" style="color:#6abf6a;font-size:12px;white-space:pre-wrap;word-break:break-all;min-height:64px;max-height:260px;overflow:auto">{{ outputLines.length ? outputLines.join("\n") : "（暂无输出）" }}</pre>
+        <pre class="mono overview-log" style="color:#6abf6a;font-size:12px;white-space:pre-wrap;word-break:break-all;min-height:64px;overflow:auto">{{ outputLines.length ? outputLines.join("\n") : "（暂无输出）" }}</pre>
       </a-card>
     </div>
   </div>

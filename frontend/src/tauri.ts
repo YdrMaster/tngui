@@ -31,28 +31,58 @@ export async function proxyEndpoint(): Promise<ProxyEndpoint[]> {
   return invoke<ProxyEndpoint[]>("proxy_endpoint");
 }
 
+/** OpenAI compatible chat message。命令边界只允许 user / assistant。 */
+export type InferenceRole = "user" | "assistant";
+export interface InferenceMessage {
+  role: InferenceRole;
+  content: string;
+}
+
+/** vLLM 0.26 thinking 强度。 */
+export type InferenceEffort = "none" | "low" | "medium" | "high";
+
+/** SSE 增量类型。 */
+export type InferenceDeltaKind = "reasoning" | "content";
+export interface InferenceDelta {
+  kind: InferenceDeltaKind;
+  text: string;
+}
+
+/** 流式命令结果：completed 为正常完成；stopped 为用户主动取消，不是错误。 */
+export type InferenceStreamOutcome = "completed" | "stopped";
+
 /**
- * 通过 tngui 反代对外端点发送流式推理请求（body 恒含 `"stream": true`，由后端组装）。
- * 每节 `choices[0].delta.content` 到达即调用 `onDelta`；收到 `data: [DONE]` 后
- * Promise resolve。任何失败（连接失败、非 2xx、非 SSE、断流等）Promise reject，
- * 错误为脱敏诊断字符串（不含明文凭据）。
+ * 通过 tngui 反代对外端点发送流式多轮推理请求（body 恒含 `"stream": true`，由
+ * 后端组装）。每节非空 `choices[0].delta.reasoning` / `choices[0].delta.content`
+ * 到达即调用 `onDelta`；收到 `data: [DONE]` 后 Promise resolve 为 `completed`。
+ * 任何失败（连接失败、非 2xx、非 SSE、断流等）Promise reject，错误为脱敏诊断
+ * 字符串（不含明文凭据）。`requestId` 是 GUI 进程内本轮请求的唯一取消标识。
  */
 export async function sendInferenceStream(
+  requestId: string,
   port: number,
   model: string,
   apiKey: string,
-  prompt: string,
-  onDelta: (delta: string) => void,
-): Promise<void> {
-  const channel = new Channel<string>();
+  messages: InferenceMessage[],
+  reasoningEffort: InferenceEffort,
+  onDelta: (delta: InferenceDelta) => void,
+): Promise<InferenceStreamOutcome> {
+  const channel = new Channel<InferenceDelta>();
   channel.onmessage = onDelta;
-  await invoke<void>("send_inference_stream", {
+  return invoke<InferenceStreamOutcome>("send_inference_stream", {
+    requestId,
     port,
     model,
     apiKey,
-    prompt,
+    messages,
+    reasoningEffort,
     onDelta: channel,
   });
+}
+
+/** 按 request_id 请求停止进行中的推理流；无活跃请求时后端返回 false。 */
+export function stopInferenceStream(requestId: string): Promise<boolean> {
+  return invoke<boolean>("stop_inference_stream", { requestId });
 }
 
 /** 从本地 pre-TNG proxy 的 \/v1\/models 获取模型清单。 */

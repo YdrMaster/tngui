@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
 import { Alert, Button, Card, Tooltip } from "ant-design-vue";
 import Overview from "./Overview.vue";
 import IngressStateCard from "../components/IngressStateCard.vue";
@@ -62,6 +63,24 @@ describe("Overview remote proof export", () => {
     expect(
       actions[0].element.closest(".ingress-card")?.textContent,
     ).toContain("已验证");
+    wrapper.unmount();
+  });
+
+  it("lets overview debug panels grow with the available window height", async () => {
+    const wrapper = mount(Overview, { global: globalComponents });
+    await flushPromises();
+
+    const logs = wrapper.findAll(".overview-log");
+    expect(logs).toHaveLength(2);
+    for (const log of logs) {
+      expect(log.attributes("style")).not.toContain("max-height");
+    }
+
+    const themeCss = readFileSync("src/assets/theme.css", "utf8");
+    expect(themeCss).toContain(".overview-shell,\n.inference-shell {");
+    expect(themeCss).toContain("height: calc(100vh - 32px)");
+    expect(themeCss).toContain(".overview-shell .ingress-debug-grid {\n  flex: 1;");
+    expect(themeCss).toContain(".overview-shell .overview-log {\n  flex: 1;\n  max-height: none;");
     wrapper.unmount();
   });
 
