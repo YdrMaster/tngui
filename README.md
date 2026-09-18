@@ -15,6 +15,8 @@ cargo test -p tngui-core          # 核心逻辑单测
 cargo tauri dev                   # 开发态开窗（开发期 tng 走 PATH 兜底）
 ```
 
+> Ant Codespace 中直接运行 Rust 测试会遇到宿主 glibc 兼容性问题，请按 [docs/ant-codespace-testing.md](docs/ant-codespace-testing.md) 使用 Ubuntu chroot 并单线程运行 workspace 测试。
+
 开发期普通版 `tng` 需自行编译并放到 `PATH`（运行时 `resource_dir` 无 `tng-nora` 时回退 PATH）；远程证明（RA）版已随仓库 `resources/` 直接可用。
 
 ## 分发（双套 tng：普通版 + 远程证明版 + CI）
