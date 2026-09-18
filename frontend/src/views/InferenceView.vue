@@ -11,6 +11,7 @@ import { listModels, proxyEndpoint, sendInferenceStream, stopInferenceStream, ty
 import SecureFlow from "../components/SecureFlow.vue";
 import ArchitectureFlow from "../components/ArchitectureFlow.vue";
 import ProtectionItem from "../components/ProtectionItem.vue";
+import hermesAgentConfigImage from "../assets/hermes-agent-config.png";
 
 defineOptions({ name: "InferenceView" });
 
@@ -163,10 +164,11 @@ const curlExample = computed(() => `curl -N http://127.0.0.1:${proxyPort.value ?
     "stream": true
   }'`);
 
-const deepSeekClientConfig = computed(() => `API 类型       OpenAI Compatible
-API Base URL   ${localEndpoint.value}
-API Key        <从 1 号节点控制台获取>
-Model ID       ${modelStateMessage.value || model.value}`);
+const hermesAgentConfig = computed(() => `model:
+  default: ${modelStateMessage.value || model.value}
+  provider: custom
+  base_url: ${localEndpoint.value}
+  api_key: <从 1 号节点控制台获取>`);
 
 function buildRequestMessages(history: ChatMessage[]): InferenceMessage[] {
   const requestMessages: InferenceMessage[] = [];
@@ -590,24 +592,41 @@ function assistantBubbleClass(status: ChatStatus): string {
             </a-descriptions>
             <a-row :gutter="24" style="margin-top:24px">
               <a-col :span="13">
-                <div class="client-heading" style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
-                  <div class="deepseek-mark">D</div>
+                <div class="client-heading" style="display:flex;align-items:flex-start;gap:12px;margin-bottom:20px">
+                  <div class="hermes-mark">H</div>
                   <div>
-                    <h4 style="margin:0 0 2px;font-size:16px">DeepSeek Client</h4>
-                    <span style="color:var(--text-secondary);font-size:13px">OpenAI-compatible 接入方式</span>
+                    <h4 style="margin:0 0 2px;font-size:16px">Hermes Agent</h4>
+                    <span class="client-subtitle">
+                      Nous Research 开源自主 AI Agent ·
+                      <a
+                        class="client-home-link"
+                        href="https://hermes-agent.nousresearch.com/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >官方主页</a>
+                    </span>
+                    <p class="client-description">Hermes Agent 支持持久记忆、技能自学习、工具调用和多种对话平台。它可通过 custom endpoint 将推理请求指向本机 TNG。</p>
                   </div>
                 </div>
                 <a-steps direction="vertical" size="small">
-                  <a-step title="打开模型服务设置" description="进入 Settings → Model Provider，新增 OpenAI Compatible 服务。" />
-                  <a-step title="填写本地网关信息" description="API Base URL 指向 127.0.0.1；API Key 使用 1 号节点分发的密态推理 Key。" />
-                  <a-step title="选择模型并测试" description="保存后发送一条测试消息。" />
-                  <a-step title="确认安全状态" description="回到可信网关查看验证结果；验证失败时请求不会离开本机。" />
+                  <a-step title="运行模型配置命令" description="在终端执行 `hermes model`，进入模型提供方配置。" />
+                  <a-step title="选择 Custom endpoint" description="选择自托管或 OpenAI-compatible custom endpoint。" />
+                  <a-step title="填写本地网关信息" description="API Base URL 指向 tngui 反代端点；不要填写云端服务地址。" />
+                  <a-step title="填写密钥与模型 ID" description="API Key 使用 1 号节点分发的密态推理 Key；Model ID 使用 /v1/models 返回值。" />
                 </a-steps>
-                <span class="small-text" style="color:var(--text-secondary);font-size:12px">不同版本的设置入口名称可能略有差异，以客户端实际界面为准。</span>
+                <span class="small-text" style="color:var(--text-secondary);font-size:12px">不同版本的配置入口名称可能略有差异，以 Hermes Agent 官方文档为准。</span>
+                <figure class="client-screenshot-wrap">
+                  <img
+                    class="client-screenshot"
+                    :src="hermesAgentConfigImage"
+                    alt="Hermes Agent custom endpoint 配置示例"
+                  >
+                  <figcaption>Hermes Agent 配置示例截图</figcaption>
+                </figure>
               </a-col>
               <a-col :span="11">
-                <div class="config-title" style="margin:2px 0 10px;font-weight:600">配置项</div>
-                <pre class="code-block client-config" style="min-height:184px;display:flex;align-items:center">{{ deepSeekClientConfig }}</pre>
+                <div class="config-title" style="margin:2px 0 10px;font-weight:600">Hermes 配置示例</div>
+                <pre class="code-block client-config" style="min-height:184px;display:flex;align-items:center">{{ hermesAgentConfig }}</pre>
                 <a-divider orientation="left">cURL 示例</a-divider>
                 <pre class="code-block">{{ curlExample }}</pre>
                 <a-alert class="client-tip" type="warning" showIcon style="margin-top:14px"

@@ -180,17 +180,35 @@ SecureFlow 五步对应密态推理的保护过程：
 
 ### 4.2 AI 客户端接入
 
-面向第三方 OpenAI 兼容客户端接入说明，告诉用户怎样把 DeepSeek Client 等客户端指向本地 TNG。
+面向第三方 OpenAI 兼容客户端接入说明，告诉用户怎样把 Hermes Agent 指向本地 TNG。Hermes Agent 是 <a href="https://hermes-agent.nousresearch.com/" target="_blank" rel="noopener noreferrer">Nous Research 开发的开源自主 AI Agent</a>，支持持久记忆、技能自学习、工具调用和多种对话平台；它可通过 custom endpoint 使用本机 TNG 的 OpenAI-compatible 推理 API。
 
 - 基本信息：
   - API Base URL：tngui 反代对外端点 `http://<绑定地址（默认 127.0.0.1）>:<本机端口>/v1`，绑定地址与本机端口取自结构化 ingress 行 1 的反代对外绑定。
   - 网关状态：运行中或未运行。
   - 监听范围：默认仅本机 `127.0.0.1`；可在结构化 ingress 行 1 经 D1 toggle 切到 `0.0.0.0` 对外网卡（须在受信网络下使用）。
   - 兼容协议：OpenAI-compatible API。
-- DeepSeek Client 接入步骤示例：打开模型服务设置、填写本地网关信息、选择模型并测试、确认安全状态。
-- 配置项预览：包含 API 类型、API Base URL、API Key 来源说明和 Model ID。
+- Hermes Agent 接入步骤：
+  1. 在终端执行 `hermes model`，进入模型提供方配置。
+  2. 选择 `Custom endpoint`。
+  3. 将 API Base URL 填写为 tngui 反代端点。
+  4. API Key 填写 1 号节点分发的密态推理 Key；Model ID 使用 `/v1/models` 返回的服务端模型 ID。
+  5. 保存后发送一条测试消息，并回到可信网关确认验证结果。
+- 配置示例：
+
+```yaml
+model:
+  default: <Model ID>
+  provider: custom
+  base_url: http://127.0.0.1:<本机端口>/v1
+  api_key: <从 1 号节点控制台获取>
+```
+
+- 配置示例截图：
+
+![Hermes Agent custom endpoint 配置示例截图](../frontend/src/assets/hermes-agent-config.png)
+
 - cURL 示例：可以直接复制改写为本地请求命令。
-- 警示：必须使用本地 TNG 地址，才能获得远程证明、链路加密和验证失败阻断能力。
+- 警示：必须使用本地 TNG 地址，才能获得远程证明、链路加密和验证失败阻断能力；不要填写云端服务地址。
 
 ### 4.3 安全说明
 
