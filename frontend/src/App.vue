@@ -135,11 +135,11 @@ onBeforeUnmount(() => {
     <a-layout v-else class="h-screen" style="background:var(--bg-layout)">
       <a-layout-sider width="196" theme="light" class="sidebar">
         <div class="brand">
-          <div class="brand-mark"><SafetyCertificateOutlined /></div>
-          <div>
+          <div class="brand-row">
+            <div class="brand-mark"><SafetyCertificateOutlined /></div>
             <div class="brand-title">可信网关</div>
-            <div class="brand-subtitle"><strong>T</strong>rusted <strong>N</strong>etwork <strong>G</strong>ateway</div>
           </div>
+          <div class="brand-subtitle">Trusted Network Gateway</div>
         </div>
         <div class="sidebar-menu">
           <a-button

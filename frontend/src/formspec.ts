@@ -8,7 +8,7 @@
 export const LOCALHOST = "127.0.0.1";
 
 /** RVS 默认地址。仅首次启动、缓存缺失/无效或 RVS 值非法时使用，绝不覆盖有效缓存值。 */
-export const DEFAULT_RVS_URL = "https://rvs.tsk.com";
+export const DEFAULT_RVS_URL = "https://rvs.cloud.misuan.com";
 
 /** 默认域名代理目标。https 前缀用于保留 TLS 语义。 */
 export const DEFAULT_HTTP_PROXY_DOMAIN = "https://inference.cloud.misuan.com";

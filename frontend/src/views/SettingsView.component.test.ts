@@ -165,7 +165,7 @@ describe("SettingsView TNG 配置布局与默认值", () => {
     const domain = wrapper.find('input[placeholder^="如 https://"]');
     const remotePort = wrapper.find('input[placeholder="远端端口（可留空）"]');
     const outwardPort = wrapper.find('input[placeholder="端口（必填）"]');
-    const rvsUrl = wrapper.find('input[placeholder="https://rvs.tsk.com"]');
+    const rvsUrl = wrapper.find('input[placeholder="https://rvs.cloud.misuan.com"]');
     const rawJson = wrapper.find("textarea.json-editor");
     const applyRaw = buttonByText(wrapper, "应用回填表单");
 
@@ -194,7 +194,7 @@ describe("SettingsView TNG 配置布局与默认值", () => {
     const domain = wrapper.find('input[placeholder^="如 https://"]');
     const remotePort = wrapper.find('input[placeholder="远端端口（可留空）"]');
     const outwardPort = wrapper.find('input[placeholder="端口（必填）"]');
-    const rvsUrl = wrapper.find('input[placeholder="https://rvs.tsk.com"]');
+    const rvsUrl = wrapper.find('input[placeholder="https://rvs.cloud.misuan.com"]');
     const rawJson = wrapper.find("textarea.json-editor");
     const applyRaw = buttonByText(wrapper, "应用回填表单");
 

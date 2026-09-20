@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { DEFAULT_RVS_URL } from "../formspec";
 defineProps<{
   visible: boolean;
   value: string;
@@ -19,13 +20,12 @@ const emit = defineEmits<{
   >
     <a-form layout="vertical">
       <a-form-item
-        label="RVS 地址"
-        extra="启动远程证明版 TNG 时通过 RATS_TEE_VERIFIER_URL 环境变量使用；该地址写入设置缓存，不写入 tng 配置 JSON。"
+        label="参考值服务地址"
       >
         <a-input
           :value="value"
           :disabled="disabled"
-          placeholder="https://rvs.tsk.com"
+          :placeholder="DEFAULT_RVS_URL"
           autocapitalize="off"
           autocorrect="off"
           spellcheck="false"

@@ -19,7 +19,12 @@ describe("RemoteAttestationServiceConfig", () => {
       global: globalComponents,
     });
     expect(visible.text()).toContain("远程证明服务配置");
-    expect(visible.text()).toContain("RVS 地址");
+    expect(visible.text()).toContain("参考值服务地址");
+    expect(visible.text()).not.toContain("RVS 地址");
+    expect(visible.text()).not.toContain("RATS_TEE_VERIFIER_URL");
+    expect(
+      (visible.find("input").element as HTMLInputElement).placeholder,
+    ).toBe("https://rvs.cloud.misuan.com");
     expect((visible.find("input").element as HTMLInputElement).value).toBe(
       "https://private-rvs.example.com:8443",
     );

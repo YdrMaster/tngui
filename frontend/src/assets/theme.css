@@ -122,10 +122,11 @@ button, input, textarea { font: inherit; }
  * tng-client 组件样式（移植自 styles.css，去掉 DesktopTitleBar）
  * ================================================================ */
 .sidebar { border-right: 1px solid var(--split); box-shadow: 1px 0 5px rgba(0,0,0,.025); }
-.brand { height: 70px; display: flex; align-items: center; gap: 11px; padding: 0 18px; }
-.brand-mark { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 10px; color: white; font-size: 21px; background: linear-gradient(145deg, #1677ff, #4096ff); box-shadow: 0 5px 14px rgba(22,119,255,.26); }
+.brand { height: 64px; display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 0 14px; }
+.brand-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.brand-mark { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border-radius: 4px; color: white; font-size: 21px; background: linear-gradient(145deg, #1677ff, #4096ff); box-shadow: 0 5px 14px rgba(22,119,255,.26); }
 .brand-title { font-size: 16px; line-height: 21px; font-weight: 650; }
-.brand-subtitle { font-size: 10px; line-height: 15px; color: var(--text-tertiary); letter-spacing: 1.3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brand-subtitle { width: 100%; font-size: 10px; line-height: 15px; color: var(--text-tertiary); letter-spacing: .2px; white-space: nowrap; }
 .sidebar-menu { flex: 1; padding: 10px 10px; display: flex; flex-direction: column; gap: 5px; }
 .sidebar-menu .ant-btn { height: 38px; justify-content: flex-start; padding-left: 12px; text-align: left; }
 .sidebar-bottom { border-top: 1px solid var(--split); padding: 10px; }

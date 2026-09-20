@@ -46,8 +46,8 @@ describe("默认单一 ingress 配置", () => {
     expect(ingress.no_ra).toBe(false);
   });
 
-  it("默认 RVS 地址为 https://rvs.tsk.com 且不携带旧端口", () => {
-    expect(DEFAULT_RVS_URL).toBe("https://rvs.tsk.com");
+  it("默认参考值服务地址为 https://rvs.cloud.misuan.com 且不携带旧端口", () => {
+    expect(DEFAULT_RVS_URL).toBe("https://rvs.cloud.misuan.com");
     expect(defaultModel().rvsUrl).toBe(DEFAULT_RVS_URL);
   });
 

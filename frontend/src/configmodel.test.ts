@@ -98,9 +98,9 @@ describe("默认模型与兼容序列化", () => {
 });
 
 describe("RVS 地址", () => {
-  it("默认使用 https://rvs.tsk.com 且能往返", () => {
+  it("默认使用 https://rvs.cloud.misuan.com 且能往返", () => {
     const result = parse(serialize(mk()));
-    expect(result.model!.rvsUrl).toBe("https://rvs.tsk.com");
+    expect(result.model!.rvsUrl).toBe("https://rvs.cloud.misuan.com");
     expect(result.model!.extra[TNGUI_RVS_URL_FIELD]).toBeUndefined();
   });
 
