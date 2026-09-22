@@ -270,6 +270,60 @@ button, input, textarea { font: inherit; }
   flex: 0 0 200px;
   min-width: 200px;
 }
+.identity-control {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.identity-editor-anchor {
+  position: relative;
+  width: 100%;
+  display: flex;
+  justify-content: flex-end;
+}
+.identity-controls-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.identity-label-trigger {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.identity-editor-overlay {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  width: 480px;
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid var(--split);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, .16);
+  transform: translateX(-50%);
+  z-index: 20;
+}
+.identity-prompt-textarea {
+  width: 100%;
+}
+.identity-editor-enter-active,
+.identity-editor-leave-active {
+  transition: opacity .16s ease, transform .16s ease;
+}
+.identity-editor-enter-from,
+.identity-editor-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-4px);
+}
 .thinking-control {
   flex: 0 0 280px;
   min-width: 280px;

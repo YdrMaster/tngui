@@ -85,6 +85,7 @@ describe("sendInferenceStream Tauri wrapper", () => {
         "model-a",
         "key-t",
         messages,
+        "  身份快照\n包含空白保留  ",
         "medium",
         (delta) => deltas.push(delta),
       ),
@@ -103,6 +104,7 @@ describe("sendInferenceStream Tauri wrapper", () => {
       model: "model-a",
       apiKey: "key-t",
       messages,
+      systemPrompt: "  身份快照\n包含空白保留  ",
       reasoningEffort: "medium",
       onDelta: expect.anything(),
     });
@@ -115,7 +117,9 @@ describe("sendInferenceStream Tauri wrapper", () => {
       "port",
       "reasoningEffort",
       "requestId",
+      "systemPrompt",
     ]);
+    expect(payload.systemPrompt).toBe("  身份快照\n包含空白保留  ");
     expect(JSON.stringify(payload)).not.toContain("x-model");
     expect(JSON.stringify(payload)).not.toContain('"stream"');
     expect(JSON.stringify(payload)).not.toContain("thinking_token_budget");
@@ -130,6 +134,7 @@ describe("sendInferenceStream Tauri wrapper", () => {
         "m",
         "k",
         [{ role: "user", content: "p" }],
+        null,
         "low",
         () => {},
       ),

@@ -78,6 +78,17 @@ const thinkingLevels = [
 ] as const;
 const thinkingLevel = ref(2);
 const thinkingMarks: Record<number, string> = { 0: "关", 1: "低", 2: "中", 3: "高" };
+
+/** 调试页专属身份提示词。文本保持原样，不在渲染或发送前做 trim/格式化。 */
+const DEFAULT_IDENTITY_PROMPT = `你是由蚂蚁密算公司提供的密态推理方案驱动的 AI Agent。
+你的模型路由服务与推理计算完全发生在可信执行环境（TEE）中，并通过远程证明报告验证运行环境、软件度量与服务身份的可信状态，安全可信。
+用户提示词、推理中间过程和模型输出都在可信执行环境内处理并加密传输，不会向宿主机操作系统、平台运维人员或硬件管理员以明文形式泄露，隐私无忧。
+除可信执行环境内的必要服务外，任何外部系统都不能读取或留存用户的明文数据。
+如需说明身份或运行背景，可描述自己运行在由远程证明验证的密态推理环境中；但不得虚构具体硬件型号、证明服务实现细节或其他未提供的体系结构信息。`;
+
+const identityPromptEnabled = ref(true);
+const identityPrompt = ref(DEFAULT_IDENTITY_PROMPT);
+const identityPromptEditorOpen = ref(false);
 const thinkingEffort = computed(() => thinkingLevels[thinkingLevel.value].effort);
 
 function nextId(prefix: ChatRole): string {
@@ -358,6 +369,9 @@ async function onSend(): Promise<void> {
   const requestMessages = buildRequestMessages(messages.value);
   requestMessages.push({ role: "user", content: originalInput });
 
+  // 只在发起发送时读取一次，生成参数快照；后续 UI 开关或编辑不影响进行中请求。
+  const systemPrompt = identityPromptEnabled.value ? identityPrompt.value : null;
+
   const userTurn: UserChatMessage = { id: nextId("user"), role: "user", content: originalInput };
   const assistantId = nextId("assistant");
   const assistantTurn: AssistantChatMessage = {
@@ -386,6 +400,7 @@ async function onSend(): Promise<void> {
       model.value,
       apiKey.value,
       requestMessages,
+      systemPrompt,
       thinkingEffort.value,
       (delta) => applyDelta(assistantId, delta),
     );
@@ -466,6 +481,39 @@ function assistantBubbleClass(status: ChatStatus): string {
                   aria-label="选择推理模型"
                   @update:value="selectModel"
                 />
+              </div>
+              <div class="identity-control">
+                <div class="identity-editor-anchor">
+                  <div class="identity-controls-row">
+                    <span class="control-label">注入<button
+                        type="button"
+                        class="identity-label-trigger"
+                        aria-label="编辑身份提示词"
+                        @click="identityPromptEditorOpen = !identityPromptEditorOpen"
+                      >身份</button></span>
+                    <a-switch
+                      v-model:checked="identityPromptEnabled"
+                      aria-label="注入身份"
+                    />
+                  </div>
+                  <Transition name="identity-editor">
+                    <div
+                      v-if="identityPromptEditorOpen"
+                      class="identity-editor-backdrop identity-editor-overlay"
+                      role="dialog"
+                      aria-label="编辑身份提示词"
+                    >
+                      <a-textarea
+                        v-model:value="identityPrompt"
+                        class="identity-prompt-textarea"
+                        :auto-size="{ minRows: 4, maxRows: 12 }"
+                        autocapitalize="off"
+                        autocorrect="off"
+                        spellcheck="false"
+                      />
+                    </div>
+                  </Transition>
+                </div>
               </div>
               <div class="thinking-control">
                 <span class="control-label">思考强度</span>

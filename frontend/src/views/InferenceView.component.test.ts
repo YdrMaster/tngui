@@ -25,6 +25,7 @@ import {
   Tag,
   Textarea,
   Spin,
+  Switch,
 } from "ant-design-vue";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
 import SecureFlow from "../components/SecureFlow.vue";
@@ -76,6 +77,7 @@ const globalComponents = {
     "a-select": Select,
     "a-slider": Slider,
     "a-step": Step,
+    "a-switch": Switch,
     "a-steps": Steps,
     "a-tab-pane": TabPane,
     "a-tabs": Tabs,
@@ -86,6 +88,14 @@ const globalComponents = {
 };
 
 type TestDelta = { kind: "reasoning" | "content"; text: string };
+
+const expectedIdentityPrompt = [
+  "你是由蚂蚁密算公司提供的密态推理方案驱动的 AI Agent。",
+  "你的模型路由服务与推理计算完全发生在可信执行环境（TEE）中，并通过远程证明报告验证运行环境、软件度量与服务身份的可信状态，安全可信。",
+  "用户提示词、推理中间过程和模型输出都在可信执行环境内处理并加密传输，不会向宿主机操作系统、平台运维人员或硬件管理员以明文形式泄露，隐私无忧。",
+  "除可信执行环境内的必要服务外，任何外部系统都不能读取或留存用户的明文数据。",
+  "如需说明身份或运行背景，可描述自己运行在由远程证明验证的密态推理环境中；但不得虚构具体硬件型号、证明服务实现细节或其他未提供的体系结构信息。",
+].join("\n");
 type StreamCallback = (delta: TestDelta) => void;
 
 interface StreamCapture {
@@ -133,6 +143,7 @@ function mockStreamOnce(): StreamCapture {
       _model: string,
       _apiKey: string,
       _messages: unknown[],
+      _systemPrompt: string | null,
       _reasoningEffort: string,
       onDelta: StreamCallback,
     ) =>
@@ -153,6 +164,7 @@ function mockResolvedStreamOnce(text = "最终回答"): void {
       _model: string,
       _apiKey: string,
       _messages: unknown[],
+      _systemPrompt: string | null,
       _reasoningEffort: string,
       onDelta: StreamCallback,
     ) => {
@@ -283,6 +295,148 @@ describe("InferenceView", () => {
     expect(tauriMocks.listModels).not.toHaveBeenCalled();
   });
 
+  it("renders the identity controls with defaults, fixed overlay sizing, and no persisted state", async () => {
+    const wrapper = await mountAndLoadModels(["identity-model"]);
+    const toolbar = wrapper.get(".chat-toolbar");
+    const sectionClasses = toolbar
+      .findAll(".model-control, .identity-control, .thinking-control")
+      .map((section) => section.element.className);
+    expect(sectionClasses).toEqual(["model-control", "identity-control", "thinking-control"]);
+    expect(toolbar.findComponent(Switch).props("checked")).toBe(true);
+    expect(toolbar.find(".identity-editor-backdrop").exists()).toBe(false);
+    expect(toolbar.find("button.identity-edit-button").exists()).toBe(false);
+    expect(toolbar.get("button.identity-label-trigger").text()).toBe("身份");
+
+    await toolbar.get("button.identity-label-trigger").trigger("click");
+    await nextTick();
+    const editor = toolbar.get(".identity-editor-backdrop");
+    expect(editor.attributes("role")).toBe("dialog");
+    const identityTextarea = wrapper
+      .findAllComponents(Textarea)
+      .find((component) => component.element.classList.contains("identity-prompt-textarea"));
+    expect(identityTextarea).toBeTruthy();
+    expect(identityTextarea?.props("autoSize")).toEqual({ minRows: 4, maxRows: 12 });
+    expect((wrapper.get("textarea.identity-prompt-textarea").element as HTMLTextAreaElement).value).toBe(expectedIdentityPrompt);
+
+    const themeCss = readFileSync("src/assets/theme.css", "utf8");
+    const identityControlCss = themeCss.match(/\n\.identity-control \{[\s\S]*?\n\}/)?.[0] ?? "";
+    const identityAnchorCss = themeCss.match(/\n\.identity-editor-anchor \{[\s\S]*?\n\}/)?.[0] ?? "";
+    const identityControlsRowCss = themeCss.match(/\n\.identity-controls-row \{[\s\S]*?\n\}/)?.[0] ??
+      "";
+    const overlayCss = themeCss.match(/\n\.identity-editor-overlay \{[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(identityControlCss).toContain("flex: 1 1 auto");
+    expect(identityControlCss).toContain("min-width: 0");
+    expect(identityAnchorCss).toContain("justify-content: flex-end");
+    expect(identityControlsRowCss).toContain("justify-content: flex-end");
+    expect(overlayCss).toContain("width: 480px");
+    expect(overlayCss).toContain("position: absolute");
+    expect(readFileSync("src/assets/theme.css", "utf8")).toContain("body { min-width: 1120px;");
+    expect(tauriMocks.flushSettingsCache).not.toHaveBeenCalled();
+    expect(tauriMocks.saveConfig).not.toHaveBeenCalled();
+
+    await toolbar.get("button.identity-label-trigger").trigger("click");
+    await nextTick();
+    expect(toolbar.find(".identity-editor-backdrop").exists()).toBe(false);
+  });
+
+  it("turns identity injection off without adding a system message to the debug request", async () => {
+    const wrapper = await mountAndLoadModels(["identity-off"]);
+    const identitySwitch = wrapper.findComponent(Switch);
+    identitySwitch.vm.$emit("update:checked", false);
+    await nextTick();
+    expect(identitySwitch.props("checked")).toBe(false);
+    expect(wrapper.find(".identity-editor-backdrop").exists()).toBe(false);
+
+    mockResolvedStreamOnce("无身份回答");
+    await sendDraft(wrapper, "关闭身份");
+    const [, , , , requestMessages, systemPrompt] = tauriMocks.sendInferenceStream.mock.calls[0];
+    expect(systemPrompt).toBeNull();
+    expect(requestMessages).toEqual([{ role: "user", content: "关闭身份" }]);
+  });
+
+  it("sends an edited identity prompt verbatim and only on the next request", async () => {
+    useTestClock();
+    const customPrompt = "  自定义身份\n\t保留空白  ";
+    const first = await mountAndLoadModels(["identity-edit"]);
+    await first.get("button.identity-label-trigger").trigger("click");
+    await nextTick();
+    await first.get("textarea.identity-prompt-textarea").setValue(customPrompt);
+    expect((first.get("textarea.identity-prompt-textarea").element as HTMLTextAreaElement).value).toBe(customPrompt);
+
+    mockResolvedStreamOnce("修改后的回答");
+    await sendDraft(first, "第一轮身份");
+    expect(tauriMocks.sendInferenceStream.mock.calls[0][5]).toBe(customPrompt);
+
+    await first.get("textarea.identity-prompt-textarea").setValue("发送后修改的身份");
+    expect(tauriMocks.sendInferenceStream.mock.calls[0][5]).toBe(customPrompt);
+
+    await advanceUntilFinalStage();
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+    await nextTick();
+
+    mockResolvedStreamOnce("下一轮回答");
+    await sendDraft(first, "第二轮身份");
+    expect(tauriMocks.sendInferenceStream).toHaveBeenCalledTimes(2);
+    expect(tauriMocks.sendInferenceStream.mock.calls[1][5]).toBe("发送后修改的身份");
+  });
+
+  it("keeps an in-flight request unchanged while the identity state is edited", async () => {
+    useTestClock();
+    mockResolvedStreamOnce("进行中的回答");
+    const wrapper = await mountAndLoadModels(["identity-flight"]);
+    await sendDraft(wrapper, "进行中身份");
+    const firstPrompt = tauriMocks.sendInferenceStream.mock.calls[0][5];
+    expect(firstPrompt).toBe(expectedIdentityPrompt);
+
+    await wrapper.get("button.identity-label-trigger").trigger("click");
+    await nextTick();
+    await wrapper.get("textarea.identity-prompt-textarea").setValue("  进行中被编辑  ");
+    expect(tauriMocks.sendInferenceStream.mock.calls[0][5]).toBe(expectedIdentityPrompt);
+    expect(tauriMocks.sendInferenceStream).toHaveBeenCalledTimes(1);
+
+    await advanceUntilFinalStage();
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+    await nextTick();
+
+    mockResolvedStreamOnce("下一轮回答");
+    await sendDraft(wrapper, "下一轮");
+    expect(tauriMocks.sendInferenceStream.mock.calls[1][5]).toBe("  进行中被编辑  ");
+  });
+
+  it("retains identity state through KeepAlive and resets it after a process-like remount", async () => {
+    const kept = mountKeepAliveHarness();
+    await flushPromises();
+    const keptSwitch = kept.findComponent(Switch);
+    keptSwitch.vm.$emit("update:checked", false);
+    await nextTick();
+    await kept.get("button.identity-label-trigger").trigger("click");
+    await nextTick();
+    await kept.get("textarea.identity-prompt-textarea").setValue("  页内保留身份  ");
+
+    await kept.setProps({ show: false });
+    await nextTick();
+    await kept.setProps({ show: true });
+    await nextTick();
+    await flushPromises();
+
+    expect(kept.findComponent(Switch).props("checked")).toBe(false);
+    expect(kept.find(".identity-editor-backdrop").exists()).toBe(true);
+    expect((kept.get("textarea.identity-prompt-textarea").element as HTMLTextAreaElement).value).toBe("  页内保留身份  ");
+    expect(tauriMocks.flushSettingsCache).not.toHaveBeenCalled();
+
+    kept.unmount();
+    activeWrapper = undefined;
+    const fresh = await mountAndLoadModels(["identity-fresh"]);
+    expect(fresh.findComponent(Switch).props("checked")).toBe(true);
+    expect(fresh.find(".identity-editor-backdrop").exists()).toBe(false);
+    await fresh.get("button.identity-label-trigger").trigger("click");
+    await nextTick();
+    expect((fresh.get("textarea.identity-prompt-textarea").element as HTMLTextAreaElement).value).toBe(expectedIdentityPrompt);
+    expect(tauriMocks.flushSettingsCache).not.toHaveBeenCalled();
+  });
+
   it("sends one untrimmed turn with default medium effort and renders both bubbles immediately", async () => {
     useTestClock();
     const capture = mockStreamOnce();
@@ -293,7 +447,7 @@ describe("InferenceView", () => {
     await sendDraft(wrapper, "  保留首尾空白  ");
 
     expect(tauriMocks.sendInferenceStream).toHaveBeenCalledTimes(1);
-    const [requestId, port, modelId, apiKey, requestMessages, effort, onDelta] =
+    const [requestId, port, modelId, apiKey, requestMessages, systemPrompt, effort, onDelta] =
       tauriMocks.sendInferenceStream.mock.calls[0];
     expect(requestId).toBe("assistant-2");
     expect(port).toBe(18080);
@@ -302,6 +456,7 @@ describe("InferenceView", () => {
     expect(requestMessages).toEqual([
       { role: "user", content: "  保留首尾空白  " },
     ]);
+    expect(systemPrompt).toBe(expectedIdentityPrompt);
     expect(effort).toBe("medium");
     expect(typeof onDelta).toBe("function");
 
@@ -536,7 +691,7 @@ describe("InferenceView", () => {
       await nextTick();
       await sendDraft(wrapper, inputs[index]);
       const call = tauriMocks.sendInferenceStream.mock.calls[index];
-      efforts.push(call[5]);
+      efforts.push(call[6]);
 
       await advanceUntilFinalStage();
       await vi.advanceTimersByTimeAsync(500);
@@ -573,7 +728,7 @@ describe("InferenceView", () => {
     const secondCapture = mockStreamOnce();
     await sendDraft(wrapper, "  第二轮原文  ");
     expect(tauriMocks.sendInferenceStream).toHaveBeenCalledTimes(2);
-    const [, , , , secondMessages, effort] = tauriMocks.sendInferenceStream.mock.calls[1];
+    const [, , , , secondMessages, , effort] = tauriMocks.sendInferenceStream.mock.calls[1];
     expect(secondMessages).toEqual([
       { role: "user", content: "第一轮" },
       { role: "assistant", content: "第一轮回答" },
@@ -836,6 +991,11 @@ describe("InferenceView", () => {
     expect(themeCss).not.toContain(".chat-toolbar { flex-direction: column; align-items: stretch; }");
     const toolbarCss = themeCss.match(/\n\.chat-toolbar \{[\s\S]*?\n\}/);
     expect(toolbarCss?.[0]).toContain("flex-wrap: nowrap");
+    const identityControlCss = themeCss.match(/\n\.identity-control \{[\s\S]*?\n\}/)?.[0] ?? "";
+    const identityOverlayCss = themeCss.match(/\n\.identity-editor-overlay \{[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(identityControlCss).toContain("flex: 1 1 auto");
+    expect(identityControlCss).toContain("min-width: 0");
+    expect(identityOverlayCss).toContain("width: 480px");
 
     expect(themeCss).toContain(".chat-composer { --composer-control-size: 32px; }");
     expect(buttonCss?.[0]).toContain("width: var(--composer-control-size, 32px)");

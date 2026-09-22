@@ -55,6 +55,7 @@ export type InferenceStreamOutcome = "completed" | "stopped";
  * 通过 tngui 反代对外端点发送流式多轮推理请求（body 恒含 `"stream": true`，由
  * 后端组装）。每节非空 `choices[0].delta.reasoning` / `choices[0].delta.content`
  * 到达即调用 `onDelta`；收到 `data: [DONE]` 后 Promise resolve 为 `completed`。
+ * `systemPrompt` 是调试页身份提示词快照；`null` 表示不注入 system role。
  * 任何失败（连接失败、非 2xx、非 SSE、断流等）Promise reject，错误为脱敏诊断
  * 字符串（不含明文凭据）。`requestId` 是 GUI 进程内本轮请求的唯一取消标识。
  */
@@ -64,6 +65,7 @@ export async function sendInferenceStream(
   model: string,
   apiKey: string,
   messages: InferenceMessage[],
+  systemPrompt: string | null,
   reasoningEffort: InferenceEffort,
   onDelta: (delta: InferenceDelta) => void,
 ): Promise<InferenceStreamOutcome> {
@@ -75,6 +77,7 @@ export async function sendInferenceStream(
     model,
     apiKey,
     messages,
+    systemPrompt,
     reasoningEffort,
     onDelta: channel,
   });

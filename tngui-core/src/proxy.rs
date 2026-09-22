@@ -943,6 +943,30 @@ Connection: close
         assert_eq!(got.body, json);
     }
 
+    /// 直接反代客户端没有调试页功能开关参数；同一原始 body 在两次调用间必须字节一致。
+    #[tokio::test]
+    async fn direct_client_body_is_identity_feature_invariant() {
+        let raw_body =
+            r#"{"model":"direct-model","messages":[{"role":"user","content":"直接客户端原文"}]}"#
+                .as_bytes();
+        let mut received_bodies = Vec::new();
+        for _feature_state in ["disabled", "enabled"] {
+            let (resp, got) =
+                run_once_full(&[("Authorization", "Bearer direct-key")], raw_body.to_vec()).await;
+            assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
+            let got = got.expect("upstream should receive request");
+            assert_eq!(got.path, "/models/direct-model/v1/chat/completions");
+            assert!(
+                !got.headers
+                    .iter()
+                    .any(|(key, _)| key.eq_ignore_ascii_case("x-tngui-identity")),
+                "直接反代请求不得新增身份专用头"
+            );
+            received_bodies.push(got.body);
+        }
+        assert_eq!(received_bodies, vec![raw_body.to_vec(), raw_body.to_vec()]);
+    }
+
     #[tokio::test]
     async fn injects_anthropic_model_path_and_keeps_x_api_key() {
         let json = br#"{"model":"provider/model"}"#;

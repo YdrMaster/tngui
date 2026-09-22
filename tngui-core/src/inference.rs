@@ -280,20 +280,42 @@ fn interpret_sse_data(data: &str) -> Result<SsePayload, String> {
 /// `on_delta`；收到 `data: [DONE]` 返回 `Ok(InferenceStreamOutcome::Completed)`。
 /// 任何失败（连接失败、非 2xx、2xx 但非 chunked+`text/event-stream`、SSE 事件解析
 /// 失败、`[DONE]` 前断流、响应超过上限）返回既有格式诊断（Authorization 脱敏）。
+fn build_request_messages(
+    system_prompt: Option<&str>,
+    messages: &[InferenceMessage],
+) -> Result<Vec<Value>, String> {
+    let mut request_messages =
+        Vec::with_capacity(messages.len() + usize::from(system_prompt.is_some()));
+    if let Some(prompt) = system_prompt {
+        // 布尔存在性驱动注入：Some("") 仍生成 system message；None 一律不生成。
+        request_messages.push(serde_json::json!({
+            "role": "system",
+            "content": prompt,
+        }));
+    }
+    for message in messages {
+        request_messages
+            .push(serde_json::to_value(message).map_err(|e| format!("推理消息序列化失败: {e}"))?);
+    }
+    Ok(request_messages)
+}
+
 pub async fn send_inference_stream<F>(
     port: u16,
     model: &str,
     api_key: &str,
     messages: &[InferenceMessage],
+    system_prompt: Option<&str>,
     reasoning_effort: InferenceEffort,
     mut on_delta: F,
 ) -> Result<InferenceStreamOutcome, String>
 where
     F: FnMut(InferenceDelta),
 {
+    let request_messages = build_request_messages(system_prompt, messages)?;
     let body = serde_json::json!({
         "model": model,
-        "messages": messages,
+        "messages": request_messages,
         "stream": true,
         "reasoning_effort": reasoning_effort,
     })
@@ -818,6 +840,7 @@ mod tests {
             "model",
             "key",
             &messages,
+            None,
             InferenceEffort::default(),
             |_| {},
         )
@@ -874,10 +897,57 @@ mod tests {
         format!("data: {role}\n\ndata: {finish}\n\n")
     }
 
+    #[test]
+    fn system_prompt_injection_is_presence_driven_and_preserves_text() {
+        let prompt = "  身份提示\n\t保留全部空白  ";
+        let history = vec![
+            message("第一轮"),
+            InferenceMessage {
+                role: InferenceRole::Assistant,
+                content: "第一轮回答".to_string(),
+            },
+            message("第二轮"),
+        ];
+
+        let enabled = build_request_messages(Some(prompt), &history).unwrap();
+        assert_eq!(
+            Value::Array(enabled),
+            serde_json::json!([
+                {"role":"system","content":prompt},
+                {"role":"user","content":"第一轮"},
+                {"role":"assistant","content":"第一轮回答"},
+                {"role":"user","content":"第二轮"}
+            ])
+        );
+
+        let empty = build_request_messages(Some(""), &history).unwrap();
+        assert_eq!(empty[0]["role"], serde_json::json!("system"));
+        assert_eq!(empty[0]["content"], serde_json::json!(""));
+
+        let disabled = build_request_messages(None, &history).unwrap();
+        assert!(
+            !disabled
+                .iter()
+                .any(|message| message["role"] == serde_json::json!("system")),
+            "None 不得注入任何 system message"
+        );
+        assert_eq!(
+            disabled
+                .iter()
+                .map(|message| message["role"].clone())
+                .collect::<Vec<_>>(),
+            vec![
+                serde_json::json!("user"),
+                serde_json::json!("assistant"),
+                serde_json::json!("user")
+            ]
+        );
+    }
+
     /// 多轮 body + 思考强度 + 流式契约：模型身份只在 body（由反代转 path），绝不注入
     /// x-model；body 恒带 stream:true 与 reasoning_effort；成功流逐 delta 顺序回调。
     #[tokio::test]
-    async fn stream_posts_multiturn_stream_reasoning_and_no_x_model() {
+    async fn send_inference_stream_posts_identity_multiturn_stream_reasoning_and_no_x_model() {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = l.local_addr().unwrap().port();
         let seen: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
@@ -904,6 +974,7 @@ mod tests {
             s.flush().await.unwrap();
         });
 
+        let identity_prompt = "  身份提示保留空白\n\t第二行  ";
         let request_messages = vec![
             message("第一轮"),
             InferenceMessage {
@@ -919,6 +990,7 @@ mod tests {
             "gpt-x",
             "key",
             &request_messages,
+            Some(identity_prompt),
             InferenceEffort::default(),
             move |delta| {
                 d2.lock().unwrap().push(delta);
@@ -945,10 +1017,15 @@ mod tests {
         assert_eq!(
             body["messages"],
             serde_json::json!([
+                {"role":"system","content":"  身份提示保留空白\n\t第二行  "},
                 {"role":"user","content":"第一轮"},
                 {"role":"assistant","content":"第一轮回答"},
                 {"role":"user","content":"第二轮"}
             ])
+        );
+        assert_eq!(
+            body["messages"][0]["content"],
+            serde_json::json!(identity_prompt)
         );
         assert!(
             !request.lines().skip(1).any(|ln| ln.contains("x-model")),
@@ -1002,6 +1079,7 @@ mod tests {
             "m",
             "k",
             &messages,
+            None,
             InferenceEffort::High,
             move |delta| {
                 d2.lock().unwrap().push(delta);
@@ -1050,6 +1128,7 @@ mod tests {
             "m",
             "k",
             &messages,
+            None,
             InferenceEffort::Low,
             move |delta| {
                 d2.lock().unwrap().push(delta);
@@ -1095,6 +1174,7 @@ mod tests {
             "m",
             "k",
             &[message("p")],
+            None,
             InferenceEffort::None,
             |_| {},
         )
@@ -1125,6 +1205,7 @@ mod tests {
             "m",
             "k",
             &[message("p")],
+            None,
             InferenceEffort::None,
             |_| {},
         )
@@ -1157,6 +1238,7 @@ mod tests {
             "m",
             "k",
             &[message("p")],
+            None,
             InferenceEffort::None,
             |_| {},
         )
@@ -1190,6 +1272,7 @@ mod tests {
             "m",
             "k",
             &[message("p")],
+            None,
             InferenceEffort::None,
             |_| {},
         )
@@ -1222,6 +1305,7 @@ mod tests {
             "m",
             "k",
             &[message("p")],
+            None,
             InferenceEffort::None,
             |_| {},
         )

@@ -314,19 +314,24 @@ fn write_settings_cache_file(dir: &std::path::Path, payload: &Value) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::{
-        InferenceCancellationCell, RA_BIN_MISSING, SETTINGS_CACHE_FILE, cancel_inference_request,
-        find_bin_under, format_process_log_lines, ra_launch_precheck,
+        AppState, InferenceCancellationCell, RA_BIN_MISSING, SETTINGS_CACHE_FILE,
+        cancel_inference_request, find_bin_under, format_process_log_lines, ra_launch_precheck,
         race_inference_stream_with_cancellation, read_settings_cache_file,
-        register_inference_cancellation, tng_nora_resource_name_for, tng_ra_resource_name_for,
-        write_settings_cache_file,
+        register_inference_cancellation, run_send_inference_stream, tng_nora_resource_name_for,
+        tng_ra_resource_name_for, write_settings_cache_file,
     };
     use serde_json::{Value, json};
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex as StdMutex};
-    use tngui_core::InferenceStreamOutcome;
-    use tokio::sync::oneshot;
+    use tauri::ipc::Channel;
+    use tngui_core::{
+        InferenceDelta, InferenceEffort, InferenceMessage, InferenceRole, InferenceStreamOutcome,
+        TngSupervisor,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::{Mutex, oneshot};
 
     fn test_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -496,6 +501,123 @@ mod tests {
         assert!(!cancel_inference_request(&cell, "assistant-1"));
     }
 
+    fn command_test_state() -> AppState {
+        AppState {
+            supervisor: Arc::new(Mutex::new(TngSupervisor::new("tng-nora", None, 100))),
+            port: Arc::new(StdMutex::new(None)),
+            proxy: Arc::new(Mutex::new(None)),
+            inference_cancellations: Arc::new(StdMutex::new(HashMap::new())),
+        }
+    }
+
+    async fn read_http_request_safely(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let header_end = loop {
+            let mut tmp = [0u8; 1024];
+            let n = stream.read(&mut tmp).await.unwrap();
+            if n == 0 {
+                break buf.len();
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos;
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..header_end]);
+        let content_length = head
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let line = line.trim_end_matches('\r');
+                let (key, value) = line.split_once(':')?;
+                key.trim()
+                    .eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .next()
+            .unwrap_or(0);
+        let body_start = header_end + 4;
+        while buf.len() < body_start + content_length {
+            let mut tmp = [0u8; 1024];
+            let n = stream.read(&mut tmp).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        buf
+    }
+
+    /// 起一个只接受一条推理请求的最小 SSE 服务，返回端口与收到的原始请求。
+    async fn spawn_one_sse_server() -> (u16, Arc<StdMutex<Vec<u8>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request_safely(&mut stream).await;
+            *seen2.lock().unwrap() = request;
+            let body = "data: [DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.flush().await.unwrap();
+        });
+        (port, seen)
+    }
+
+    #[tokio::test]
+    async fn inference_command_round_trips_system_prompt_and_none_without_injection() {
+        let identity_prompt = "  命令层身份提示\n保留空白  ";
+        for (request_id, system_prompt) in [
+            ("with-identity", Some(identity_prompt)),
+            ("without-identity", None),
+        ] {
+            let (port, seen) = spawn_one_sse_server().await;
+            let state = command_test_state();
+            let messages = vec![InferenceMessage {
+                role: InferenceRole::User,
+                content: "第一轮".to_string(),
+            }];
+            let channel = Channel::<InferenceDelta>::new(|_| Ok(()));
+            run_send_inference_stream(
+                &state,
+                request_id.to_string(),
+                port,
+                "command-model".to_string(),
+                "command-key".to_string(),
+                messages,
+                system_prompt.map(str::to_string),
+                InferenceEffort::Medium,
+                channel,
+            )
+            .await
+            .unwrap();
+
+            let request = String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
+            let body =
+                serde_json::from_str::<Value>(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            if let Some(prompt) = system_prompt {
+                assert_eq!(body["messages"][0]["role"], json!("system"));
+                assert_eq!(body["messages"][0]["content"], json!(prompt));
+                assert_eq!(body["messages"][1]["role"], json!("user"));
+            } else {
+                assert!(
+                    !body["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|message| message["role"] == json!("system"))
+                );
+                assert_eq!(body["messages"][0]["role"], json!("user"));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn raced_inference_stream_returns_stopped_on_cancellation() {
         let (sender, receiver) = oneshot::channel();
@@ -576,16 +698,17 @@ async fn save_config(app: AppHandle, config_json: String) -> Result<(), String> 
 /// `choices[0].delta.reasoning` / `choices[0].delta.content` 经 typed `on_delta`
 /// Channel 推送；收到 `data: [DONE]` 后命令成功返回。任何失败（连接失败、非 2xx、
 /// 非 SSE 响应、SSE 解析失败、`[DONE]` 前断流、响应超上限）返回既有格式诊断
+/// `system_prompt` 是调试页专用快照；`None` 不注入 system role。
 /// （Authorization 脱敏）。`port` 为反代对外端口（前端取自 `proxy_endpoint`）。
-#[tauri::command]
 #[allow(clippy::too_many_arguments)] // Flat parameters preserve the typed Tauri IPC contract.
-async fn send_inference_stream(
-    state: State<'_, AppState>,
+async fn run_send_inference_stream(
+    state: &AppState,
     request_id: String,
     port: u16,
     model: String,
     api_key: String,
     messages: Vec<InferenceMessage>,
+    system_prompt: Option<String>,
     reasoning_effort: InferenceEffort,
     on_delta: Channel<InferenceDelta>,
 ) -> Result<InferenceStreamOutcome, String> {
@@ -598,6 +721,7 @@ async fn send_inference_stream(
             &model,
             &api_key,
             &messages,
+            system_prompt.as_deref(),
             reasoning_effort,
             |delta| {
                 let _ = on_delta.send(delta);
@@ -607,6 +731,33 @@ async fn send_inference_stream(
     .await;
     remove_inference_cancellation(&state.inference_cancellations, &request_id);
     outcome
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Flat parameters preserve the typed Tauri IPC contract.
+async fn send_inference_stream(
+    state: State<'_, AppState>,
+    request_id: String,
+    port: u16,
+    model: String,
+    api_key: String,
+    messages: Vec<InferenceMessage>,
+    system_prompt: Option<String>,
+    reasoning_effort: InferenceEffort,
+    on_delta: Channel<InferenceDelta>,
+) -> Result<InferenceStreamOutcome, String> {
+    run_send_inference_stream(
+        &state,
+        request_id,
+        port,
+        model,
+        api_key,
+        messages,
+        system_prompt,
+        reasoning_effort,
+        on_delta,
+    )
+    .await
 }
 
 /// 按 request_id 请求停止进行中的推理流。无活跃请求时返回 false，不报错（幂等）。
