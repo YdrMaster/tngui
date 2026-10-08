@@ -137,7 +137,7 @@
 系统须（SHALL）在"设置"视图提供结构化控件，仅承载客户端 ingress（一条或多条 `add_ingress`），不承载 `add_egress`。每条 ingress 锁定为客户端 OHTTP 形态：
 - 远端类型二选一：`地址端口`（`mapping`，`out = {host:<IP>, port:<port>}`，`host` 须为 IP）或 `域名`（`http_proxy`，`dst_filters = [{domain:<主机名>, port:<端口号>}]`，主机名与端口分两个控件、主机名仅含主机名不含端口、端口走独立 `port` 字段；域名框接受可选 `http://` / `https://` 前缀，前缀触发 `ohttp.tls` 派生并剥离进 `domain`——`https://` 派生 `tls: true`，`http://` 或无前缀不派生）；`socks5`/`netfilter`/`hook`/`mapping_udp` 不作为 ingress 模式提供。
 - tng 本地监听 `host`/`port` 由 tngui 自动注入并对用户隐藏；ingress 编辑器行 1 改为呈现 tngui 反代对外绑定——`host` 在 `127.0.0.1`（仅本机）/`0.0.0.0`（对外网卡）间 toggle、`port` 可配（默认 `127.0.0.1`），作为 tngui 侧设置不进 tng 配置（见"tngui 反向代理作为 pre-TNG path 注入代理"）。
-- `ohttp` 永远开，且每条 ingress 的 `ohttp.path_rewrites` 与 `ohttp.header_passthrough.request_headers` 写死为 capi path 模型鉴权契约（见"客户端 ingress 锁定 OHTTP 协议"），用户不可关闭、不可编辑。
+- `ohttp` 永远开，且每条 ingress 的 `ohttp.path_rewrites` 与 `ohttp.header_passthrough.request_headers` 锁定为支持中心 path-model 语义的本地配置（见"客户端 ingress 锁定 OHTTP 协议"），用户不可关闭、不可编辑。
 - 保留 `no_ra` 开关；其与 `verify` 的序列化语义见"ingress 的 no_ra 与 verify 互斥序列化"。
 
 系统绝不（MUST NOT）提供 `control_interface.restful`（host 或 port）、`path_rewrites`、`header_passthrough.request_headers` 的任何结构化控件。系统绝不（MUST NOT）提供 `add_egress` 的任何结构化控件——客户端侧不承载 egress。系统绝不（MUST NOT）提供 tng ingress 本地监听 `host`/`port` 的任何结构化控件或可编辑字段（由 tngui 启动时注入）。
@@ -578,72 +578,6 @@
 - **WHEN** 没有请求进行中或上一轮 assistant 已进入终态
 - **THEN** 底部输入框右侧主操作按钮显示并发送新消息；当本轮请求尚未进入终态时，该按钮显示并提供“停止”操作
 
-### Requirement: 密态推理调试页身份提示词注入
-
-系统须（SHALL）在“密态推理”请求调试页的模型选择控件与思考强度控件之间提供“注入身份”toggle；该 toggle 须（SHALL）在中间区域右对齐并紧邻思考强度滑块左侧，其标签由静态前缀“注入”与可点击后缀“身份”组成。“注入身份”须（SHALL）默认开启；点击“身份”须（SHALL）展开或收起身份提示词编辑区。
-
-系统须（SHALL）内置以下默认身份提示词：
-
-```text
-你是由蚂蚁密算公司提供的密态推理方案驱动的 AI Agent。
-你的模型路由服务与推理计算完全发生在可信执行环境（TEE）中，并通过远程证明报告验证运行环境、软件度量与服务身份的可信状态，安全可信。
-用户提示词、推理中间过程和模型输出都在可信执行环境内处理并加密传输，不会向宿主机操作系统、平台运维人员或硬件管理员以明文形式泄露，隐私无忧。
-除可信执行环境内的必要服务外，任何外部系统都不能读取或留存用户的明文数据。
-如需说明身份或运行背景，可描述自己运行在由远程证明验证的密态推理环境中；但不得虚构具体硬件型号、证明服务实现细节或其他未提供的体系结构信息。
-```
-
-“注入身份”开启时，系统仅对通过密态推理调试页发送的推理请求生效：发往反向代理的 `messages` 数组须（SHALL）在该数组首部追加一条 `role: "system"`、`content` 为当前身份提示词的消息，其后按既有规则携带已完成 user / assistant 对话上下文与本轮用户输入；“注入身份”关闭时，后续请求不得（MUST NOT）追加该 system message。用户输入内容与身份提示词文本均不得（MUST NOT）被 trim 或本地格式化。身份提示词不得（MUST NOT）作为 user / assistant 聊天气泡渲染或写入对话历史状态。
-
-身份提示词编辑框须（SHALL）使用固定 `480px` 宽度，高度随内容自动增长，最小 4 行、最大 12 行；超过 12 行后在编辑框内部滚动，不得因编辑框展开压缩聊天记录的固定高度。编辑身份仅保存于 GUI 进程内存；“注入身份”开关状态、编辑框展开状态与提示词内容须（SHALL）随推理页页内状态在应用内页面导航间保留，GUI 进程退出后须（SHALL）重置为默认开启、默认提示词与编辑框收起。该状态不得（MUST NOT）写入设置缓存、TNG 配置、tng-runtime.json 或其他文件。
-
-修改“注入身份”开关或身份提示词内容只影响下一次发送：已发出的进行中请求不得（MUST NOT）被重写、取消或重启。反向代理不得（MUST NOT）解析、识别、添加或改写消息 role，也不得为任何直接进入反向代理的客户端请求注入身份提示词；这些请求的 body 字节仍须（SHALL）按现有反向代理规则原样保留。
-
-#### Scenario: 控件位置与默认状态
-
-- **WHEN** 用户打开密态推理页的“请求调试”选项卡
-- **THEN** “注入身份”toggle 位于模型选择控件与思考强度控件之间，且在中间区域右对齐，紧邻思考强度滑块左侧
-- **AND** “身份”是“注入”后的可点击文本后缀
-- **AND** “注入身份”默认开启，身份提示词编辑框默认收起
-
-#### Scenario: 默认开启时请求携带身份提示词
-
-- **WHEN** “注入身份”保持默认开启，用户发送一轮推理请求
-- **THEN** 发往反向代理的 `messages[0]` 为 `{ "role": "system", "content": <默认身份提示词> }`
-- **AND** 其后依次为既有已完成 user / assistant 上下文与本轮用户输入原文
-- **AND** 聊天记录中不出现该 system message 对应的 user / assistant 气泡
-
-#### Scenario: 编辑身份内容影响下一轮请求
-
-- **WHEN** 用户点击“身份”展开提示词编辑框，把默认提示词修改为新文本后发送下一轮消息
-- **THEN** 该轮请求 `messages[0].content` 为修改后的文本
-- **AND** 身份提示词内容保持原文，不做首尾 trim、大小写转换或其他本地格式化
-- **AND** 编辑框宽度为 480px，高度在 4 到 12 行之间随内容自动调整，超过 12 行后内部滚动
-
-#### Scenario: 关闭注入不追加 system message
-
-- **WHEN** 用户把“注入身份”toggle 关闭后发送下一轮推理请求
-- **THEN** 该轮请求 `messages` 不含由调试页注入的身份提示词 system message
-- **AND** 后续已完成 user / assistant 上下文按既有规则继续携带
-
-#### Scenario: 进行中请求不被修改
-
-- **WHEN** 一轮推理请求已经发出且尚未进入终态，用户修改“注入身份”开关或提示词文本
-- **THEN** 当前进行中请求保持原样继续执行，不因修改被取消、重写或重发
-- **AND** 新开关状态与提示词内容只影响下一次发送
-
-#### Scenario: 页内状态保留且进程退出重置
-
-- **WHEN** 用户切换离开再返回密态推理页
-- **THEN** “注入身份”开关状态、编辑框展开状态与提示词内容保持不变，页面切换本身不落盘
-- **WHEN** GUI 进程退出后重新启动
-- **THEN** 身份注入恢复为默认开启、默认提示词与编辑框收起，不从前次进程恢复
-
-#### Scenario: 直接反代请求不受身份注入影响
-
-- **WHEN** 外部客户端不经过密态推理调试页，直接向本机反向代理发送推理请求
-- **THEN** 反向代理不为该请求添加或改写任何身份提示词 system message
-- **AND** 该请求按既有规则原样透传 body，并仅按 body.model 执行既有路径注入
-
 ### Requirement: 密态推理思考强度控制
 
 系统须（SHALL）在模型选择控件右上角提供“思考强度”滑块控件，停靠值为“关 / 低 / 中 / 高”，默认值为“中”。控件值须（SHALL）按以下映射进入每轮推理请求：关 → `reasoning_effort: "none"`；低 → `"low"`；中 → `"medium"`；高 → `"high"`。控件状态仅保留在 GUI 进程内存中，不得（MUST NOT）写入设置缓存或 tng 配置。
@@ -940,7 +874,7 @@
 - **THEN** TNG ingress 生成的 OHTTP outer path 为 `/models/{model-segment}`，credential 请求头进入 outer 请求；未匹配 path rewrite 的请求不得自动获得模型语义
 ### Requirement: ingress 本地监听强制走回环
 
-系统须（SHALL）将每条 ingress 的本地监听 `host` 强制为 `127.0.0.1`、`port` 由 tngui 自动选取并注入——处理 `mapping` 的 `in`、`http_proxy` 的 `proxy_listen`：tngui 在拉起 tng 前以批探测选取空闲回环端口并先验避让对外端口（见"注入端口批探测并避让对外端口"；与"控制面 host 强制走回环地址""管控端口自动选取"同向）注入为该 ingress 本地监听 `port`、host 强制 `127.0.0.1`，覆盖用户任何 host/port 输入。ingress 本地监听 `host`/`port` 不出现在用户配置、结构化控件与原始 JSON 视图（与 `control_interface.restful` 同向向用户隐藏）；外部客户端不直连该 ingress 本地监听端口，而经 tngui 反向代理对外入口（见"tngui 反向代理对外暴露推理入口并注入 x-model 头"）。用户在 ingress 编辑器行 1 所配的"本机端口 + 对外绑定 host"是 tngui 反代对外绑定，非 tng ingress 本地监听。
+系统须（SHALL）将每条 ingress 的本地监听 `host` 强制为 `127.0.0.1`、`port` 由 tngui 自动选取并注入——处理 `mapping` 的 `in`、`http_proxy` 的 `proxy_listen`：tngui 在拉起 tng 前以批探测选取空闲回环端口并先验避让对外端口（见"注入端口批探测并避让对外端口"；与"控制面 host 强制走回环地址""管控端口自动选取"同向）注入为该 ingress 本地监听 `port`、host 强制 `127.0.0.1`，覆盖用户任何 host/port 输入。ingress 本地监听 `host`/`port` 不出现在用户配置、结构化控件与原始 JSON 视图（与 `control_interface.restful` 同向向用户隐藏）；外部客户端不直连该 ingress 本地监听端口，而经 tngui 反向代理对外入口（见"tngui 反向代理作为 pre-TNG path 注入代理"）。用户在 ingress 编辑器行 1 所配的"本机端口 + 对外绑定 host"是 tngui 反代对外绑定，非 tng ingress 本地监听。
 
 #### Scenario: 用户缺省或写非回环 listen host
 
@@ -961,6 +895,8 @@
 
 - **WHEN** 渲染"设置"视图的结构化控件或原始 JSON 视图
 - **THEN** 界面不展示 tng ingress 本地监听的 `host` 或 `port`（对用户隐藏，由 tngui 启动时注入）；用户可见的"本机端口"是 tngui 反代对外绑定
+
+
 ### Requirement: ingress 的 no_ra 与 verify 互斥序列化
 
 系统须（SHALL）为当前唯一 ingress 提供远程证明开关，并按以下互斥规则序列化：开关开启即 `no_ra=false`（默认）时序列化含 `verify = { model: "passport", as_provider: "tpm" }` 且不含 `no_ra` 键；开关关闭即 `no_ra=true` 时序列化含 `"no_ra": true` 且不含 `verify`。系统绝不（MUST NOT）同时输出 `no_ra` 与 `verify`，也绝不（MUST NOT）恒定平铺 `no_ra` 布尔，且绝不（MUST NOT）向用户提供编辑 `verify.model` / `verify.as_provider` 的结构化控件。导入 JSON、原始 JSON 应用回填或既有设置中的自定义 verify 字段须（SHALL）被标准化为默认值。
@@ -1191,13 +1127,13 @@
 - **THEN** 该产物“客户端版本”一致（同一 `CARGO_PKG_VERSION`），“操作系统”反映其编译期平台
 ### Requirement: tngui 反向代理作为 pre-TNG path 注入代理
 
-系统须（SHALL）在 tng 运行期间由 tngui 自身运行常驻 HTTP 反向代理作为推理对外入口。反代随 tng 启动/停止而启/停，并把推理请求转发到 tng 内部 ingress 本地监听，按 TNG OHTTP path 模型契约执行 pre-TNG path 注入；响应回传给客户端。系统绝不（MUST NOT）把 tng ingress 本地监听端口直接暴露给外部客户端，也绝不（MUST NOT）链接任何 tng crate。
+系统须（SHALL）在 tng 运行期间由 tngui 自身运行常驻 HTTP 反向代理作为推理对外入口。反代随 tng 启动/停止而启/停，并把推理请求转发到 tng 内部 ingress 本地监听，按本仓库记录的 client-side pre-TNG path 注入行为执行模型 path 注入；跨组件模型语义以中心契约为准，tngui 不另设模型注册或授权语义；响应回传给客户端。系统绝不（MUST NOT）把 tng ingress 本地监听端口直接暴露给外部客户端，也绝不（MUST NOT）链接任何 tng crate。
 
-对 `POST /v1/chat/completions` 与 `POST /v1/messages`，反代须（SHALL）将 body 按 UTF-8 JSON object 解析，读取顶层字符串 `model`，trim 后做单一路径 segment percent-encoding，并把 path 改写为 `/models/{encoded-model-segment}{original-path}`。请求 body 字节、query、method 以及 `Authorization`、`x-api-key`、`Content-Type` 须保留。反代须在 model 缺失、不是字符串、trim 后为空、body 不是合法 UTF-8 JSON object 时返回 400；超过 10 MiB 返回 413；以上失败均不得转发 TNG。
+对 `POST /v1/chat/completions` 与 `POST /v1/messages`，反代须（SHALL）将 body 按 UTF-8 JSON object 解析，读取顶层字符串 `model`，把该确切字符串做单一路径 segment percent-encoding，并把 path 改写为 `/models/{encoded-model-segment}{original-path}`。反代不得对 `body.model` 执行 trim、大小写转换或其他本地格式化。请求 body 字节、query、method 以及 `Authorization`、`x-api-key`、`Content-Type` 须保留。反代须在 `model` 缺失、不是字符串、为空字符串、或 body 不是合法 UTF-8 JSON object 时返回 400；超过 10 MiB 返回 413；以上失败均不得转发 TNG。
 
-对精确的 `GET /v1/models`，反代须（SHALL）作为模型发现例外直接发往当前生效 ingress 指向的 capi origin，不建立到 tng 内部 ingress 本地监听的连接，也不走 OHTTP/path-model 链路。该直连分支须（SHALL）保留请求 query 与业务认证头，使用原始 `/v1/models` path，不做模型 path 注入，不生成、读取或使用 `x-model`，并把 capi 的响应返回给客户端。若无法从当前 ingress 得出有效 capi origin，或 capi 连接失败，反代须（SHALL）返回明确的模型发现失败响应，绝不（MUST NOT）静默改经 tng 转发。
+对精确的 `GET /v1/models`，反代须（SHALL）作为模型发现例外直接发往当前生效 ingress 指向的 capi origin，不建立到 tng 内部 ingress 本地监听的连接，也不走 OHTTP/path-model 链路。该直连分支是 tngui 的本地模型发现例外：它须（SHALL）保留请求 query 与业务认证头，使用原始 `/v1/models` path，不做模型 path 注入，不生成、读取或使用 `x-model`，并把响应返回给客户端；tngui 不得据此声明全局注册或授权能力。若无法从当前 ingress 得出有效 capi origin，或 capi 连接失败，反代须（SHALL）返回明确的模型发现失败响应，绝不（MUST NOT）静默改经 tng 转发。
 
-反代绝不（MUST NOT）用 `x-model` 作为模型身份；客户端携带的 `x-model` 不得影响 path 模型或鉴权结果。非模型推理端点的请求不产生模型语义，可按通用反代规则转发。
+反代绝不（MUST NOT）将 `x-model` 用作模型身份；客户端携带的 `x-model` 不得影响 path 注入结果。非模型推理端点的请求不产生模型语义，可按通用反代规则转发。
 
 #### Scenario: 反代随 tng 生命周期启停
 
@@ -1207,7 +1143,7 @@
 #### Scenario: OpenAI 请求注入模型路径
 
 - **WHEN** 客户端 `POST /v1/chat/completions` 携带 JSON body `{"model":" model-a "}` 和 `Authorization`
-- **THEN** 反代不改写 body，并把内部请求路径改写为 `/models/model-a/v1/chat/completions`
+- **THEN** 反代不改写 body 尾部空白，并把内部请求路径改写为 `/models/model%20a/v1/chat/completions`； path 身份与原 `body.model` 字符串保持一致
 
 #### Scenario: Anthropic 请求注入模型路径
 
@@ -1226,7 +1162,7 @@
 
 #### Scenario: 非法 model 阻断在 pre-TNG proxy
 
-- **WHEN** 支持端点的 body 缺失 `model`、`model` 不是字符串、为空/纯空白，或不是 JSON object
+- **WHEN** 支持端点的 body 缺失 `model`、`model` 不是字符串、`model` 为空字符串，或不是 JSON object
 - **THEN** 反代返回 HTTP 400，不建立 TNG 请求
 
 #### Scenario: 超大请求返回 413
@@ -1264,9 +1200,10 @@
 - **WHEN** 外部客户端请求推理入口
 - **THEN** 客户端连接的是 tngui 反代对外端点，而非 tng 的内部 ingress 本地监听端口
 
+
 ### Requirement: 注入端口批探测并避让对外端口
 
-tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`control_interface.restful` 的管控端口与各 ingress 内部本地监听端口——一次性取齐：在同一回环面上**顺序 `bind` `127.0.0.1:0` 共 n 个 listener 并同时持住**（n = 1(管控) + ingress 条数），收集各自分配的端口后**整批统一释放**。因 n 个 listener 同时持在，系统绝不（MUST NOT）出现两个注入端口取到同一端口号。系统须（SHALL）将每条 ingress 的反代对外端口（用户"本机端口"，见"tngui 反向代理对外暴露推理入口并注入 x-model 头"）列为禁止集合：注入的管控端口与各内部端口绝不（MUST NOT）等于任一对外端口。若某次批探测结果命中禁止集合，系统须（SHALL）整批丢弃并重试批探测（有界重试，避免死循环），直到全部不命中为止；重试耗尽则启动失败并明示。
+tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`control_interface.restful` 的管控端口与各 ingress 内部本地监听端口——一次性取齐：在同一回环面上**顺序 `bind` `127.0.0.1:0` 共 n 个 listener 并同时持住**（n = 1(管控) + ingress 条数），收集各自分配的端口后**整批统一释放**。因 n 个 listener 同时持在，系统绝不（MUST NOT）出现两个注入端口取到同一端口号。系统须（SHALL）将每条 ingress 的反代对外端口（用户"本机端口"，见"tngui 反向代理作为 pre-TNG path 注入代理"）列为禁止集合：注入的管控端口与各内部端口绝不（MUST NOT）等于任一对外端口。若某次批探测结果命中禁止集合，系统须（SHALL）整批丢弃并重试批探测（有界重试，避免死循环），直到全部不命中为止；重试耗尽则启动失败并明示。
 
 #### Scenario: 批取端口互不相同
 
@@ -1282,6 +1219,8 @@ tngui 须（SHALL）以批探测为拉起 tng 注入的全部回环端口——`
 
 - **WHEN** 批探测执行时
 - **THEN** n 个 listener 先全部 `bind` 并同时持住、收齐端口后再统一释放，而非"取号即放、逐个单点探测"
+
+
 ### Requirement: 用户可编辑端口限制为有效 TCP 端口
 
 系统须（SHALL）将用户显式编辑的服务端口取值限定为 `1~65535`。该要求覆盖反代对外绑定端口、`mapping` 形态的远端端口和 `http_proxy` 形态的目标端口；服务端口 `0` 不是有效用户输入，越界数字也不是有效用户输入。系统绝不（MUST NOT）因表单输入缺失或越界而静默回退为另一个端口。

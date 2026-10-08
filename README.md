@@ -1,11 +1,13 @@
 # tngui — TNG GUI 包装器
 
 TNG（可信网络网关）的桌面 GUI 包装器：配置编辑 + 启停 + 只读状态/日志。
-与 tng **松耦合**——不链接任何 tng 代码，仅通过 (A) `tng launch` CLI、(B) 只读控制面 REST、(C) 子进程输出捕获 三条契约对接。
+与 tng **松耦合**——不链接任何 tng 代码，仅通过 (A) `tng launch` CLI、(B) 只读控制面 REST、(C) 子进程输出捕获 三条契约对接。tngui 是图形操作系统上的 client-side `pre-tng-proxy` 与 `tng-ingress` 特化实现，不定义服务端授权、全局模型注册或跨组件路由。
 
-tngui 自带 pre-TNG reverse proxy：对 `POST /v1/chat/completions` 与 `POST /v1/messages`，从请求体顶层 `body.model` 读取模型身份，生成 `/models/{模型名}/...` 的 pre-TNG path，并保留 query、credential header 和原始 body 字节。远端必须按 capi 的 path 模型机制路由与鉴权；支持的模型请求必须携带有效的 `body.model`。
+跨组件语义以 `trust-inference` 仓库中的中心契约为准；本仓库只描述 tngui 自身行为，不复制或改写中心契约。本地文档边界见 [docs/tngui-doc-boundaries.md](docs/tngui-doc-boundaries.md)。
 
-对精确的 `GET /v1/models`，tngui 保留原始 query 与 `Authorization` / `x-api-key` 业务认证头，并忽略 `x-model`，直接发往当前 ingress 对应的 capi origin。该例外不经过 tng ingress，也不进入 OHTTP / 远程证明链路，不做模型 path 注入或 body 改写；若 capi origin 缺失、无效或不可达，返回明确的模型发现失败响应，而不是空模型清单。推理请求仍保持原有路径，并继续通过 TNG 加密与远程证明链路。
+tngui 自带本机 pre-TNG reverse proxy。对 `POST /v1/chat/completions` 与 `POST /v1/messages`，它读取请求体顶层字符串 `body.model`，把该确切模型字符串编码为单一 URI path segment 生成 `/models/{encoded-model-segment}{original-path}`，并保留 query、credential header 和原始 body 字节。path 生成不做本地认证或路由决策；`x-model` 不作为模型身份。例如：`{"model":"auto"}` 对应 `/models/auto/...`；`{"model":"provider/model"}` 对应 `/models/provider%2Fmodel/...`。
+
+对精确的 `GET /v1/models`，tngui 保留原始 query 与 `Authorization` / `x-api-key` 业务认证头，直接发往当前 ingress 指向的 capi origin。这是 tngui 本地模型发现例外：不经 tng ingress，也不进入 OHTTP / RA 链路，不做模型 path 注入或 body 改写；若 capi origin 缺失、无效或不可达，返回明确的模型发现失败响应，而不是空模型清单。该例外的中心安全边界和 capi origin 来源当前 unresolved；tngui 不据此声明全局模型目录、注册或路由能力。推理请求仍通过 TNG 加密与远程证明链路。
 
 ## 开发
 
