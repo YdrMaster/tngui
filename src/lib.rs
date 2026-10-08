@@ -7,7 +7,7 @@
 //! - `proxy_endpoint`：暴露反代各 ingress 对外端点（供前端渲染 `API Base URL` 与推理目标）
 //! - `get_status`：轮询控制面 `/livez|/readyz|/status/`
 //! - `get_output`：取子进程 stdout/stderr 快照
-//! - `send_inference_stream`：经反代对外端点发流式多轮推理（reasoning/content typed delta 经 Channel 推送；`x-model` 由反代按 body.model 注入，此处不注）
+//! - `send_inference_stream`：经反代对外端点发流式多轮推理（reasoning/content typed delta 经 Channel 推送；模型身份只按 `body.model` 经反代生成 path，`x-model` 不作为身份）
 //! - `stop_inference_stream`：按请求 ID 取消进行中的推理流；成功停止返回 `stopped`，不是失败
 
 use std::collections::HashMap;
@@ -21,9 +21,10 @@ use tauri::{Builder, generate_context, generate_handler};
 use tokio::sync::{Mutex, oneshot};
 
 use tngui_core::{
-    InferenceDelta, InferenceEffort, InferenceMessage, InferenceStreamOutcome, ProxyHandle,
-    StatusReport, TngSupervisor, fetch_status, pick_launch_ports, prepare_launch,
-    sanitize_user_config_for_tng, start_proxy, write_runtime_config,
+    InferenceDelta, InferenceEffort, InferenceMessage, InferenceStreamOutcome, ProxyDiagnostics,
+    ProxyDiagnosticsSnapshot, ProxyHandle, StatusReport, TngSupervisor, fetch_status,
+    pick_launch_ports, prepare_launch, sanitize_user_config_for_tng, start_proxy,
+    write_runtime_config,
 };
 
 /// 控制端口（启动时注入）；状态轮询读取。
@@ -213,6 +214,16 @@ async fn proxy_endpoint(state: State<'_, AppState>) -> Result<ProxyEndpoints, St
         .as_ref()
         .map(|(_, eps)| eps.clone())
         .unwrap_or_default())
+}
+
+/// 当前反代会话本地诊断快照。未启动时返回保守零值，不读取外部服务。
+#[tauri::command]
+async fn proxy_diagnostics(state: State<'_, AppState>) -> Result<ProxyDiagnosticsSnapshot, String> {
+    let pguard = state.proxy.lock().await;
+    Ok(pguard
+        .as_ref()
+        .map(|(handle, _)| handle.diagnostics())
+        .unwrap_or_else(|| ProxyDiagnostics::conservative_snapshot(false)))
 }
 
 /// 轮询状态。尚未启动 tng 时返回不可达报告（前端显示红灯）。
@@ -693,7 +704,7 @@ async fn save_config(app: AppHandle, config_json: String) -> Result<(), String> 
     Ok(())
 }
 
-/// 通过 tngui 反代对外端点发送流式多轮推理请求（`x-model` 由反代按 body.model 注入，
+/// 通过 tngui 反代对外端点发送流式多轮推理请求（模型身份只按 `body.model` 经反代生成 path；
 /// 此处不注），body 恒含 `"stream": true` 与思考强度。每节非空
 /// `choices[0].delta.reasoning` / `choices[0].delta.content` 经 typed `on_delta`
 /// Channel 推送；收到 `data: [DONE]` 后命令成功返回。任何失败（连接失败、非 2xx、
@@ -865,6 +876,7 @@ pub fn run() {
             launch_tng,
             stop_tng,
             proxy_endpoint,
+            proxy_diagnostics,
             get_status,
             get_output,
             export_tng_log,

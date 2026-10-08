@@ -566,3 +566,9 @@ button, input, textarea { font: inherit; }
 @media (prefers-reduced-motion: reduce) {
   @keyframes stream-caret { 0%, 100% { opacity: 1; } }
 }
+.proxy-diagnostics { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--split); border-radius: 10px; background: var(--bg-secondary, #fafafa); }
+.proxy-diagnostics-header { display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
+.proxy-diagnostics-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 12px; margin: 12px 0 0; }
+.proxy-diagnostics-grid dt { color: var(--text-secondary); font-size: 12px; }
+.proxy-diagnostics-grid dd { margin: 2px 0 0; font-size: 18px; font-weight: 650; }
+.proxy-diagnostics-note { margin: 10px 0 0; color: var(--text-secondary); font-size: 12px; }

@@ -17,6 +17,8 @@
 //! 原生 TCP：本沙箱网络受限、避免拉新依赖、与 codebase 风格一致，且非流式单跳足够）。
 //! 不链接任何 tng crate；以 tokio spawned task 托管，`stop` 时 abort 全部监听。
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -45,6 +47,80 @@ pub struct ProxyRoute {
     pub models_origin: Option<String>,
 }
 
+/// 本地反代诊断快照。字段是固定类别，不含任何动态 label。
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct ProxyDiagnosticsSnapshot {
+    pub proxy_running: bool,
+    pub identity_valid_total: u64,
+    pub identity_rejected_total: u64,
+    pub payload_rejected_total: u64,
+    pub discovery_success_total: u64,
+    pub discovery_failure_total: u64,
+    pub upstream_failure_total: u64,
+}
+
+/// 当前反代会话内累计的固定类别计数。
+#[derive(Debug, Default)]
+pub struct ProxyDiagnostics {
+    identity_valid_total: AtomicU64,
+    identity_rejected_total: AtomicU64,
+    payload_rejected_total: AtomicU64,
+    discovery_success_total: AtomicU64,
+    discovery_failure_total: AtomicU64,
+    upstream_failure_total: AtomicU64,
+}
+
+impl ProxyDiagnostics {
+    fn increment_identity_valid(&self) {
+        self.identity_valid_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn increment_identity_rejected(&self) {
+        self.identity_rejected_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn increment_payload_rejected(&self) {
+        self.payload_rejected_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn increment_discovery_success(&self) {
+        self.discovery_success_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn increment_discovery_failure(&self) {
+        self.discovery_failure_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn increment_upstream_failure(&self) {
+        self.upstream_failure_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Tauri 调用方在无句柄时使用的保守零值。
+    pub fn conservative_snapshot(proxy_running: bool) -> ProxyDiagnosticsSnapshot {
+        ProxyDiagnosticsSnapshot {
+            proxy_running,
+            identity_valid_total: 0,
+            identity_rejected_total: 0,
+            payload_rejected_total: 0,
+            discovery_success_total: 0,
+            discovery_failure_total: 0,
+            upstream_failure_total: 0,
+        }
+    }
+
+    fn snapshot(&self, proxy_running: bool) -> ProxyDiagnosticsSnapshot {
+        ProxyDiagnosticsSnapshot {
+            proxy_running,
+            identity_valid_total: self.identity_valid_total.load(Ordering::Relaxed),
+            identity_rejected_total: self.identity_rejected_total.load(Ordering::Relaxed),
+            payload_rejected_total: self.payload_rejected_total.load(Ordering::Relaxed),
+            discovery_success_total: self.discovery_success_total.load(Ordering::Relaxed),
+            discovery_failure_total: self.discovery_failure_total.load(Ordering::Relaxed),
+            upstream_failure_total: self.upstream_failure_total.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// 一个对外监听器的运行句柄；`stop` 即停该监听。
 pub struct ProxyListener {
     route: ProxyRoute,
@@ -68,9 +144,15 @@ impl ProxyListener {
 /// 全批反代路由的运行句柄。
 pub struct ProxyHandle {
     listeners: Vec<ProxyListener>,
+    diagnostics: Arc<ProxyDiagnostics>,
 }
 
 impl ProxyHandle {
+    /// 当前会话的本地诊断快照；不包含敏感请求内容或动态标签。
+    pub fn diagnostics(&self) -> ProxyDiagnosticsSnapshot {
+        self.diagnostics.snapshot(!self.listeners.is_empty())
+    }
+
     /// 按启用路由顺序的对外端点列表（供 Tauri `proxy_endpoint` 暴露给前端）。
     pub fn endpoints(&self) -> Vec<(String, u16)> {
         self.listeners.iter().map(|l| l.endpoint()).collect()
@@ -87,9 +169,10 @@ impl ProxyHandle {
 /// 对每条 route 起一个对外监听器。任一绑定失败即整批失败并回滚已起的（fail-fast：
 /// 不留 tng 在跑却缺对外入口的状态）。
 pub async fn start_proxy(routes: Vec<ProxyRoute>) -> Result<ProxyHandle, String> {
+    let diagnostics = Arc::new(ProxyDiagnostics::default());
     let mut listeners = Vec::with_capacity(routes.len());
     for route in routes {
-        match start_one(route).await {
+        match start_one(route, diagnostics.clone()).await {
             Ok(l) => listeners.push(l),
             Err(e) => {
                 for l in listeners {
@@ -99,10 +182,16 @@ pub async fn start_proxy(routes: Vec<ProxyRoute>) -> Result<ProxyHandle, String>
             }
         }
     }
-    Ok(ProxyHandle { listeners })
+    Ok(ProxyHandle {
+        listeners,
+        diagnostics,
+    })
 }
 
-async fn start_one(route: ProxyRoute) -> Result<ProxyListener, String> {
+async fn start_one(
+    route: ProxyRoute,
+    diagnostics: Arc<ProxyDiagnostics>,
+) -> Result<ProxyListener, String> {
     let bind = format!("{}:{}", route.out_host, route.out_port);
     let listener = TcpListener::bind(&bind)
         .await
@@ -124,8 +213,9 @@ async fn start_one(route: ProxyRoute) -> Result<ProxyListener, String> {
                     let port = internal_port;
                     let rh = remote_host.clone();
                     let mo = models_origin.clone();
+                    let dg = diagnostics.clone();
                     tokio::spawn(async move {
-                        let _ = handle_conn(stream, port, rh, mo).await;
+                        let _ = handle_conn(stream, port, rh, mo, dg).await;
                     });
                 }
             }
@@ -147,6 +237,7 @@ async fn handle_conn(
     internal_port: u16,
     remote_host: String,
     models_origin: Option<String>,
+    diagnostics: Arc<ProxyDiagnostics>,
 ) -> std::io::Result<()> {
     // 1. 读请求头（到 \r\n\r\n）
     let (buf, body_off) = match read_until_double_crlf(&mut client).await? {
@@ -164,6 +255,7 @@ async fn handle_conn(
     let mut body: Vec<u8> = buf[body_off..].to_vec();
     if let Some(n) = content_length {
         if n > BODY_LIMIT {
+            diagnostics.increment_payload_rejected();
             let mut remaining = n.saturating_sub(body.len());
             let mut discard = [0u8; 8192];
             while remaining > 0 {
@@ -185,13 +277,22 @@ async fn handle_conn(
     if is_exact_model_discovery(&method, &path) {
         return match models_origin.as_deref() {
             Some(origin) => match direct_model_request(origin, &path, &headers).await {
-                Ok(response) => write_direct_response(&mut client, response).await,
+                Ok(response) => {
+                    if (200..300).contains(&response.status) {
+                        diagnostics.increment_discovery_success();
+                    } else {
+                        diagnostics.increment_discovery_failure();
+                    }
+                    write_direct_response(&mut client, response).await
+                }
                 Err(message) => {
+                    diagnostics.increment_discovery_failure();
                     write_model_discovery_failure(&mut client, &format!("请求失败: {message}"))
                         .await
                 }
             },
             None => {
+                diagnostics.increment_discovery_failure();
                 write_model_discovery_failure(
                     &mut client,
                     "当前 ingress 未提供有效的 capi 模型发现地址",
@@ -206,9 +307,13 @@ async fn handle_conn(
     let path = match resolve_model_path(&method, &path, &body) {
         ModelOverride::Unsupported => path,
         ModelOverride::Invalid => {
+            diagnostics.increment_identity_rejected();
             return write_simple_response(&mut client, 400, "Bad Request").await;
         }
-        ModelOverride::Path(v) => v,
+        ModelOverride::Path(v) => {
+            diagnostics.increment_identity_valid();
+            v
+        }
     };
 
     // 4. 剥离 hop-by-hop 头；对 upstream 设 Connection: close。
@@ -227,29 +332,61 @@ async fn handle_conn(
     set_header(&mut headers, "content-length", &body.len().to_string());
 
     // 5. 转发到 upstream 127.0.0.1:<internal_port>
-    let up = tokio::time::timeout(
+    let up = match tokio::time::timeout(
         UPSTREAM_TIMEOUT,
         TcpStream::connect(("127.0.0.1", internal_port)),
     )
     .await
-    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "连接上游超时"))??;
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            diagnostics.increment_upstream_failure();
+            return Err(error.into());
+        }
+        Err(_) => {
+            diagnostics.increment_upstream_failure();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "连接上游超时",
+            ));
+        }
+    };
     let (mut up_rd, mut up_wr) = up.into_split();
 
     let fwd = build_request_bytes(&method, &path, &headers, &body);
-    up_wr.write_all(&fwd).await?;
-    up_wr.flush().await?;
+    if let Err(error) = up_wr.write_all(&fwd).await {
+        diagnostics.increment_upstream_failure();
+        return Err(error);
+    }
+    if let Err(error) = up_wr.flush().await {
+        diagnostics.increment_upstream_failure();
+        return Err(error);
+    }
 
     // 6. 原样回传：把 upstream 字节逐块透传给客户端，直到 upstream EOF（其对 upstream 发了
     //    Connection: close，响应完成后关闭）。逐块写出即流式——SSE 响应经此逐 token 到达客户端。
     let mut pipe = vec![0u8; 8192];
     loop {
-        let n = tokio::time::timeout(UPSTREAM_TIMEOUT, up_rd.read(&mut pipe))
-            .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "读上游超时"))??;
+        let n = match tokio::time::timeout(UPSTREAM_TIMEOUT, up_rd.read(&mut pipe)).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(error)) => {
+                diagnostics.increment_upstream_failure();
+                return Err(error);
+            }
+            Err(_) => {
+                diagnostics.increment_upstream_failure();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "读上游超时",
+                ));
+            }
+        };
         if n == 0 {
             break;
         }
-        client.write_all(&pipe[..n]).await?;
+        if let Err(error) = client.write_all(&pipe[..n]).await {
+            return Err(error);
+        }
     }
     client.flush().await?;
     Ok(())
@@ -397,13 +534,13 @@ fn resolve_model_path(method: &str, path_with_query: &str, body: &[u8]) -> Model
     })
 }
 
-/// 解析 UTF-8 JSON object 顶层字符串 `model`，trim 后合格才返回。
+/// 解析 UTF-8 JSON object 顶层字符串 `model`；字符串身份保持原样，不做 trim。
 fn extract_body_model(body: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
     if !v.is_object() {
         return None;
     }
-    let model = v.get("model")?.as_str()?.trim().to_string();
+    let model = v.get("model")?.as_str()?.to_string();
     if model.is_empty() { None } else { Some(model) }
 }
 
@@ -721,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_path_trims_and_preserves_query() {
+    fn resolve_model_path_preserves_model_whitespace_and_query() {
         let got = resolve_model_path(
             "POST",
             "/v1/chat/completions?trace=1",
@@ -729,7 +866,7 @@ mod tests {
         );
         assert_eq!(
             got,
-            ModelOverride::Path("/models/model-a/v1/chat/completions?trace=1".to_string())
+            ModelOverride::Path("/models/%20model-a%20/v1/chat/completions?trace=1".to_string(),)
         );
     }
 
@@ -743,11 +880,35 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_are_fixed_process_local_categories() {
+        let diagnostics = ProxyDiagnostics::default();
+        diagnostics.increment_identity_valid();
+        diagnostics.increment_identity_rejected();
+        diagnostics.increment_identity_rejected();
+        diagnostics.increment_payload_rejected();
+        diagnostics.increment_discovery_success();
+        diagnostics.increment_discovery_failure();
+        diagnostics.increment_upstream_failure();
+        let snapshot = diagnostics.snapshot(true);
+        assert_eq!(
+            snapshot,
+            ProxyDiagnosticsSnapshot {
+                proxy_running: true,
+                identity_valid_total: 1,
+                identity_rejected_total: 2,
+                payload_rejected_total: 1,
+                discovery_success_total: 1,
+                discovery_failure_total: 1,
+                upstream_failure_total: 1,
+            }
+        );
+    }
+
+    #[test]
     fn resolve_model_path_rejects_model_semantics_without_forward() {
         for body in [
             b"{}".as_slice(),
             br#"{"model":""}"#,
-            br#"{"model":"   "}"#,
             br#"{"model":1}"#,
             b"[1,2]",
             b"not-json",
@@ -855,7 +1016,6 @@ Connection: close
             vec![],
         )
         .await;
-        handle.stop().await;
         assert!(response.starts_with("HTTP/1.1 200"), "response={response}");
         assert!(response.contains("model-a"));
         let got = received
@@ -880,6 +1040,18 @@ Connection: close
                 .iter()
                 .any(|(k, _)| k.eq_ignore_ascii_case("x-model"))
         );
+        assert_eq!(
+            handle.diagnostics(),
+            ProxyDiagnosticsSnapshot {
+                proxy_running: true,
+                identity_valid_total: 0,
+                identity_rejected_total: 0,
+                payload_rejected_total: 0,
+                discovery_success_total: 1,
+                discovery_failure_total: 0,
+                upstream_failure_total: 0,
+            }
+        );
     }
 
     #[tokio::test]
@@ -896,12 +1068,13 @@ Connection: close
         .await
         .unwrap();
         let response = send_request_bytes(out_port, "GET", "/v1/models", &[], vec![]).await;
-        handle.stop().await;
         assert!(response.starts_with("HTTP/1.1 502"), "response={response}");
         assert!(
             response.contains("请求 capi 模型列表失败"),
             "response={response}"
         );
+        assert_eq!(handle.diagnostics().discovery_failure_total, 1);
+        handle.stop().await;
     }
 
     #[tokio::test]
@@ -917,10 +1090,119 @@ Connection: close
         .await
         .unwrap();
         let response = send_request_bytes(out_port, "GET", "/v1/models", &[], vec![]).await;
-        handle.stop().await;
         assert!(response.starts_with("HTTP/1.1 502"), "response={response}");
         assert!(response.contains("当前 ingress 未提供有效的 capi 模型发现地址"));
+        assert_eq!(handle.diagnostics().discovery_failure_total, 1);
+        handle.stop().await;
     }
+    #[tokio::test]
+    async fn proxy_diagnostics_snapshot_classifies_exact_model_requests() {
+        let up_port = unique_port();
+        let out_port = unique_port();
+        let received = Arc::new(Mutex::new(None));
+        let ready = Arc::new(Notify::new());
+        {
+            let received = received.clone();
+            let ready = ready.clone();
+            tokio::spawn(async move {
+                mock_upstream(up_port, received, ready).await;
+            });
+        }
+        ready.notified().await;
+        let handle = start_proxy(vec![ProxyRoute {
+            out_host: BIND_LOCALHOST.to_string(),
+            out_port,
+            internal_port: up_port,
+            remote_host: "10.0.0.1".to_string(),
+            models_origin: None,
+        }])
+        .await
+        .unwrap();
+
+        // Supported endpoint with a whitespace model identity: percent-encode
+        // it as one segment and keep the request body untouched.
+        let response = send_request_bytes(
+            out_port,
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            br#"{"model":" model-a ","messages":[]}"#.to_vec(),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200"), "response={response}");
+        let got = received.lock().await.clone().expect("valid path forwarded");
+        assert_eq!(got.path, "/models/%20model-a%20/v1/chat/completions");
+        assert_eq!(got.body, br#"{"model":" model-a ","messages":[]}"#.to_vec());
+        assert_eq!(
+            handle.diagnostics(),
+            ProxyDiagnosticsSnapshot {
+                proxy_running: true,
+                identity_valid_total: 1,
+                identity_rejected_total: 0,
+                payload_rejected_total: 0,
+                discovery_success_total: 0,
+                discovery_failure_total: 0,
+                upstream_failure_total: 0,
+            }
+        );
+
+        let response = send_request_bytes(
+            out_port,
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            b"{}".to_vec(),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 400"), "response={response}");
+
+        let response = send_request_bytes(
+            out_port,
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            vec![b' '; BODY_LIMIT + 1],
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 413"), "response={response}");
+
+        let snapshot = handle.diagnostics();
+        assert_eq!(snapshot.identity_valid_total, 1);
+        assert_eq!(snapshot.identity_rejected_total, 1);
+        assert_eq!(snapshot.payload_rejected_total, 1);
+        assert_eq!(snapshot.discovery_success_total, 0);
+        assert_eq!(snapshot.discovery_failure_total, 0);
+        assert_eq!(snapshot.upstream_failure_total, 0);
+        handle.stop().await;
+    }
+
+    #[tokio::test]
+    async fn upstream_connect_failure_bumps_upstream_category() {
+        let out_port = unique_port();
+        let internal_port = unique_port();
+        let handle = start_proxy(vec![ProxyRoute {
+            out_host: BIND_LOCALHOST.to_string(),
+            out_port,
+            internal_port,
+            remote_host: "10.0.0.1".to_string(),
+            models_origin: None,
+        }])
+        .await
+        .unwrap();
+        let response = send_request_bytes(
+            out_port,
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            br#"{"model":"m"}"#.to_vec(),
+        )
+        .await;
+        // Upstream failure may close before a complete response is readable.
+        assert!(response.is_empty() || !response.starts_with("HTTP/1.1 2"));
+        assert_eq!(handle.diagnostics().upstream_failure_total, 1);
+        handle.stop().await;
+    }
+
     #[tokio::test]
     async fn injects_model_path_and_preserves_query_body_credentials() {
         let json = br#"{"model":" model-a ", "messages":[]}"#;
@@ -939,7 +1221,10 @@ Connection: close
         assert!(resp.contains(r#""ok":true"#), "resp={resp}");
         let got = got.expect("upstream should receive request");
         assert_eq!(got.method, "POST");
-        assert_eq!(got.path, "/models/model-a/v1/chat/completions?trace=1");
+        assert_eq!(
+            got.path,
+            "/models/%20model-a%20/v1/chat/completions?trace=1"
+        );
         assert_eq!(got.body, json);
     }
 
@@ -1019,7 +1304,6 @@ Connection: close
         for body in [
             b"{}".as_slice(),
             b"{\"messages\":[]}",
-            b"{\"model\":\"   \"}",
             b"{\"model\":1}",
             b"[1,2,3]",
             b"not-json",

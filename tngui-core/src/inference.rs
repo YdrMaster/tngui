@@ -945,7 +945,7 @@ mod tests {
     }
 
     /// 多轮 body + 思考强度 + 流式契约：模型身份只在 body（由反代转 path），绝不注入
-    /// x-model；body 恒带 stream:true 与 reasoning_effort；成功流逐 delta 顺序回调。
+    /// 不注入 `x-model`；body 恒带 stream:true 与 reasoning_effort；成功流逐 delta 顺序回调。
     #[tokio::test]
     async fn send_inference_stream_posts_identity_multiturn_stream_reasoning_and_no_x_model() {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

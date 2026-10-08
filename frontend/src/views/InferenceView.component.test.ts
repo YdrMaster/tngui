@@ -44,6 +44,7 @@ vi.mock("ant-design-vue", async () => {
 
 const tauriMocks = vi.hoisted(() => ({
   proxyEndpoint: vi.fn(),
+  proxyDiagnostics: vi.fn(),
   listModels: vi.fn(),
   sendInferenceStream: vi.fn(),
   stopInferenceStream: vi.fn(),
@@ -231,6 +232,15 @@ describe("InferenceView", () => {
     inference.initializeApiKey("test-key");
     inference.failModelDiscovery();
     tauriMocks.proxyEndpoint.mockReset().mockResolvedValue([{ port: 18080 }]);
+    tauriMocks.proxyDiagnostics.mockReset().mockResolvedValue({
+      proxy_running: true,
+      identity_valid_total: 3,
+      identity_rejected_total: 1,
+      payload_rejected_total: 2,
+      discovery_success_total: 4,
+      discovery_failure_total: 1,
+      upstream_failure_total: 0,
+    });
     tauriMocks.listModels.mockReset().mockResolvedValue(["model-a"]);
     tauriMocks.sendInferenceStream.mockReset().mockResolvedValue("completed");
     tauriMocks.stopInferenceStream.mockReset().mockResolvedValue(true);
@@ -267,6 +277,52 @@ describe("InferenceView", () => {
     expect(select.props("disabled")).toBe(true);
     expect(select.props("placeholder")).toBe("模型列表加载失败");
     expect(messageMocks.error).toHaveBeenCalledWith(expect.stringContaining("gateway down"));
+  });
+
+  it("renders read-only fixed proxy diagnostic categories and states", async () => {
+    const wrapper = await mountAndLoadModels(["model-a"]);
+    const section = wrapper.find('[aria-label="反代本地诊断"]');
+    expect(section.exists()).toBe(true);
+    expect(section.text()).toContain("运行");
+    expect(section.text()).toContain("身份拒绝");
+    expect(section.text()).toContain("4");
+    expect(section.text()).toContain("模型授权");
+    expect(section.text()).not.toContain("model-a");
+  });
+
+  it("refreshes session diagnostics and resets them after restart polling", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.find('[aria-label="反代本地诊断"]').text()).toContain("运行 · 有失败");
+
+    tauriMocks.proxyDiagnostics.mockResolvedValueOnce({
+      proxy_running: false,
+      identity_valid_total: 0,
+      identity_rejected_total: 0,
+      payload_rejected_total: 0,
+      discovery_success_total: 0,
+      discovery_failure_total: 0,
+      upstream_failure_total: 0,
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    await flushPromises();
+    await nextTick();
+
+    const section = wrapper.find('[aria-label="反代本地诊断"]');
+    expect(section.text()).toContain("未运行");
+    expect(section.text()).not.toContain("运行 · 有失败");
+    expect(tauriMocks.proxyDiagnostics.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps model discovery independent when diagnostic polling fails", async () => {
+    tauriMocks.proxyDiagnostics.mockRejectedValue(new Error("diagnostics unavailable"));
+    const wrapper = await mountAndLoadModels(["model-a"]);
+    const select = wrapper.findComponent(Select);
+    expect(select.props("disabled")).toBe(false);
+    const section = wrapper.find('[aria-label="反代本地诊断"]');
+    expect(section.text()).toContain("未运行");
+    expect(messageMocks.error).not.toHaveBeenCalledWith(expect.stringContaining("diagnostics unavailable"));
   });
 
   it("shows the loading state before model discovery completes", async () => {

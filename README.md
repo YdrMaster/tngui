@@ -9,6 +9,8 @@ tngui 自带本机 pre-TNG reverse proxy。对 `POST /v1/chat/completions` 与 `
 
 对精确的 `GET /v1/models`，tngui 保留原始 query 与 `Authorization` / `x-api-key` 业务认证头，直接发往当前 ingress 指向的 capi origin。这是 tngui 本地模型发现例外：不经 tng ingress，也不进入 OHTTP / RA 链路，不做模型 path 注入或 body 改写；若 capi origin 缺失、无效或不可达，返回明确的模型发现失败响应，而不是空模型清单。该例外的中心安全边界和 capi origin 来源当前 unresolved；tngui 不据此声明全局模型目录、注册或路由能力。推理请求仍通过 TNG 加密与远程证明链路。
 
+反代另有当前会话内的本地诊断快照：界面展示运行状态和身份通过/身份拒绝、请求过大、模型发现成功/发现失败、上游失败计数。快照只在 tngui 进程内存中随当前反代生命周期存在，重启重置，不发送到外部 collector；固定诊断类别不携带模型名、prompt、output、raw API key 或 attestation token，也不表示模型授权结果。
+
 ## 开发
 
 ```bash

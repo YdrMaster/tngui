@@ -7,7 +7,17 @@ import {
 } from "@ant-design/icons-vue";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
 import { useIngressState } from "../composables/useIngressState";
-import { listModels, proxyEndpoint, sendInferenceStream, stopInferenceStream, type InferenceDelta, type InferenceEffort, type InferenceMessage } from "../tauri";
+import {
+  listModels,
+  proxyDiagnostics,
+  proxyEndpoint,
+  sendInferenceStream,
+  stopInferenceStream,
+  type InferenceDelta,
+  type InferenceEffort,
+  type InferenceMessage,
+  type ProxyDiagnostics,
+} from "../tauri";
 import SecureFlow from "../components/SecureFlow.vue";
 import ArchitectureFlow from "../components/ArchitectureFlow.vue";
 import ProtectionItem from "../components/ProtectionItem.vue";
@@ -64,6 +74,7 @@ const sending = ref(false);
 const activeAssistantId = ref<string | undefined>(undefined);
 const transcriptEl = ref<HTMLElement | null>(null);
 const proxyPort = ref<number | null>(null);
+const diagnosticsSnapshot = ref<ProxyDiagnostics | null>(null);
 let proxyTimer: number | undefined;
 let scrollFrame: number | undefined;
 let messageSequence = 0;
@@ -102,6 +113,11 @@ async function fetchProxy() {
     proxyPort.value = eps?.[0]?.port ?? null;
   } catch {
     proxyPort.value = null;
+  }
+  try {
+    diagnosticsSnapshot.value = await proxyDiagnostics();
+  } catch {
+    diagnosticsSnapshot.value = null;
   }
 }
 
@@ -147,6 +163,27 @@ const localEndpoint = computed(() =>
 const modelOptions = computed(() =>
   modelIds.value.map((modelId) => ({ value: modelId, label: modelId })),
 );
+
+/** 反代本地状态：只看当前会话句柄，不代表模型授权或远端健康。 */
+const proxyDiagnosticsState = computed(() => {
+  const snapshot = diagnosticsSnapshot.value;
+  if (!snapshot?.proxy_running) return "未运行";
+  const hasFailure =
+    snapshot.identity_rejected_total > 0 ||
+    snapshot.payload_rejected_total > 0 ||
+    snapshot.discovery_failure_total > 0 ||
+    snapshot.upstream_failure_total > 0;
+  return hasFailure ? "运行 · 有失败" : "运行";
+});
+
+const proxyDiagnosticCounters = computed(() => [
+  { label: "身份通过", value: diagnosticsSnapshot.value?.identity_valid_total ?? 0 },
+  { label: "身份拒绝", value: diagnosticsSnapshot.value?.identity_rejected_total ?? 0 },
+  { label: "请求过大", value: diagnosticsSnapshot.value?.payload_rejected_total ?? 0 },
+  { label: "发现成功", value: diagnosticsSnapshot.value?.discovery_success_total ?? 0 },
+  { label: "发现失败", value: diagnosticsSnapshot.value?.discovery_failure_total ?? 0 },
+  { label: "上游失败", value: diagnosticsSnapshot.value?.upstream_failure_total ?? 0 },
+]);
 
 /** 搜索只用于过滤服务端返回的选项；任意输入文本永远不会成为模型 ID。 */
 const filterModelOption = (input: string, option: unknown): boolean => {
@@ -537,6 +574,24 @@ function assistantBubbleClass(status: ChatStatus): string {
               message="当前无法发送推理请求"
               description="请先恢复网关运行状态、API Key 与模型清单。"
             />
+
+            <div class="proxy-diagnostics" aria-label="反代本地诊断">
+              <div class="proxy-diagnostics-header">
+                <span>反代本地诊断</span>
+                <a-tag :color="proxyDiagnosticsState === '未运行' ? 'default' : proxyDiagnosticsState.includes('有失败') ? 'warning' : 'success'">
+                  {{ proxyDiagnosticsState }}
+                </a-tag>
+              </div>
+              <dl class="proxy-diagnostics-grid">
+                <template v-for="item in proxyDiagnosticCounters" :key="item.label">
+                  <dt>{{ item.label }}</dt>
+                  <dd>{{ item.value }}</dd>
+                </template>
+              </dl>
+              <p class="proxy-diagnostics-note">
+                仅当前 tngui 反代会话的进程内观测，不外发 collector，不代表模型授权或远端健康。
+              </p>
+            </div>
 
             <div ref="transcriptEl" class="chat-transcript" aria-label="密态推理对话记录">
               <div v-if="messages.length === 0" class="empty-chat">

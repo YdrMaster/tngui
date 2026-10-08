@@ -1143,7 +1143,7 @@
 #### Scenario: OpenAI 请求注入模型路径
 
 - **WHEN** 客户端 `POST /v1/chat/completions` 携带 JSON body `{"model":" model-a "}` 和 `Authorization`
-- **THEN** 反代不改写 body 尾部空白，并把内部请求路径改写为 `/models/model%20a/v1/chat/completions`； path 身份与原 `body.model` 字符串保持一致
+- **THEN** 反代保留 body 中完整原样模型字符串，并把内部请求路径改写为 `/models/%20model-a%20/v1/chat/completions`；path 身份与原 `body.model` 字符串保持一致
 
 #### Scenario: Anthropic 请求注入模型路径
 
@@ -1200,6 +1200,47 @@
 - **WHEN** 外部客户端请求推理入口
 - **THEN** 客户端连接的是 tngui 反代对外端点，而非 tng 的内部 ingress 本地监听端口
 
+
+### Requirement: 反代本地诊断快照与 UI 状态
+
+系统须（SHALL）在 tngui 进程内存中为当前 per-TNG 反代维护只读诊断快照，并在“密态推理”视图展示互斥的反代状态：反代未启动时显示“未运行”；反代监听器存在时显示“运行”；上游或本地处理出现失败计数大于零时同时显示“有失败”。快照须（SHALL）至少包含固定类别计数：身份通过、身份拒绝、请求过大、模型发现成功、模型发现失败和上游失败。反代随 tng 会话重启时，诊断快照须（SHALL）重置；系统不得（MUST NOT）把该快照持久化，不得（MUST NOT）把快照发送给外部 collector。
+
+快照的类别与 UI 标签须（SHALL）为固定诊断类别，不得（MUST NOT）携带 prompt、模型输出、raw API key、raw attestation token、模型名或其他业务载荷作为诊断标签。现有模型发现状态不得因诊断快照缺失而变成“空模型清单”，也不得把反代状态或计数误表达为模型授权结果。
+
+#### Scenario: 未启动显示保守状态
+
+- **WHEN** 反代尚未启动
+- **THEN** 反代诊断状态显示“未运行”，所有固定类别计数为零或空值，且该状态不声明模型授权或远端健康
+
+#### Scenario: 身份通过累计计数
+
+- **WHEN** 支持的模型推理端点成功解析出顶层 `body.model` 并注入 path
+- **THEN** 反代增加“身份通过”计数，但不把模型字符串加入诊断标签或 UI 文案
+
+#### Scenario: 身份失败失败闭合计数
+
+- **WHEN** 支持的模型推理端点因 `model` 缺失、不是字符串、为空字符串或非 UTF-8 JSON object 返回 400
+- **THEN** 反代增加“身份拒绝”计数，不建立 TNG 请求，也不泄露具体模型内容
+
+#### Scenario: 超大请求不进入身份用途
+
+- **WHEN** 支持的模型推理端点请求体超过 10 MiB 并返回 413
+- **THEN** 系统增加“请求过大”计数，不增加“身份拒绝”，不转发 TNG，也不使用 body 内容作为诊断标签
+
+#### Scenario: 模型发现分类计数
+
+- **WHEN** 精确 `GET /v1/models` 直达 capi origin 成功或失败
+- **THEN** 反代分别固定增加“模型发现成功”或“模型发现失败”计数；失败状态保持明确的模型发现失败语义，不伪装成空模型清单
+
+#### Scenario: 展示只读本地诊断
+
+- **WHEN** 用户查看密态推理视图
+- **THEN** UI 展示当前反代状态和只读固定类别计数，且不提供把快照导入外部 collector 的操作
+
+#### Scenario: 重启反代重置快照
+
+- **WHEN** tng 与 tngui 反代一起重启
+- **THEN** 新反代会话的本地诊断计数从零开始，旧计数不出现在新 UI 快照中
 
 ### Requirement: 注入端口批探测并避让对外端口
 

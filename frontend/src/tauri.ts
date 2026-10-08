@@ -31,6 +31,20 @@ export async function proxyEndpoint(): Promise<ProxyEndpoint[]> {
   return invoke<ProxyEndpoint[]>("proxy_endpoint");
 }
 
+/** 当前 tngui 反代会话的本地诊断快照；固定类别，不含动态诊断 label。 */
+export interface ProxyDiagnostics {
+  proxy_running: boolean;
+  identity_valid_total: number;
+  identity_rejected_total: number;
+  payload_rejected_total: number;
+  discovery_success_total: number;
+  discovery_failure_total: number;
+  upstream_failure_total: number;
+}
+export async function proxyDiagnostics(): Promise<ProxyDiagnostics> {
+  return invoke<ProxyDiagnostics>("proxy_diagnostics");
+}
+
 /** OpenAI compatible chat message。命令边界只允许 user / assistant。 */
 export type InferenceRole = "user" | "assistant";
 export interface InferenceMessage {
