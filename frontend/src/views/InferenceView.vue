@@ -38,6 +38,7 @@ const {
 const { tngRunning } = useIngressState();
 type InferenceChatTab = "request" | "integration" | "security";
 type ChatRole = "user" | "assistant";
+type ChatKind = ChatRole | "boundary";
 type ChatStatus = "stage-playing" | "streaming" | "complete" | "failed" | "stopped";
 
 interface UserChatMessage {
@@ -61,7 +62,12 @@ interface AssistantChatMessage {
   finalStageAt?: number;
 }
 
-type ChatMessage = UserChatMessage | AssistantChatMessage;
+interface ConversationBoundaryMessage {
+  id: string;
+  role: "boundary";
+}
+
+type ChatMessage = UserChatMessage | AssistantChatMessage | ConversationBoundaryMessage;
 
 const STAGE_INTERVAL_MS = 520;
 const FINAL_STAGE_INDEX = 4;
@@ -102,7 +108,7 @@ const identityPrompt = ref(DEFAULT_IDENTITY_PROMPT);
 const identityPromptEditorOpen = ref(false);
 const thinkingEffort = computed(() => thinkingLevels[thinkingLevel.value].effort);
 
-function nextId(prefix: ChatRole): string {
+function nextId(prefix: ChatKind): string {
   messageSequence += 1;
   return `${prefix}-${messageSequence}`;
 }
@@ -220,14 +226,57 @@ const hermesAgentConfig = computed(() => `model:
 
 function buildRequestMessages(history: ChatMessage[]): InferenceMessage[] {
   const requestMessages: InferenceMessage[] = [];
-  for (const chatMessage of history) {
+  let currentIndex = 0;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    if (history[index].role === "boundary") {
+      currentIndex = index + 1;
+      break;
+    }
+  }
+  for (; currentIndex < history.length; currentIndex += 1) {
+    const chatMessage = history[currentIndex];
     if (chatMessage.role === "user") {
       requestMessages.push({ role: "user", content: chatMessage.content });
-    } else if (chatMessage.status === "complete" && chatMessage.content.length > 0) {
+    } else if (
+      chatMessage.role === "assistant" &&
+      chatMessage.status === "complete" &&
+      chatMessage.content.length > 0
+    ) {
       requestMessages.push({ role: "assistant", content: chatMessage.content });
     }
   }
   return requestMessages;
+}
+
+const canReset = computed(() => {
+  if (sending.value) return false;
+  const latestMessage = messages.value[messages.value.length - 1];
+  return latestMessage !== undefined && latestMessage.role !== "boundary";
+});
+
+const transcriptSegments = computed(() => {
+  const segments: { boundary: boolean; messages: (UserChatMessage | AssistantChatMessage)[] }[] = [];
+  let current: { boundary: boolean; messages: (UserChatMessage | AssistantChatMessage)[] } = {
+    boundary: false,
+    messages: [],
+  };
+  for (const chatMessage of messages.value) {
+    if (chatMessage.role === "boundary") {
+      if (current.boundary || current.messages.length > 0) segments.push(current);
+      current = { boundary: true, messages: [] };
+      continue;
+    }
+    if (chatMessage.role === "user") current.messages.push(chatMessage);
+    else current.messages.push(chatMessage);
+  }
+  if (current.boundary || current.messages.length > 0) segments.push(current);
+  return segments;
+});
+
+function onReset(): void {
+  if (!canReset.value) return;
+  messages.value.push({ id: nextId("boundary"), role: "boundary" });
+  scheduleScrollToBottom();
 }
 
 function findAssistant(id: string): AssistantChatMessage | undefined {
@@ -599,61 +648,84 @@ function assistantBubbleClass(status: ChatStatus): string {
                 <span>发送一条消息，开始多轮密态推理验证</span>
               </div>
               <template v-else>
-                <div
-                  v-for="chatMessage in messages"
-                  :key="chatMessage.id"
-                  :class="['chat-message', chatMessage.role === 'user' ? 'user-message' : 'assistant-message']"
+                <template
+                  v-for="(segment, segmentIndex) in transcriptSegments"
+                  :key="segment.boundary ? `boundary-${segmentIndex}` : segment.messages[0]?.id"
                 >
-                  <div v-if="chatMessage.role === 'user'" class="chat-bubble user-bubble">
-                    {{ chatMessage.content }}
+                  <div
+                    v-if="segment.boundary"
+                    class="conversation-boundary"
+                    aria-label="新对话分隔"
+                  >
+                    <span class="new-conversation-label">新对话</span>
                   </div>
-                  <div v-else :class="['chat-bubble', 'assistant-bubble', assistantBubbleClass(chatMessage.status)]">
-                    <div class="assistant-meta">
-                      <a-tag :color="assistantStatusMeta(chatMessage.status).color">
-                        {{ assistantStatusMeta(chatMessage.status).text }}
-                      </a-tag>
-                      <span v-if="chatMessage.status === 'stage-playing'">正在建立安全链路</span>
-                      <span v-else-if="chatMessage.status === 'streaming'">正在生成，响应已在本地解密</span>
-                      <span v-else-if="chatMessage.status === 'complete'">响应已在本地解密</span>
-                      <span v-else-if="chatMessage.status === 'stopped'">用户停止了本轮生成</span>
-                      <span v-else-if="chatMessage.content || chatMessage.reasoning">
-                        响应不完整（已保留部分输出）
-                      </span>
-                      <span v-else>流中断，未收到可显示输出</span>
+                  <template v-for="chatMessage in segment.messages" :key="chatMessage.id">
+                    <div v-if="chatMessage.role === 'user'" class="chat-message user-message">
+                      <div class="chat-bubble user-bubble">
+                        {{ chatMessage.content }}
+                      </div>
                     </div>
+                    <div v-else class="chat-message assistant-message">
+                      <div :class="['chat-bubble', 'assistant-bubble', assistantBubbleClass(chatMessage.status)]">
+                        <div class="assistant-meta">
+                          <a-tag :color="assistantStatusMeta(chatMessage.status).color">
+                            {{ assistantStatusMeta(chatMessage.status).text }}
+                          </a-tag>
+                          <span v-if="chatMessage.status === 'stage-playing'">正在建立安全链路</span>
+                          <span v-else-if="chatMessage.status === 'streaming'">正在生成，响应已在本地解密</span>
+                          <span v-else-if="chatMessage.status === 'complete'">响应已在本地解密</span>
+                          <span v-else-if="chatMessage.status === 'stopped'">用户停止了本轮生成</span>
+                          <span v-else-if="chatMessage.content || chatMessage.reasoning">
+                            响应不完整（已保留部分输出）
+                          </span>
+                          <span v-else>流中断，未收到可显示输出</span>
+                        </div>
 
-                    <div v-if="chatMessage.status === 'stage-playing'" class="assistant-stage">
-                      <a-progress
-                        :percent="(chatMessage.phase + 1) * 20"
-                        :show-info="false"
-                      />
-                      <SecureFlow :active-index="chatMessage.phase" />
+                        <div v-if="chatMessage.status === 'stage-playing'" class="assistant-stage">
+                          <a-progress
+                            :percent="(chatMessage.phase + 1) * 20"
+                            :show-info="false"
+                          />
+                          <SecureFlow :active-index="chatMessage.phase" />
+                        </div>
+
+                        <template v-else>
+                          <section v-if="chatMessage.reasoning" class="reasoning-block">
+                            <span class="section-label">思考过程</span>
+                            <p class="reasoning-text">{{ chatMessage.reasoning }}</p>
+                          </section>
+                          <section
+                            v-if="chatMessage.content || chatMessage.status !== 'stopped'"
+                            class="assistant-content"
+                          >
+                            <span class="section-label">最终回答</span>
+                            <p v-if="chatMessage.content" class="response-text">{{ chatMessage.content }}</p>
+                            <p v-else class="empty-assistant-text">尚未返回最终回答</p>
+                          </section>
+                          <pre
+                            v-if="chatMessage.status === 'failed' && chatMessage.diagnostic"
+                            class="code-block assistant-debug"
+                          >{{ chatMessage.diagnostic }}</pre>
+                        </template>
+                      </div>
                     </div>
-
-                    <template v-else>
-                      <section v-if="chatMessage.reasoning" class="reasoning-block">
-                        <span class="section-label">思考过程</span>
-                        <p class="reasoning-text">{{ chatMessage.reasoning }}</p>
-                      </section>
-                      <section
-                        v-if="chatMessage.content || chatMessage.status !== 'stopped'"
-                        class="assistant-content"
-                      >
-                        <span class="section-label">最终回答</span>
-                        <p v-if="chatMessage.content" class="response-text">{{ chatMessage.content }}</p>
-                        <p v-else class="empty-assistant-text">尚未返回最终回答</p>
-                      </section>
-                      <pre
-                        v-if="chatMessage.status === 'failed' && chatMessage.diagnostic"
-                        class="code-block assistant-debug"
-                      >{{ chatMessage.diagnostic }}</pre>
-                    </template>
-                  </div>
-                </div>
+                  </template>
+                </template>
               </template>
             </div>
 
             <div class="chat-composer">
+              <a-button
+                type="text"
+                danger
+                class="reset-button"
+                :disabled="!canReset"
+                aria-label="重置"
+                title="重置"
+                @click="onReset()"
+              >
+                重置
+              </a-button>
               <a-textarea
                 v-model:value="draft"
                 class="prompt-textarea"

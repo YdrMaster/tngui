@@ -203,6 +203,15 @@ async function advanceAlmostThroughFinalHold(): Promise<void> {
   await nextTick();
 }
 
+async function completeResolvedTurn(wrapper: VueWrapper, text: string): Promise<void> {
+  mockResolvedStreamOnce("回答");
+  await sendDraft(wrapper, text);
+  await advanceUntilFinalStage();
+  await vi.advanceTimersByTimeAsync(500);
+  await flushPromises();
+  await nextTick();
+}
+
 const KeepAliveHarness = defineComponent({
   name: "KeepAliveHarness",
   components: { InferenceView, BlankView: defineComponent({ name: "BlankView", template: "<div>other page</div>" }) },
@@ -525,6 +534,7 @@ describe("InferenceView", () => {
 
     // 请求非终态时气泡保持正常淡绿色，主操作切换为停止而不是并行发送。
     expect(wrapper.find(".assistant-message .chat-bubble").classes()).toContain("assistant-bubble-pending");
+    expect(wrapper.findComponent(Button).props("disabled")).toBe(true);
     await setDraft(wrapper, "第二条");
     await wrapper.find("button.send-button").trigger("click");
     await flushPromises();
@@ -833,6 +843,97 @@ describe("InferenceView", () => {
     await flushPromises();
   });
 
+  it("keeps history visible while reset cuts the next request context", async () => {
+    useTestClock();
+    const wrapper = await mountAndLoadModels(["reset-model"]);
+    await completeResolvedTurn(wrapper, "旧用户");
+
+    const resetButton = wrapper.get("button.reset-button");
+    expect(resetButton.text()).toBe("重置");
+    expect(resetButton.attributes("disabled")).toBeUndefined();
+
+    await setDraft(wrapper, "重置前草稿");
+    wrapper.findComponent(Slider).vm.$emit("update:value", 3);
+    await nextTick();
+    await wrapper.get("button.reset-button").trigger("click");
+    await nextTick();
+
+    expect(wrapper.get(".user-message .user-bubble").text()).toBe("旧用户");
+    expect(wrapper.get(".assistant-message .assistant-content").text()).toContain("回答");
+    expect(wrapper.get(".conversation-boundary").text()).toBe("新对话");
+    expect(composerValue(wrapper)).toBe("重置前草稿");
+    expect(wrapper.findComponent(Slider).props("value")).toBe(3);
+    expect(wrapper.findComponent(Button).props("disabled")).toBe(true);
+    expect(tauriMocks.stopInferenceStream).not.toHaveBeenCalled();
+
+    mockStreamOnce();
+    await sendDraft(wrapper, "新用户");
+    const [, , , , requestMessages, , effort] = tauriMocks.sendInferenceStream.mock.calls[1];
+    expect(requestMessages).toEqual([{ role: "user", content: "新用户" }]);
+    expect(effort).toBe("high");
+    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(1);
+    expect(wrapper.text()).toContain("旧用户");
+    expect(wrapper.text()).toContain("回答");
+  });
+
+  it("inserts another boundary only after a new conversation completes", async () => {
+    useTestClock();
+    const wrapper = await mountAndLoadModels(["multiple-reset-model"]);
+    await completeResolvedTurn(wrapper, "第一段");
+
+    await wrapper.get("button.reset-button").trigger("click");
+    await nextTick();
+    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(1);
+    const repeatReset = wrapper.get("button.reset-button");
+    expect(repeatReset.findComponent(Button).props("disabled")).toBe(true);
+
+    await repeatReset.trigger("click");
+    await nextTick();
+    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(1);
+
+    await completeResolvedTurn(wrapper, "第二段");
+    expect(wrapper.get("button.reset-button").attributes("disabled")).toBeUndefined();
+    await wrapper.get("button.reset-button").trigger("click");
+    await nextTick();
+
+    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(2);
+    expect(wrapper.findAll(".user-message")).toHaveLength(2);
+    expect(wrapper.findAll(".assistant-message")).toHaveLength(2);
+    expect(wrapper.findComponent(Button).props("disabled")).toBe(true);
+  });
+
+  it("retains reset history and boundary across KeepAlive page switches", async () => {
+    useTestClock();
+    const wrapper = mountKeepAliveHarness();
+    await flushPromises();
+    await completeResolvedTurn(wrapper, "切页前消息");
+
+    await wrapper.get("button.reset-button").trigger("click");
+    await nextTick();
+    await setDraft(wrapper, "保留草稿");
+    wrapper.findComponent(Slider).vm.$emit("update:value", 1);
+    await nextTick();
+
+    await wrapper.setProps({ show: false });
+    await nextTick();
+    await wrapper.setProps({ show: true });
+    await nextTick();
+    await flushPromises();
+
+    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(1);
+    expect(wrapper.get(".user-message .user-bubble").text()).toBe("切页前消息");
+    expect(composerValue(wrapper)).toBe("保留草稿");
+    expect(wrapper.findComponent(Slider).props("value")).toBe(1);
+    expect(wrapper.findComponent(Button).props("disabled")).toBe(true);
+    expect(tauriMocks.flushSettingsCache).not.toHaveBeenCalled();
+    expect(tauriMocks.saveConfig).not.toHaveBeenCalled();
+
+    mockResolvedStreamOnce("新对话回答");
+    await sendDraft(wrapper, "切页后新消息");
+    const [, , , , requestMessages] = tauriMocks.sendInferenceStream.mock.calls[1];
+    expect(requestMessages).toEqual([{ role: "user", content: "切页后新消息" }]);
+  });
+
   it("enters terminal failure immediately when no delta arrives", async () => {
     useTestClock();
     const capture = mockStreamOnce();
@@ -1063,6 +1164,39 @@ describe("InferenceView", () => {
     expect(themeCss).toContain(".inference-shell .debug-workbench {\n  flex: 1;");
     expect(themeCss).toContain(".chat-shell {\n  height: 100%;\n  min-height: 500px;");
     expect(themeCss).not.toContain("clamp(500px, calc(100vh - 360px), 720px)");
+  });
+
+  it("renders the reset action and low-contrast conversation boundary styling", async () => {
+    useTestClock();
+    const wrapper = await mountAndLoadModels(["reset-style-model"]);
+    const resetButton = wrapper.get("button.reset-button");
+    expect(resetButton.text()).toBe("重置");
+    expect(resetButton.attributes("disabled")).toBeDefined();
+
+    await completeResolvedTurn(wrapper, "历史消息");
+    expect(wrapper.get("button.reset-button").attributes("disabled")).toBeUndefined();
+    await wrapper.get("button.reset-button").trigger("click");
+    await nextTick();
+
+    const boundary = wrapper.get(".conversation-boundary");
+    expect(boundary.attributes("aria-label")).toBe("新对话分隔");
+    expect(boundary.get(".new-conversation-label").text()).toBe("新对话");
+    expect(wrapper.get(".user-message .user-bubble").text()).toBe("历史消息");
+
+    const themeCss = readFileSync("src/assets/theme.css", "utf8");
+    const boundaryCss = themeCss.match(/\n\.conversation-boundary \{[\s\S]*?\n\}/)?.[0] ?? "";
+    const boundaryLineCss = themeCss.match(
+      /\n\.conversation-boundary::before,\s*\.conversation-boundary::after \{[\s\S]*?\n\}/,
+    )?.[0] ?? "";
+    const resetCss = themeCss.match(/\n\.reset-button \{[\s\S]*?\n\}/)?.[0] ?? "";
+    const composerCss = themeCss.match(/\n\.chat-composer \{[\s\S]*?\n\}/)?.[0] ?? "";
+
+    expect(boundaryCss).toContain("color: var(--text-tertiary)");
+    expect(boundaryLineCss).toContain("background: rgba(90, 103, 126, .18)");
+    expect(resetCss).toContain("align-self: flex-end");
+    expect(resetCss).toContain("height: var(--composer-control-size, 32px)");
+    expect(composerCss).toContain("border-top: 1px solid var(--split)");
+    expect(wrapper.get("button.reset-button").classes()).toContain("ant-btn-dangerous");
   });
 
   it("renders the Hermes Agent integration guide with a dynamic local endpoint", async () => {

@@ -456,8 +456,37 @@ button, input, textarea { font: inherit; }
   border-top: 1px solid var(--split);
 }
 .chat-composer { --composer-control-size: 32px; }
+.reset-button {
+  flex: 0 0 auto;
+  align-self: flex-end;
+  height: var(--composer-control-size, 32px);
+  padding-inline: 12px;
+  font-weight: 550;
+}
 .prompt-textarea {
   min-height: var(--composer-control-size, 32px);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.new-conversation-label {
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-tertiary);
+}
+.conversation-boundary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.conversation-boundary::before,
+.conversation-boundary::after {
+  content: "";
+  height: 1px;
+  flex: 1 1 auto;
+  background: rgba(90, 103, 126, .18);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .25);
 }
 .send-button {
   width: var(--composer-control-size, 32px);
