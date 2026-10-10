@@ -9,8 +9,9 @@
 //!
 //! 行为：
 //! - 完整反代：透传 method / query / 头 / body，响应原样回传。
-//! - 对 `POST /v1/chat/completions` 与 `POST /v1/messages`，解析 UTF-8 JSON object
-//!   顶层字符串 `model` 后生成单一路径 model segment。非法/缺失 model fail-closed。
+//! - 对 `POST /v1/chat/completions`、`POST /v1/messages` 和无状态
+//!   `POST /v1/responses`，解析 UTF-8 JSON object 顶层字符串 `model` 后生成
+//!   单一路径 model segment。非法/缺失 model fail-closed。
 //! - 不注入、不生成、不读取 `x-model`；body 字节原样保留。
 //!
 //! 实现：原生 tokio TCP（无额外依赖，与 `inference.rs` 同向；design D2 由 axum 调整为
@@ -491,13 +492,17 @@ fn strip_hop_by_hop(h: &mut Headers) {
 }
 
 /// 支持模型 path 注入的 endpoint。只匹配去掉 query 后的完整请求 path——
-/// `/v1/chat/completions/foo` 等非精确匹配不注入模型前缀。
+/// `/v1/chat/completions/foo` 等非精确匹配不注入模型前缀；responseId
+/// 寻址接口不纳入模型化请求，由上游/edge 的 fail-closed 行为处理。
 fn is_supported_model_path(path_with_query: &str) -> bool {
     let path = path_with_query
         .split_once('?')
         .map(|(p, _)| p)
         .unwrap_or(path_with_query);
-    matches!(path, "/v1/chat/completions" | "/v1/messages")
+    matches!(
+        path,
+        "/v1/chat/completions" | "/v1/messages" | "/v1/responses"
+    )
 }
 
 fn is_supported_model_method(method: &str) -> bool {
@@ -918,6 +923,10 @@ mod tests {
                 resolve_model_path("POST", "/v1/chat/completions", body),
                 ModelOverride::Invalid
             );
+            assert_eq!(
+                resolve_model_path("POST", "/v1/responses", body),
+                ModelOverride::Invalid
+            );
         }
         for target in [
             "/v1/completions",
@@ -931,6 +940,35 @@ mod tests {
         }
         assert_eq!(
             resolve_model_path("GET", "/v1/chat/completions", br#"{"model":"m"}"#),
+            ModelOverride::Unsupported
+        );
+    }
+
+    #[test]
+    fn resolve_model_path_supports_responses_with_query() {
+        let body = br#"{"model":"model-a","input":"ascii input"}"#;
+        assert_eq!(
+            resolve_model_path("POST", "/v1/responses?trace=1", body),
+            ModelOverride::Path("/models/model-a/v1/responses?trace=1".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_model_path_excludes_responses_state_control_paths() {
+        for (method, path) in [
+            ("GET", "/v1/responses/resp-123"),
+            ("POST", "/v1/responses/resp-123/cancel"),
+            ("DELETE", "/v1/responses/resp-123"),
+            ("POST", "/v1/responses/resp-123"),
+        ] {
+            assert_eq!(
+                resolve_model_path(method, path, br#"{"model":"m"}"#),
+                ModelOverride::Unsupported,
+                "{method} {path}"
+            );
+        }
+        assert_eq!(
+            resolve_model_path("GET", "/v1/responses", br#"{"model":"m"}"#),
             ModelOverride::Unsupported
         );
     }
@@ -1266,6 +1304,36 @@ Connection: close
         let got = got.unwrap();
         assert_eq!(got.path, "/models/provider%2Fmodel/v1/messages");
         assert_eq!(got.body, json);
+    }
+
+    #[tokio::test]
+    async fn injects_responses_model_path_and_preserves_payload() {
+        let json = br#"{"model":"model-a","input":"\u4f60\u597d"}"#;
+        let (resp, got) = run_once_at(
+            "POST",
+            "/v1/responses?trace=1",
+            &[
+                ("Authorization", "Bearer key"),
+                ("x-api-key", "another-key"),
+                ("Content-Type", "application/json"),
+            ],
+            json.to_vec(),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
+        let got = got.expect("upstream should receive request");
+        assert_eq!(got.method, "POST");
+        assert_eq!(got.path, "/models/model-a/v1/responses?trace=1");
+        assert_eq!(got.body, json);
+        assert!(
+            got.headers
+                .iter()
+                .any(|(k, _v)| k.eq_ignore_ascii_case("authorization"))
+                && got
+                    .headers
+                    .iter()
+                    .any(|(k, _v)| k.eq_ignore_ascii_case("x-api-key"))
+        );
     }
 
     #[tokio::test]
