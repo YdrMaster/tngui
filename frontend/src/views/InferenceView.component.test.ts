@@ -290,12 +290,12 @@ describe("InferenceView", () => {
 
   it("renders read-only fixed proxy diagnostic categories and states", async () => {
     const wrapper = await mountAndLoadModels(["model-a"]);
-    const section = wrapper.find('[aria-label="反代本地诊断"]');
+    const section = wrapper.find('[aria-label="代理统计"]');
     expect(section.exists()).toBe(true);
-    expect(section.text()).toContain("运行");
-    expect(section.text()).toContain("身份拒绝");
+    expect(section.text()).toContain("错误");
+    expect(section.text()).toContain("鉴权拒绝");
     expect(section.text()).toContain("4");
-    expect(section.text()).toContain("模型授权");
+    expect(section.attributes("title")).toContain("模型授权");
     expect(section.text()).not.toContain("model-a");
   });
 
@@ -303,7 +303,7 @@ describe("InferenceView", () => {
     vi.useFakeTimers({ now: 0 });
     const wrapper = mountView();
     await flushPromises();
-    expect(wrapper.find('[aria-label="反代本地诊断"]').text()).toContain("运行 · 有失败");
+    expect(wrapper.find('[aria-label="代理统计"]').text()).toContain("错误");
 
     tauriMocks.proxyDiagnostics.mockResolvedValueOnce({
       proxy_running: false,
@@ -318,9 +318,9 @@ describe("InferenceView", () => {
     await flushPromises();
     await nextTick();
 
-    const section = wrapper.find('[aria-label="反代本地诊断"]');
-    expect(section.text()).toContain("未运行");
-    expect(section.text()).not.toContain("运行 · 有失败");
+    const section = wrapper.find('[aria-label="代理统计"]');
+    expect(section.text()).toContain("停止");
+    expect(section.text()).not.toContain("错误");
     expect(tauriMocks.proxyDiagnostics.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
@@ -329,8 +329,8 @@ describe("InferenceView", () => {
     const wrapper = await mountAndLoadModels(["model-a"]);
     const select = wrapper.findComponent(Select);
     expect(select.props("disabled")).toBe(false);
-    const section = wrapper.find('[aria-label="反代本地诊断"]');
-    expect(section.text()).toContain("未运行");
+    const section = wrapper.find('[aria-label="代理统计"]');
+    expect(section.text()).toContain("停止");
     expect(messageMocks.error).not.toHaveBeenCalledWith(expect.stringContaining("diagnostics unavailable"));
   });
 

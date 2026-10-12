@@ -173,18 +173,25 @@ const modelOptions = computed(() =>
 /** 反代本地状态：只看当前会话句柄，不代表模型授权或远端健康。 */
 const proxyDiagnosticsState = computed(() => {
   const snapshot = diagnosticsSnapshot.value;
-  if (!snapshot?.proxy_running) return "未运行";
+  if (!snapshot?.proxy_running) return "停止";
   const hasFailure =
     snapshot.identity_rejected_total > 0 ||
     snapshot.payload_rejected_total > 0 ||
     snapshot.discovery_failure_total > 0 ||
     snapshot.upstream_failure_total > 0;
-  return hasFailure ? "运行 · 有失败" : "运行";
+  return hasFailure ? "错误" : "运行";
+});
+
+const proxyDiagnosticsStateClass = computed(() => {
+  const state = proxyDiagnosticsState.value;
+  if (state === "错误") return "proxy-stats-error";
+  if (state === "运行") return "proxy-stats-running";
+  return "proxy-stats-stopped";
 });
 
 const proxyDiagnosticCounters = computed(() => [
-  { label: "身份通过", value: diagnosticsSnapshot.value?.identity_valid_total ?? 0 },
-  { label: "身份拒绝", value: diagnosticsSnapshot.value?.identity_rejected_total ?? 0 },
+  { label: "鉴权通过", value: diagnosticsSnapshot.value?.identity_valid_total ?? 0 },
+  { label: "鉴权拒绝", value: diagnosticsSnapshot.value?.identity_rejected_total ?? 0 },
   { label: "请求过大", value: diagnosticsSnapshot.value?.payload_rejected_total ?? 0 },
   { label: "发现成功", value: diagnosticsSnapshot.value?.discovery_success_total ?? 0 },
   { label: "发现失败", value: diagnosticsSnapshot.value?.discovery_failure_total ?? 0 },
@@ -550,6 +557,25 @@ function assistantBubbleClass(status: ChatStatus): string {
 
     <a-card class="debug-workbench" :bordered="false">
       <a-tabs v-model:activeKey="activeTab" size="large">
+        <template #rightExtra>
+          <div
+            class="proxy-stats"
+            aria-label="代理统计"
+            :title="'仅当前 tngui 反代会话的进程内观测，不外发 collector，不代表模型授权或远端健康。'"
+          >
+            <span class="proxy-stats-title" aria-hidden="true">
+              <span>代理</span>
+              <span>状态</span>
+            </span>
+            <span class="proxy-stats-state" :class="proxyDiagnosticsStateClass">
+              {{ proxyDiagnosticsState }}
+            </span>
+            <template v-for="item in proxyDiagnosticCounters" :key="item.label">
+              <span class="proxy-stats-label">{{ item.label }}</span>
+              <span class="proxy-stats-value">{{ item.value }}</span>
+            </template>
+          </div>
+        </template>
 
         <!-- Tab: 请求调试 -->
         <a-tab-pane key="request" tab="请求调试">
@@ -623,24 +649,6 @@ function assistantBubbleClass(status: ChatStatus): string {
               message="当前无法发送推理请求"
               description="请先恢复网关运行状态、API Key 与模型清单。"
             />
-
-            <div class="proxy-diagnostics" aria-label="反代本地诊断">
-              <div class="proxy-diagnostics-header">
-                <span>反代本地诊断</span>
-                <a-tag :color="proxyDiagnosticsState === '未运行' ? 'default' : proxyDiagnosticsState.includes('有失败') ? 'warning' : 'success'">
-                  {{ proxyDiagnosticsState }}
-                </a-tag>
-              </div>
-              <dl class="proxy-diagnostics-grid">
-                <template v-for="item in proxyDiagnosticCounters" :key="item.label">
-                  <dt>{{ item.label }}</dt>
-                  <dd>{{ item.value }}</dd>
-                </template>
-              </dl>
-              <p class="proxy-diagnostics-note">
-                仅当前 tngui 反代会话的进程内观测，不外发 collector，不代表模型授权或远端健康。
-              </p>
-            </div>
 
             <div ref="transcriptEl" class="chat-transcript" aria-label="密态推理对话记录">
               <div v-if="messages.length === 0" class="empty-chat">
