@@ -5,7 +5,7 @@
 //!   `config::prepare_config`），仅 `127.0.0.1` 可达、对用户隐藏不外配；
 //! - tngui 自此进程内起 HTTP 反代对外（host 由 UI toggle 在 `127.0.0.1`/`0.0.0.0` 间
 //!   切换、port 用户可配），把推理请求透传到 tng 内部 ingress，并把可用模型请求改写为
-//!   `/models/{model-segment}{original-path}`（capi path 模型鉴权契约）。
+//!   `/models/{model-segment}{original-path}`（pre-TNG model path 注入约定）。
 //!
 //! 行为：
 //! - 完整反代：透传 method / query / 头 / body，响应原样回传。

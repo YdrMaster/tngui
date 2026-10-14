@@ -35,7 +35,7 @@ export function isValidPort(value: unknown): value is number {
 
 /** 客户端走 OHTTP 时透传的 credential 请求头——写死，用户不可改。 */
 export const HEADER_PASSTHROUGH = ["authorization", "x-api-key"] as const;
-/** capi path 模型鉴权契约要求的固定 TNG outer path rewrite。 */
+/** pre-TNG model path 注入约定要求的固定 TNG outer path rewrite。 */
 export const OHTTP_PATH_REWRITES = [
   {
     match_regex: "^/models/([^/]+)(?:/.*)?$",

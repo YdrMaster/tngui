@@ -1,6 +1,6 @@
 # tngui 可见部分 UI 设计稿
 
-本文档介绍 tngui 桌面客户端界面里每个可见部分的作用，并结合 TNG 的背景概念说明每个状态代表什么、对应的行为是什么。tngui 是 TNG（Trusted Network Gateway）的桌面 GUI 包装器，松耦合于 tng：只通过拉起 `tng launch` 子进程、只读控制面 HTTP 轮询、捕获进程 stdout/stderr 三条契约与 tng 交互，不链接任何 TNG 代码。因此，tngui 自身运行一个内置 HTTP 反向代理作为推理对外入口（默认仅本机 `127.0.0.1`、可切 `0.0.0.0`，见 4 与 5.3 行 1 本机端口）——该反代仍是 tngui 自有进程内服务，不链接 tng 代码。
+本文档介绍 tngui 桌面客户端界面里每个可见部分的作用，并结合 TNG 的背景概念说明每个状态代表什么、对应的行为是什么。tngui 是 TNG（Trusted Network Gateway）的桌面 GUI 包装器，松耦合于 tng：只通过拉起 `tng launch` 子进程、只读控制面 HTTP 轮询、捕获进程 stdout/stderr 三条契约与 tng 交互，不链接任何 TNG 代码。因此，tngui 自身运行一个内置 HTTP 反向代理作为推理对外入口（默认仅本机 `127.0.0.1`、可切 `0.0.0.0`，见 5.3 行 1）——该反代是 tngui 自有进程内服务，不链接 tng 代码；当前支持的模型 path 注入端点为 `POST /v1/chat/completions`、`POST /v1/messages` 与 `POST /v1/responses`。
 
 ## 1. TNG 背景概念
 
@@ -34,28 +34,28 @@ tng 本地控制面是一个只读 REST 接口，默认绑定 `127.0.0.1`。tngu
 
 ### 1.3 OHTTP 快照与边界
 
-tngui 侧观察到的 OHTTP 远端链路来自本机 TNG 的只读状态。TNG Ingress 到 Egress 的业务流量使用 OHTTP 封装；“有公钥 ⇒ 已建联”只描述本地观测，不表示 tngui 拥有模型 authorization、route、rotation 或跨实例 key 一致性判定。
+tngui 侧观察到的 OHTTP 远端链路来自本机 TNG 的只读状态。TNG Ingress 到 Egress 的业务流量使用 OHTTP 封装。“有公钥 ⇒ 已建联”是本地物理观察，只说明本机观测到了可用的 key 配置快照，不代表远端授权、远端模型健康、TNG key rotation 或跨实例 key 一致性。
 
 - 有远端公钥 ⇒ 可以加密发送业务请求，链路已建联。
 - 尚无远端公钥 ⇒ 远端链路未初始化，通常发生在第一条业务请求完成之前。
 - 密钥配置或隧道失败 ⇒ 链路失败。
 
-`/status/ingress/{id}/ohttp/keys` 返回的快照里，`server_public_key` 是这个远端公钥的本机观测点。key fingerprint、rotation、refresh failure 和 422 行为与 UI 的完整映射 unresolved；tngui 不发明路由语义。
+`/status/ingress/{id}/ohttp/keys` 返回的快照里，`server_public_key` 是这个远端公钥的本机观测点。tngui 当前只展示本地观察到的 key 配置快照和保守失败信号：不推导 key fingerprint、rotation、refresh failure 或 422 行为对应的远端生命周期，也不把这些信号当作远端授权成功、远端模型健康或跨实例 key 一致性判据。
 
 ### 1.4 RA 快照与状态
 
-端到端 RA 角色和 trust 源不由 tngui 定义。tngui 只读 TNG 控制面快照：`server_attestation` 非空时说明本机看到了验证后缓存的校验凭据快照。状态映射如下：
+RA 角色和 trust 生命周期不由 tngui 定义；tngui 只读本机 TNG 控制面快照。`server_attestation` 非空时说明本机看到了验证后缓存的校验凭据快照。状态映射如下：
 
 - 无缓存校验凭据 ⇒ 未获取。
 - 有验证后缓存的校验凭据快照 ⇒ 已验证。
 - 可用证据显示凭据接近过期 ⇒ 待刷新；tng 没有可信过期信号时 UI 不主动推导。
 - 校验、刷新或取证失败 ⇒ 失败。
 
-`server_attestation` 是本机观测点，不是凭据当前有效、未被撤销或刷新成功的证据。tng 不直接暴露 cache age、refresh interval、成功/失败计数或 revocation 生命周期元数据；这些状态与 UI 的完整映射 unresolved。
+`server_attestation` 是本机观测点，不代表凭据当前仍有效、未被撤销或刷新成功。tng 不直接暴露 cache age、refresh interval、成功/失败计数或 revocation 生命周期元数据；tngui 当前也不把这些信号推导为凭据生命周期结论，UI 只保留本地快照和保守失败信号。
 
-### 1.5 中心语义与本地 UI 术语
+### 1.5 TNG 外部行为与本地 UI 术语
 
-密态推理链路沿用的中心语义是：客户端到网关为 OHTTP/HPKE 消息级加密加单向远程证明；网关到引擎为 RA-TLS。tngui 文档保留这些 UI 文案只是为了帮助理解本地界面，不重新裁决跨组件信任角色或协议生命周期。
+TNG 侧链路是外部系统行为：客户端到网关为 OHTTP/HPKE 消息级加密加单向远程证明，网关到引擎为 RA-TLS。tngui 文档仅保留这些文案帮助理解本地界面；tngui 自身只写本地配置并把观测结果展示给用户，不重新定义外部协议或远端生命周期。
 
 ---
 
@@ -111,7 +111,7 @@ tng 自身的 ingress 本地监听 `host`/`port` 由 tngui 在启动时选取空
 
 ### 3.4 远端链路卡
 
-这张卡把本机 TNG 返回的 OHTTP key 快照和保守日志收敛为三态。它不是 authorization/route 状态，也不判断 key rotation 或跨实例 key 一致性。
+这张卡把本机 TNG 返回的 OHTTP key 快照和保守日志收敛为三态。它是本地物理观察，不是远端授权状态，也不判定远端模型健康、TNG key rotation 或跨实例 key 一致性。
 
 | 状态 | 色点 | 文案 | 本地观测含义 |
 |---|---|---|---|
@@ -123,7 +123,7 @@ tng 自身的 ingress 本地监听 `host`/`port` 由 tngui 在启动时选取空
 
 ### 3.5 远端证明卡
 
-这张卡把本机 TNG 返回的 RA 校验凭据快照和保守日志收敛为四态。它只反映本地快照，不作为凭据当前有效、未被撤销或刷新成功的证据。
+这张卡把本机 TNG 返回的 RA 校验凭据快照和保守日志收敛为四态。它是本地物理观察，只说明本机看到了验证后缓存的凭据快照；不表示远端证明当前仍有效、未被撤销、刷新成功，也不代表远端模型健康或整条业务链路已被授权。
 
 | 状态 | 色点 | 文案 | 本地观测含义 |
 |---|---|---|---|
@@ -132,7 +132,7 @@ tng 自身的 ingress 本地监听 `host`/`port` 由 tngui 在启动时选取空
 | 待刷新 | 橙色 | 待刷新 | 可用证据显示凭据接近过期；无可信过期信号时不推导该状态 |
 | 失败 | 红色 | 失败 | 日志报告校验、刷新或取证失败 |
 
-状态判定来源：`/status/ingress/{id}/ohttp/keys` 中是否存在 `server_attestation`，以及保守的校验/刷新/取证失败日志。卡片不判定 RA 生命周期或整条远端链路是否已通过中心裁决。
+状态判定来源：`/status/ingress/{id}/ohttp/keys` 中是否存在 `server_attestation`，以及保守的校验/刷新/取证失败日志。卡片是本地物理观察，不判定 RA 生命周期或整条远端链路已被授权。
 
 卡片标题右侧提供 icon-only 的报告导出动作：按钮显示报告/文档图标，不渲染“导出报告”文字，可通过 tooltip 和 accessible label 提示用途。只要当前 OHTTP keys 快照中任一 `server_attestation` 为非空值，按钮即可点击；这与状态文字独立，因此状态显示“已验证”“待刷新”或因后续错误显示“失败”时，只要历史凭据快照仍存在，仍可导出。点击后弹出原生另存为对话框（JSON 过滤器、默认文件名 `remote-attestation-report.json`），确认后把点击时捕获的 `/status/ingress/{id}/ohttp/keys` pretty JSON 快照写入所选路径。取消对话框时不写文件、不提示成功；写入失败会显示明确错误。导出动作不改变 TNG 进程、配置或状态卡数据。
 
@@ -154,15 +154,15 @@ tng 自身的 ingress 本地监听 `host`/`port` 由 tngui 在启动时选取空
 请求调试是一个固定高度的多轮聊天面板，适合做连通性、可信链路和 thinking 模型输出行为验证。用户消息显示为右侧气泡，assistant 消息显示为左侧气泡；底部输入框固定在聊天区域下方，默认 1 行，随内容自动增长，最高显示 8 行，超过后仅在输入框内部纵向滚动。发送后输入框清空，用户输入原文立即进入右侧气泡，同时立即创建左侧 assistant 气泡；Enter 发送，Shift+Enter 换行。输入内容不做首尾 trim，按用户输入原文发送。
 
 - 顶部工具栏：
-  - 模型：模型清单是 tngui 本地模型发现例外的结果，由精确 `GET /v1/models` 从当前 capi origin 获取。它只作为 GUI 会话内的可选模型元数据，不定义全局模型目录、注册或路由；直连例外是否允许绕过 OHTTP/RA 属于中心 unresolved。发送的推理请求仍通过 TNG 加密与远程证明链路。下拉菜单只允许选择清单中返回的模型 ID，不能自由输入或创建新值；清单为空时禁用并发送按钮，并显示“未检测到密态模型”。清单只有一个模型时自动选中；多个模型时默认选第一个但可切换。刷新后保留仍在清单中的当前 ID，否则切换到新清单第一项。模型清单失败显示“模型列表加载失败”，不当作空清单。tngui 获取清单时不携带推理 API Key。
+  - 模型：模型清单是 tngui 本地模型发现例外的结果，由精确 `GET /v1/models` 从当前 capi origin 获取。它只作为 GUI 会话内的可选模型元数据，不定义全局模型目录、注册或路由，也不表示远端模型健康或可用性；直连例外是 tngui 本地发现能力，不支持模型授权。发送的推理请求仍通过 TNG 加密与远程证明链路。下拉菜单只允许选择清单中返回的模型 ID，不能自由输入或创建新值；清单为空时禁用并发送按钮，并显示“未检测到密态模型”。清单只有一个模型时自动选中；多个模型时默认选第一个但可切换。刷新后保留仍在清单中的当前 ID，否则切换到新清单第一项。模型清单失败显示“模型列表加载失败”，不当作空清单。tngui 自身发起的模型清单请求不携带推理 API Key、`Authorization` 或 `x-api-key` 业务凭证。反代直连分支的本地请求头规则是确定的：本地剔除 hop-by-hop 头、`host`、`content-length` 与 `x-model`；若请求中已有 `Authorization` 或 `x-api-key`，按原样透传到 capi origin。tngui 不新增业务凭证，不校验业务凭证语义，也不剥离业务凭证；透传凭证头不表示 tngui 参与授权或凭证剥离。`/v1/models` 是本地发现例外而非授权链路，清单也不代表远端模型授权能力。
   - 思考强度：模型选择右侧提供四档滑块“关 / 低 / 中 / 高”，默认“中”，发送时分别映射为 `reasoning_effort: none|low|medium|high`。滑块只影响下一次发送，不修改进行中请求，也不重启 TNG；界面不提供 `thinking_token_budget` 或 token 数值配置。
 - 多轮上下文：发送时携带 OpenAI compatible `messages` 数组，包含此前完整完成的 user 消息与 assistant 最终回答 `content`，再追加本轮 user 原文。assistant 的 `reasoning` 绝不进入后续上下文；失败、异常中断或用户主动停止的 assistant 轮次仍显示在 UI 中，但不作为已完成上下文传给模型。请求体恒为 `{model, messages, stream: true, reasoning_effort}`，模型身份只来自顶层 `body.model` 并按选中 ID 原样进入 body；前端不注入模型身份头，`x-model` 不作为身份。tngui pre-TNG proxy 把该确切字符串编码为单一路径 segment 后改写为 `/models/{encoded-model-segment}/v1/chat/completions`；例如 `provider/model` 写为 `provider%2Fmodel`。
 - 阶段动画与流式揭示：请求开始后 assistant 气泡先播放现有五步安全流程的单卡动画，包含小型阶段指示和线性进度；阶段推进时上一张卡向上淡出、下一张卡从下方淡入。后台同时接收 `delta.reasoning` 与 `delta.content` 并缓冲，不在阶段卡下方渲染文本。只有当动画到达最后阶段、最后阶段卡已显示至少 0.5 秒、且至少收到 1 个非空 reasoning/content 增量时，阶段卡才消失并一次性显示缓冲输出；若一直无增量，最后阶段卡持续等待。若 `[DONE]` 先到，则等揭示条件满足后显示输出并标记完整完成。
 - 增量与状态：揭示后 reasoning 显示为独立的“思考过程”区域，content 显示为“最终回答”，后续增量按到达顺序分别追加。整个聊天 transcript 是固定高度的唯一流式滚动面，新消息或新增量后自动滚动到底部；完成、停止或失败不会切换另一套高度模型，因此不会出现流式期间撑大、结束后收缩的布局变化。
 - 主动停止：请求进行中时，底部输入框右侧主按钮从“发送”切换为“停止”。点击停止会立即请求后端取消当前 SSE / TCP 流；停止后不再接收或渲染后续 chunk，动画 timer 被清理，发送锁释放。若输出已经揭示，已显示的 reasoning/content 按原样保留；若仍处于阶段动画或最终卡等待阶段，后台已缓冲但未显示的 chunk 不会揭示，assistant 气泡正文保持空白并标记“已停止⚪响应不完整”。停止不是失败，不显示失败诊断；该 assistant 轮次也不会进入后续请求 `messages`。
-- 气泡状态色：用户输入、进行中的 assistant 阶段动画/流式输出，以及完整完成的 assistant 响应使用同一淡绿色气泡；用户主动停止的 assistant 气泡使用淡金色；异常中断或失败使用淡红色。状态标签仍区分“安全链路”“生成中”和完成，但正常对话的气泡底色保持稳定，不会因动画或流式切换而生硬变化。
+- 气泡状态色：用户输入、进行中的 assistant 阶段动画/流式输出，以及完整完成的 assistant 响应使用同一淡绿色气泡；用户主动停止的 assistant 气泡使用淡金色；异常中断或失败使用淡红色。状态标签仍区分“安全链路”（本地动画阶段名，不表示远端模型健康或授权被确认）“生成中”和完成；正常对话的气泡底色保持稳定，不因动画或流式切换而生硬变化。
 - 失败与诊断：失败、非 2xx、非 SSE 或 `[DONE]` 前断流时，assistant 轮次进入失败终态，保留已到达 reasoning/content 并标注“响应不完整”；失败摘要和调试详情中的 Authorization 已脱敏。无任何可显示输出时仍显示失败状态与诊断。
-- 反代本地诊断：请求调试选项卡行右侧显示当前反代会话的“停止/运行/错误”状态，以及鉴权通过、鉴权拒绝、请求过大、发现成功、发现失败和上游失败计数。计数随反代重启重置，只保留在 GUI 进程内存中，不写入磁盘也不上报 collector；固定类别不含模型名或其他业务内容，不代表模型授权或远端健康。模型发现失败仍保持“模型列表加载失败”，不会把这些诊断误当空清单。
+- 反代本地诊断：请求调试选项卡行右侧显示当前反代会话的“停止/运行/错误”状态，以及身份通过、身份拒绝、请求过大、发现成功、发现失败和上游失败计数。身份通过/身份拒绝计数的语义是请求体中是否解析出可用模型身份，与认证、授权、凭证有效性或远端可访问性无关。计数随反代重启重置，只保留在 GUI 进程内存中，不写入磁盘也不上报 collector；固定类别不含模型名或其他业务内容。这些计数是本地物理观察，不表示模型授权结果、远端模型健康、TNG key rotation 或跨实例 key 一致性。模型发现失败仍保持“模型列表加载失败”，不会把这些诊断误当空清单。
 - 进程内保留：聊天记录、当前选项卡、输入草稿、模型清单/选中模型、思考强度、发送锁、阶段/流式/完成/失败/停止状态、已到达增量和诊断都保留在 GUI 进程内存中。切换到概览或设置页再返回时不重置、不取消请求、不清理阶段 timer；后台流式输出继续推进，返回后 transcript 滚动到底部。进程退出后这些推理页状态全部丢弃，不写入设置缓存、tng 配置或任何文件。
 
 SecureFlow 五步对应密态推理的保护过程：
@@ -177,13 +177,14 @@ SecureFlow 五步对应密态推理的保护过程：
 
 ### 4.2 AI 客户端接入
 
-面向第三方 OpenAI 兼容客户端接入说明，告诉用户怎样把 Hermes Agent 指向本地 TNG。Hermes Agent 是 <a href="https://hermes-agent.nousresearch.com/" target="_blank" rel="noopener noreferrer">Nous Research 开发的开源自主 AI Agent</a>，支持持久记忆、技能自学习、工具调用和多种对话平台；它可通过 custom endpoint 使用本机 TNG 的 OpenAI-compatible 推理 API。
+面向第三方 OpenAI 兼容客户端接入说明，告诉用户怎样把 Hermes Agent 指向本地 TNG。Hermes Agent 是 <a href="https://hermes-agent.nousresearch.com/" target="_blank" rel="noopener noreferrer">Nous Research 开发的开源自主 AI Agent</a>，支持持久记忆、技能自学习、工具调用和多种对话平台；它可通过 custom endpoint 使用本机 tngui 反代的推理 API（当前支持 `POST /v1/chat/completions`、`POST /v1/messages` 与 `POST /v1/responses`）。
 
 - 基本信息：
   - API Base URL：tngui 反代对外端点 `http://<绑定地址（默认 127.0.0.1）>:<本机端口>/v1`，绑定地址与本机端口取自结构化 ingress 行 1 的反代对外绑定。
   - 网关状态：运行中或未运行。
   - 监听范围：默认仅本机 `127.0.0.1`；可在结构化 ingress 行 1 经 D1 toggle 切到 `0.0.0.0` 对外网卡（须在受信网络下使用）。
-  - 兼容协议：OpenAI-compatible API。
+  - 支持的推理端点：tngui 反代当前支持 `POST /v1/chat/completions`、`POST /v1/messages` 与 `POST /v1/responses` 三类模型 path 注入端点。三者均从请求体顶层字符串 `body.model` 读取模型身份，反代把该确切字符串编码为单一 URI path segment 后改写 path；请求 body 字节原样透传；不引入本地会话或后台任务。`POST /v1/responses` 提供无状态、自包含的请求形态：每次发送完整输入与模型身份，多轮上下文由调用方在请求体中自行携带。
+- 兼容协议：OpenAI-compatible API。
 - 配置示例：
 
 ```yaml
@@ -198,8 +199,8 @@ model:
 
 ![Hermes Agent custom endpoint 配置示例截图](../frontend/src/assets/hermes-agent-config.png)
 
-- cURL 示例：可以直接复制改写为本地请求命令。
-- 警示：必须使用本地 TNG 地址，才能获得远程证明、链路加密和验证失败阻断能力；不要填写云端服务地址。
+- cURL 示例：可以直接复制改写为本地请求命令（对 `POST /v1/chat/completions`、`POST /v1/messages` 或 `POST /v1/responses` 任一端点均可，反代按 `body.model` 注入路径并透传请求）。
+- 警示（仅推理端点）：`POST /v1/chat/completions`、`POST /v1/messages` 和 `POST /v1/responses` 应使用本地 tngui 反代地址，这类推理请求经 TNG 加密与远程证明链路转发，验证失败会阻断；不要对推理端点填写云端服务地址。精确 `GET /v1/models` 是本地模型发现例外：它不走 tng ingress，也不进入 OHTTP / 远程证明链路，不因该例外而获得远程证明保护。
 
 ### 4.3 安全说明
 
@@ -253,7 +254,7 @@ model:
   - 远端类型二选一，选项只显示中文：端点映射（`out = <IP>:<端口>`，host 须为 IP、端口必填且在 `1~65535`）/ 域名代理（主机名 + 可选端口分两字段、序列化为 `dst_filters = [{domain, port}]`、主机名不含端口；端口可留空表示不限定目标端口，显式填写时须为 `1~65535`；域名框可写 `http://` 或 `https://` 前缀——`https://` 前缀会在序列化时派生 `ohttp.tls: true`（tng 以 TLS 连上游）、`http://` 或无前缀则不写 `tls`，前缀本身会被剥离不进 `dst_filters.domain`）。域名框输入时仅去除首尾空白，字符串内部字符与大小写保持原样。
   - 默认选中域名代理，并预填 `https://inference.cloud.misuan.com`、远端端口 `443`；用户导入、回填或有效缓存中的显式值优先。
 - tng 的 `http_proxy` 上游目标跟随请求 `Host` 头的 host 与端口（`dst_filters.port` 仅参与 ingress 匹配）；tngui 反代转发时 `Host` 头填 `domain:port`（配置了端口时），非 80 端口如 https 的 443/30090 由此可达。`dst_filters.port` 留空时不写入该字段，表示不限定目标端口。
-  - `ohttp` 常开且写死：当前唯一 ingress 锁定支持中心 path-model 语义的本地配置，
+  - `ohttp` 常开且写死：tngui 本地 ingress 锁定支持 path-model 反代注入所需配置。
 `path_rewrites` 固定为 `[{ match_regex: "^/models/([^/]+)(?:/.*)?$", substitution: "/models/$1" }]`，
 `header_passthrough.request_headers` 固定为 `["authorization","x-api-key"]`。用户不可关闭，
 也不可改写 path 规则或这组 credential header。

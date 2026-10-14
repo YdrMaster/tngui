@@ -190,8 +190,8 @@ const proxyDiagnosticsStateClass = computed(() => {
 });
 
 const proxyDiagnosticCounters = computed(() => [
-  { label: "鉴权通过", value: diagnosticsSnapshot.value?.identity_valid_total ?? 0 },
-  { label: "鉴权拒绝", value: diagnosticsSnapshot.value?.identity_rejected_total ?? 0 },
+  { label: "身份通过", value: diagnosticsSnapshot.value?.identity_valid_total ?? 0 },
+  { label: "身份拒绝", value: diagnosticsSnapshot.value?.identity_rejected_total ?? 0 },
   { label: "请求过大", value: diagnosticsSnapshot.value?.payload_rejected_total ?? 0 },
   { label: "发现成功", value: diagnosticsSnapshot.value?.discovery_success_total ?? 0 },
   { label: "发现失败", value: diagnosticsSnapshot.value?.discovery_failure_total ?? 0 },

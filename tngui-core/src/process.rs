@@ -187,8 +187,8 @@ where
 }
 
 /// 封装 `tng launch …` 的启停，持有共享日志。持有双套 tng 二进制：
-/// - `bin_nora`：普通版（全部 ingress 均关闭远程证明时使用，找不到由 PATH 兜底）
-/// - `bin_ra`：远程证明版（任一 ingress 开 RA 时使用，`None` = 未随包提供，绝不回退）
+/// - `bin_nora`：普通版（当前唯一 ingress 关闭远程证明时使用，找不到由 PATH 兜底）
+/// - `bin_ra`：远程证明版（当前唯一 ingress 开启远程证明时使用，`None` = 未随包提供，绝不回退）
 pub struct TngSupervisor {
     bin_nora: String,
     bin_ra: Option<String>,

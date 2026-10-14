@@ -293,7 +293,7 @@ describe("InferenceView", () => {
     const section = wrapper.find('[aria-label="代理统计"]');
     expect(section.exists()).toBe(true);
     expect(section.text()).toContain("错误");
-    expect(section.text()).toContain("鉴权拒绝");
+    expect(section.text()).toContain("身份拒绝");
     expect(section.text()).toContain("4");
     expect(section.attributes("title")).toContain("模型授权");
     expect(section.text()).not.toContain("model-a");

@@ -215,7 +215,8 @@ fn valid_port(value: &Value, at: &str) -> Result<(), PrepareError> {
 
 /// 在 `validate_user_config` 基础上注入/覆盖
 /// `control_interface.restful = { "host": "127.0.0.1", "port": control_port }`，
-/// 每条 ingress 的本地监听 `host=127.0.0.1`+`port=自动空闲端口`（覆盖用户），并剥离
+/// 各 ingress 条目的本地监听 `host=127.0.0.1`+`port=自动空闲端口`（覆盖用户；
+/// 当前 GUI 配置仅有一条 ingress，该 helper 仍按数组逐条处理），并剥离
 /// tngui 侧"反代对外绑定"字段（不进 tng 配置）。仅返回 tng 绑定的配置（路由被丢弃）。
 pub fn prepare_config(user_json: &str, control_port: u16) -> Result<Value, PrepareError> {
     // 测试/诊断便利入口：自行批取各 ingress 内部端口（启动路径 `launch_tng` 经
@@ -235,9 +236,9 @@ fn ingress_count(user_json: &str) -> Result<usize, PrepareError> {
         .unwrap_or(0))
 }
 
-/// 同 `prepare_config`，但额外返回每条 ingress 的反代路由（带内部端口）供 `launch_tng`
-/// 启动反代，并返回本次启动是否需要远程证明版（RA 版）tng：任一条 ingress 开启远程证明
-/// （`no_ra` 非 `true`，见 `ra_required`）即须用 RA 版二进制。tng 绑定的配置不再含反代
+/// 同 `prepare_config`，但额外返回各 ingress 条目的反代路由（带内部端口）供 `launch_tng`
+/// 启动反代，并返回本次启动是否需要远程证明版（RA 版）tng：当前唯一 ingress 开启远程证明
+/// （`no_ra` 非 `true`，见 `ra_required`；底层 helper 仍按数组扫描）即须用 RA 版二进制。tng 绑定的配置不再含反代
 /// 对外绑定字段；ingress 本地监听为注入的内部端口。
 pub fn prepare_launch(
     user_json: &str,
@@ -274,7 +275,8 @@ pub fn prepare_launch(
     // 客户端不承载 egress（见变更 lock-ingress-ohttp-drop-egress）：丢弃 add_egress。
     root.remove("add_egress");
 
-    // 每条 ingress：读反代对外绑定、注入调用方批探测供给的内部端口 + host=127.0.0.1
+    // 逐条处理 ingress 条目（当前 GUI 配置仅一条；仍按数组遍历）：读反代对外绑定、
+    // 注入调用方批探测供给的内部端口 + host=127.0.0.1
     // （覆盖用户）、剥离 tngui_outward（不进 tng 配置），并产出反代路由（带内部端口）。
     let mut routes = Vec::new();
     if let Some(add_ingress) = root.get_mut("add_ingress").and_then(Value::as_array_mut) {
