@@ -21,10 +21,10 @@ use tauri::{Builder, generate_context, generate_handler};
 use tokio::sync::{Mutex, oneshot};
 
 use tngui_core::{
-    InferenceDelta, InferenceEffort, InferenceMessage, InferenceStreamOutcome, ProxyDiagnostics,
-    ProxyDiagnosticsSnapshot, ProxyHandle, StatusReport, TngSupervisor, fetch_status,
-    pick_launch_ports, prepare_launch, sanitize_user_config_for_tng, start_proxy,
-    write_runtime_config,
+    CacheSaltHandle, CacheSaltMode, CacheSaltPolicy, InferenceDelta, InferenceEffort,
+    InferenceMessage, InferenceStreamOutcome, ProxyDiagnostics, ProxyDiagnosticsSnapshot,
+    ProxyHandle, StatusReport, TngSupervisor, fetch_status, pick_launch_ports, prepare_launch,
+    sanitize_user_config_for_tng, start_proxy, write_runtime_config,
 };
 
 /// 控制端口（启动时注入）；状态轮询读取。
@@ -48,6 +48,8 @@ pub struct AppState {
     proxy: Arc<Mutex<Option<(ProxyHandle, ProxyEndpoints)>>>,
     /// 进行中推理请求的取消注册表；仅存在于 GUI 进程内存，不落盘。
     inference_cancellations: InferenceCancellationCell,
+    /// 反代缓存盐策略；改动即时作用于当前反代，不落 tng 配置。
+    salt: Arc<CacheSaltHandle>,
 }
 
 /// 推理请求 ID -> 取消信号。`oneshot::Sender` 与 send 命令同生命周期；send 命令
@@ -174,7 +176,7 @@ async fn launch_tng(
 
     // 6. 起反代：按各 ingress 对外绑定绑 (out_host,out_port)、转发其内部 ingress 端口。
     //    任一绑定失败即整批失败（fail-fast）→ 停 tng 并报错（不留 tng 在跑却缺对外入口）。
-    let handle = match start_proxy(routes).await {
+    let handle = match start_proxy(routes, state.salt.clone()).await {
         Ok(h) => h,
         Err(e) => {
             sup.kill_current().await;
@@ -204,6 +206,41 @@ async fn stop_tng(state: State<'_, AppState>) -> Result<(), String> {
         handle.stop().await;
     }
     Ok(())
+}
+
+/// 更新反代缓存盐策略（模式/刷新周期/固定值/覆盖开关）。改动即时作用于当前运行的反代，
+/// 不触发 TNG 配置 dirty、不写盘、不重启 tng。周期与固定值按字符串接收并在核心侧规整。
+#[tauri::command]
+fn configure_cache_salt(
+    state: State<'_, AppState>,
+    mode: String,
+    refresh_minutes: String,
+    fixed_value: String,
+    overwrite: bool,
+) -> Result<(), String> {
+    state.salt.update(cache_salt_policy(
+        &mode,
+        &refresh_minutes,
+        fixed_value,
+        overwrite,
+    ));
+    Ok(())
+}
+
+/// 由前端输入构造盐策略；模式、周期与固定值的非法输入都在核心侧规整为默认值。
+/// 命令与单测共用这一处，保证测的就是线上路径。
+fn cache_salt_policy(
+    mode: &str,
+    refresh_minutes: &str,
+    fixed_value: String,
+    overwrite: bool,
+) -> CacheSaltPolicy {
+    CacheSaltPolicy::from_inputs(
+        CacheSaltMode::parse(mode),
+        refresh_minutes,
+        fixed_value,
+        overwrite,
+    )
 }
 
 /// 反代对外端点（按 `add_ingress` 顺序）。未启动返回空。
@@ -326,8 +363,8 @@ fn write_settings_cache_file(dir: &std::path::Path, payload: &Value) -> Result<(
 mod tests {
     use super::{
         AppState, InferenceCancellationCell, RA_BIN_MISSING, SETTINGS_CACHE_FILE,
-        cancel_inference_request, find_bin_under, format_process_log_lines, ra_launch_precheck,
-        race_inference_stream_with_cancellation, read_settings_cache_file,
+        cache_salt_policy, cancel_inference_request, find_bin_under, format_process_log_lines,
+        ra_launch_precheck, race_inference_stream_with_cancellation, read_settings_cache_file,
         register_inference_cancellation, run_send_inference_stream, tng_nora_resource_name_for,
         tng_ra_resource_name_for, write_settings_cache_file,
     };
@@ -338,8 +375,8 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use tauri::ipc::Channel;
     use tngui_core::{
-        InferenceDelta, InferenceEffort, InferenceMessage, InferenceRole, InferenceStreamOutcome,
-        TngSupervisor,
+        CacheSaltHandle, CacheSaltPolicy, InferenceDelta, InferenceEffort, InferenceMessage,
+        InferenceRole, InferenceStreamOutcome, TngSupervisor,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::{Mutex, oneshot};
@@ -512,12 +549,42 @@ mod tests {
         assert!(!cancel_inference_request(&cell, "assistant-1"));
     }
 
+    #[test]
+    fn cache_salt_state_reflects_policy_updates() {
+        let state = command_test_state();
+        assert_eq!(state.salt.current(), None, "测试态默认关闭盐");
+
+        // 与命令同源的策略构造：固定模式带固定值与覆盖开关。
+        state.salt.update(cache_salt_policy(
+            "fixed",
+            "15",
+            "fixed-x".to_string(),
+            true,
+        ));
+        let decision = state.salt.current().expect("固定模式注入");
+        assert_eq!(decision.value, "fixed-x");
+        assert!(decision.overwrite);
+
+        // 命令收到非法周期时回落默认值，并切到自动模式注入随机盐。
+        let policy = cache_salt_policy("auto", "not-a-number", String::new(), false);
+        assert_eq!(policy.refresh_minutes, tngui_core::DEFAULT_REFRESH_MINUTES);
+        state.salt.update(policy);
+        assert!(state.salt.current().is_some(), "自动模式注入随机盐");
+
+        // 关闭模式不注入。
+        state
+            .salt
+            .update(cache_salt_policy("off", "30", String::new(), false));
+        assert_eq!(state.salt.current(), None);
+    }
+
     fn command_test_state() -> AppState {
         AppState {
             supervisor: Arc::new(Mutex::new(TngSupervisor::new("tng-nora", None, 100))),
             port: Arc::new(StdMutex::new(None)),
             proxy: Arc::new(Mutex::new(None)),
             inference_cancellations: Arc::new(StdMutex::new(HashMap::new())),
+            salt: Arc::new(CacheSaltHandle::new(CacheSaltPolicy::off())),
         }
     }
 
@@ -869,6 +936,7 @@ pub fn run() {
                 port: Arc::new(StdMutex::new(None)),
                 proxy: Arc::new(Mutex::new(None)),
                 inference_cancellations: Arc::new(StdMutex::new(HashMap::new())),
+                salt: Arc::new(CacheSaltHandle::new(CacheSaltPolicy::default())),
             });
             Ok(())
         })
@@ -877,6 +945,7 @@ pub fn run() {
             stop_tng,
             proxy_endpoint,
             proxy_diagnostics,
+            configure_cache_salt,
             get_status,
             get_output,
             export_tng_log,

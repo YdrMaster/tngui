@@ -1,38 +1,45 @@
 # Ant Codespace 本地测试环境说明
 
-本文记录在 Ant Codespace 中运行本仓库测试时的环境要求、已知兼容性问题，以及经过验证的命令。目标读者是在 Ant Codespace 中执行本地回归测试的开发者。
+本文记录在本仓库的 Ant Codespace 环境里跑测试时的环境要求、已知兼容性问题，以及验证过的命令。目标读者是在 Ant Codespace 中执行本地回归测试的开发者。
 
 ## 结论
 
-- **前端测试不需要特殊环境配置**：在 Ant Codespace 宿主环境执行即可。
-- **Rust 测试在当前 Ant Codespace 中需要使用 Ubuntu chroot**：宿主系统是 Alibaba Cloud Linux 3 / glibc 2.32，而当前 workspace 的 Rust 测试产物要求 `GLIBC_2.33` / `GLIBC_2.34`。直接在宿主执行 `cargo test` 会在启动测试二进制时失败。
-- **推荐使用 `/tmp/tngui-ubuntu`**：这是 Ubuntu 22.04 / glibc 2.35 环境，已经通过 `/home/admin` bind mount 共享仓库、Rust toolchain 与 Cargo 缓存。
-- **Rust 全量测试建议单线程运行**：`tngui-core` 中有绑定 loopback 地址的测试，在当前环境中并行运行偶发 `Address already in use`；`--test-threads=1` 可稳定避免端口竞争。
+- **前端测试在宿主直接跑**，不需要额外环境。
+- **`tngui-core` 单测在宿主直接跑**，不需要 chroot。
+- **`tngui-app`（Tauri 外壳）在宿主跑不起来，要用 Ubuntu 22.04 chroot**：宿主是 Alibaba Cloud Linux 3，glib 只有 2.68.4，且只装了 `webkit2gtk-4.0`；Tauri 2 要求 glib ≥ 2.70 且 `webkit2gtk-4.1`。
+- **chroot 里以 root 跑 cargo 会把 `target/` 写成 root 所有**，之后宿主再跑就报 `Permission denied`。用 `chroot --userspec` 以当前用户进 chroot 可以避免。
+- **全量 Rust 测试单线程跑**：`tngui-core` 里有绑定 loopback 的用例，并行会偶发 `Address already in use (os error 98)`。
+- **chroot 产物不能拿回宿主直接执行**：宿主 glibc 2.32 低于 chroot 的 2.35，测试二进制会在启动时报 `GLIBC_2.33 not found`。这也是不要混着跑的原因。
 
 ## 当前环境快照
 
-以下版本来自本仓库已验证的 Ant Codespace 环境：
+以下版本取自本仓库已验证的 Ant Codespace 环境：
 
-| 环境 | 系统 | glibc | Rust |
-|---|---|---:|---|
-| 宿主环境 | Alibaba Cloud Linux 3 | 2.32 | `rustc 1.98.1` |
-| `/tmp/tngui-ubuntu` | Ubuntu 22.04.5 LTS | 2.35 | `rustc 1.98.1` |
+| 环境 | 系统 | glibc | glib | webkit2gtk | Rust |
+|---|---|---:|---:|---|---|
+| 宿主 | Alibaba Cloud Linux 3 | 2.32 | 2.68.4 | 4.0（2.52.5） | `rustc 1.99.1` |
+| `/tmp/tngui-ubuntu` | Ubuntu 22.04.5 LTS | 2.35 | 2.72.1 | 4.1（2.50.4） | `rustc 1.99.1` |
 
-宿主环境直接运行 Rust 测试时可能看到类似错误：
+## 跑 Rust 测试
 
-```text
-/lib64/libc.so.6: version `GLIBC_2.33' not found
-/lib64/libc.so.6: version `GLIBC_2.34' not found
-error: test failed, to rerun pass `--lib`
+### 宿主：只跑 `tngui-core`
+
+```bash
+source ~/.cargo/env
+cargo test -p tngui-core -- --test-threads=1
 ```
 
-这不是代码断言失败，而是宿主 glibc 版本低于测试二进制所需版本。
+约 1 秒，127 个用例。在宿主跑 `cargo test --workspace` 或 `cargo test -p tngui-app` 会在**构建阶段**就失败：
 
-## 运行 Rust 测试
+```text
+Package 'webkit2gtk-4.1', required by 'virtual:world', not found
+```
 
-### 使用已配置的 Ubuntu chroot
+即宿主没有 `webkit2gtk-4.1`（只有 4.0），glib 也停在 2.68.4。
 
-先确认 chroot 已存在：
+### chroot：全量 workspace
+
+先确认 chroot 还在：
 
 ```bash
 test -d /tmp/tngui-ubuntu && echo ok
@@ -41,66 +48,71 @@ test -d /tmp/tngui-ubuntu && echo ok
 然后执行：
 
 ```bash
-sudo chroot /tmp/tngui-ubuntu /bin/bash -lc '
-  set -euo pipefail
+sudo chroot --userspec="$(id -u):$(id -g)" /tmp/tngui-ubuntu /bin/bash -c '
+  set -e
   export HOME=/home/admin
   export PATH=/home/admin/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-  cd /home/admin/yangderui.ydr/YdrMaster/tngui
+  cd /home/admin/yangderui.ydr/yangderui.ydr/trust-inference/tngui
   cargo test --workspace -- --test-threads=1
 '
 ```
 
 当前该命令会运行：
 
-- `tngui-app` 主 crate：9 个测试
-- `tngui-core`：75 个测试
+- `tngui-app` 主 crate：14 个测试
+- `tngui-core`：127 个测试
 - 两个 crate 的 doc-tests（当前均为 0 个）
 
-如需分步执行：
+几个容易踩的点：
+
+- **用 `bash -c`，别用 `bash -l`**。chroot 里 uid 500 没有 passwd 记录，登录 shell 会去读 `/root/.bash_profile` 并报 `Permission denied`；`PATH` 上面已经显式设好，不需要 `-l`。
+- **`chroot` 一定要带 `--userspec`**。否则 cargo 以 root 写进 bind mount 的仓库，`target/`、`gen/` 会变成 root 所有，宿主再跑就是 `failed to write ... Permission denied`。已经踩过就修一次：
+
+  ```bash
+  sudo find . -not -user "$(id -un)" -exec chown "$(id -un):$(id -gn)" {} +
+  ```
+
+- **`target/` 由宿主和 chroot 共用**。混用过环境、遇到奇怪的链接或运行错误时，在 chroot 里 `cargo clean` 后重跑。
+- 仓库根目录的 `cargo test` 只跑当前 package（`tngui-app`），全量回归用 `cargo test --workspace`。
+
+### chroot 不存在时怎么重建
+
+`/tmp` 会被清理，需要重建时按下面走。这几步都要 sudo 权限。
 
 ```bash
-sudo chroot /tmp/tngui-ubuntu /bin/bash -lc '
-  export HOME=/home/admin
-  export PATH=/home/admin/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-  cd /home/admin/yangderui.ydr/YdrMaster/tngui
-
-  cargo test
-  cargo test -p tngui-core -- --test-threads=1
-'
-```
-
-注意：
-
-- 仓库根目录的 `cargo test` 只运行当前 package（`tngui-app`）及依赖构建，不会运行 `tngui-core` 的 unit tests。全量回归应使用 `cargo test --workspace`。
-- `target/` 由宿主和 chroot 共享。请在同一环境内保持一致的运行方式；如果曾混用环境并遇到奇怪的链接或运行错误，可在 chroot 内执行 `cargo clean` 后重跑。
-- 如果并行运行 `tngui-core` 时出现 `Address already in use (os error 98)`，按上面命令增加 `--test-threads=1` 后复跑。
-
-### 如果 chroot 不存在
-
-`/tmp` 在 Codespace 生命周期后可能被清理。如果平台没有预置 `/tmp/tngui-ubuntu`，需要管理员/root 权限重新创建。一种可行方式是使用 Ubuntu 22.04 rootfs：
-
-```bash
-set -euo pipefail
-
 ROOT=/tmp/tngui-ubuntu
+
+# 宿主需要 debootstrap、xz、zstd。
+sudo dnf install -y debootstrap xz zstd
 sudo mkdir -p "$ROOT"
 
-# 前置条件：宿主有 debootstrap；如无，请由平台管理员安装。
-sudo debootstrap --variant=minbase jammy "$ROOT" http://archive.ubuntu.com/ubuntu
+# jammy 的 deb 用 zstd 压 control.tar，宿主自带的 dpkg-deb 1.20.9 读不了，
+# 用 --extractor=ar 绕开。
+sudo debootstrap --variant=minbase --extractor=ar jammy "$ROOT" http://mirrors.aliyun.com/ubuntu
 
-# 共享同一个 /home/admin，从而复用仓库、~/.cargo、rustup 与 Cargo 缓存。
+# 共用同一个 /home/admin，复用仓库、~/.cargo 与 Cargo 缓存。
 sudo mkdir -p "$ROOT/home/admin"
 sudo mount --bind /home/admin "$ROOT/home/admin"
 
 # 基础虚拟文件系统与 DNS。
+sudo mkdir -p "$ROOT/dev/pts"
 sudo mount --bind /dev "$ROOT/dev"
+sudo mount -t devpts devpts "$ROOT/dev/pts"
 sudo mount --bind /proc "$ROOT/proc"
 sudo mount --bind /sys "$ROOT/sys"
 sudo install -Dm644 /etc/resolv.conf "$ROOT/etc/resolv.conf"
 
-# 安装 Rust/Tauri 测试所需构建依赖。
-sudo chroot "$ROOT" /bin/bash -lc '
-  set -euo pipefail
+# sources.list 必须有 jammy-updates 和 jammy-security：只写 jammy 的话
+# libwebkit2gtk-4.1 会停在 2.36，装 Tauri 依赖时报
+# javascriptcoregtk-4.1 >= 2.38 不满足。
+sudo tee "$ROOT/etc/apt/sources.list" >/dev/null <<'EOF'
+deb http://mirrors.aliyun.com/ubuntu jammy main universe multiverse restricted
+deb http://mirrors.aliyun.com/ubuntu jammy-updates main universe multiverse restricted
+deb http://mirrors.aliyun.com/ubuntu jammy-security main universe multiverse restricted
+EOF
+
+sudo chroot "$ROOT" /bin/bash -c '
+  set -e
   apt-get update
   apt-get install -y \
     build-essential pkg-config curl ca-certificates git \
@@ -109,13 +121,20 @@ sudo chroot "$ROOT" /bin/bash -lc '
 '
 ```
 
-之后执行上文“使用已配置的 Ubuntu chroot”的测试命令。
+装完对一下版本：
 
-> 以上 bootstrap 需要修改系统 mount 与安装软件包，通常应由 Codespace 平台管理员或拥有 sudo 权限的开发者执行。没有 root 权限时，请使用平台预置环境或依赖 CI。
+```bash
+sudo chroot "$ROOT" /bin/bash -c \
+  'pkg-config --modversion webkit2gtk-4.1 javascriptcoregtk-4.1 glib-2.0'
+```
 
-## 运行前端测试
+本次重建后是 `2.50.4` / `2.50.4` / `2.72.1`，三个都满足 Tauri 2 的要求。之后执行上文 chroot 的测试命令即可。
 
-前端 Node/npm 工具链可在宿主环境直接使用，无需 chroot：
+> 以上 bootstrap 需要改系统 mount 与装软件包，通常应由 Codespace 平台管理员或拥有 sudo 权限的开发者执行。没有 root 权限时，请使用平台预置环境或依赖 CI。
+
+## 跑前端测试
+
+前端 Node/npm 工具链在宿主直接用，不需要 chroot：
 
 ```bash
 cd frontend
@@ -124,26 +143,23 @@ npm test
 npm run typecheck
 ```
 
-如只修改文档，可跳过测试；修改前端代码后，建议完整执行以上三条命令。
+只改文档可以跳过；动过前端代码后建议三条都跑一遍（`npm test` 当前 20 个文件、184 个用例）。
 
 ## Lockfile 依赖来源检查结果
 
-本仓库当前有两个 lockfile：
+本仓库有两个 lockfile：`Cargo.lock` 与 `frontend/package-lock.json`。
 
-- `Cargo.lock`
-- `frontend/package-lock.json`
-
-已执行大小写不敏感检查：
+大小写不敏感检查：
 
 ```bash
 grep -Rin --include='Cargo.lock' --include='package-lock.json' 'antgroup' .
 ```
 
-结果：**没有匹配，lockfile 中不存在 `antgroup` 域名**。
+结果：**没有匹配**。
 
 当前 registry 来源为：
 
 - `Cargo.lock`：`registry+https://github.com/rust-lang/crates.io-index`
 - `frontend/package-lock.json`：`https://registry.npmjs.org/...`
 
-后续如更换 registry 或更新依赖，可重复执行上述 `grep` 命令做快速检查。
+换 registry 或更新依赖后可重复执行上面这条 `grep` 做快速检查。

@@ -23,6 +23,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 vi.mock("./tauri", () => ({
   loadSettingsCache: vi.fn(async () => null),
   flushSettingsCache: vi.fn(),
+  configureCacheSalt: vi.fn(async () => undefined),
 }));
 
 const globalStubs = {

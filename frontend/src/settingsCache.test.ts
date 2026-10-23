@@ -5,6 +5,7 @@ import {
   parseSettingsCache,
 } from "./settingsCache";
 import { parse, serialize } from "./configmodel";
+import { DEFAULT_CACHE_SALT } from "./cacheSaltConfig";
 import { DEFAULT_RVS_URL, defaultModel } from "./formspec";
 
 const validConfig = serialize(defaultModel());
@@ -109,9 +110,15 @@ describe("settings cache parsing", () => {
         configJson: '{"add_ingress":[]}',
         apiKey: "key",
         rvsUrl: "https://private-rvs.example.com:8443",
+        cacheSalt: DEFAULT_CACHE_SALT,
       },
     });
-    expect(Object.keys(snapshot.tng)).toEqual(["configJson", "apiKey", "rvsUrl"]);
+    expect(Object.keys(snapshot.tng)).toEqual([
+      "configJson",
+      "apiKey",
+      "rvsUrl",
+      "cacheSalt",
+    ]);
     expect(JSON.stringify(snapshot)).not.toContain("prompt");
     expect(JSON.stringify(snapshot)).not.toContain('"model"');
     expect(JSON.stringify(snapshot)).not.toContain("control_interface");
@@ -168,5 +175,77 @@ describe("cached domain normalization", () => {
     const df = state.config.ingress.fields.dst_filters as { domain: string };
     expect(df.domain).toBe("https://cached.example.com");
     expect(state.config.ingress.tls).toBe(true);
+  });
+});
+
+describe("自动模式的实时盐不落盘", () => {
+  it("快照只带盐配置字段，不携带任何实时盐值", () => {
+    const snapshot = buildSettingsCacheSnapshot("{}", "key", DEFAULT_RVS_URL, {
+      mode: "auto",
+      refreshMinutes: 30,
+      fixedValue: "",
+      overwrite: false,
+    });
+    // 结构化保证：盐配置只有这 4 个字段，实时随机盐没有落脚处。
+    expect(Object.keys(snapshot.tng.cacheSalt)).toEqual([
+      "mode",
+      "refreshMinutes",
+      "fixedValue",
+      "overwrite",
+    ]);
+    expect(JSON.stringify(snapshot)).not.toMatch(/[0-9a-f]{32}/);
+  });
+});
+
+describe("缓存盐配置的缓存恢复", () => {
+  const base = { configJson: validConfig, apiKey: "secret" };
+
+  it("完整字段按原样恢复", () => {
+    const state = parseSettingsCache({
+      schemaVersion: 1,
+      tng: {
+        ...base,
+        rvsUrl: DEFAULT_RVS_URL,
+        cacheSalt: { mode: "off", refreshMinutes: 15, fixedValue: "abc", overwrite: true },
+      },
+    });
+    expect(state.cacheSalt).toEqual({
+      mode: "off",
+      refreshMinutes: 15,
+      fixedValue: "abc",
+      overwrite: true,
+    });
+    // 盐字段存在不影响其它字段的恢复。
+    expect(state.apiKey).toBe("secret");
+    expect(state.config).not.toEqual(defaultModel());
+  });
+
+  it("缺失字段整体回落默认（自动/30/不覆盖）", () => {
+    const state = parseSettingsCache({ schemaVersion: 1, tng: base });
+    expect(state.cacheSalt).toEqual(DEFAULT_CACHE_SALT);
+  });
+
+  it("非法字段逐项回落默认，且不影响配置与 API Key", () => {
+    const state = parseSettingsCache({
+      schemaVersion: 1,
+      tng: {
+        ...base,
+        cacheSalt: { mode: "weird", refreshMinutes: 0, fixedValue: 42, overwrite: "yes" },
+      },
+    });
+    expect(state.cacheSalt).toEqual(DEFAULT_CACHE_SALT);
+    expect(state.apiKey).toBe("secret");
+    expect(state.config).not.toEqual(defaultModel());
+  });
+
+  it("非整数或越界周期回落默认值", () => {
+    for (const refreshMinutes of [1.5, 0, -3, 1441, Number.NaN]) {
+      const state = parseSettingsCache({
+        schemaVersion: 1,
+        tng: { ...base, cacheSalt: { mode: "auto", refreshMinutes } },
+      });
+      expect(state.cacheSalt.refreshMinutes).toBe(DEFAULT_CACHE_SALT.refreshMinutes);
+      expect(state.cacheSalt.mode).toBe("auto");
+    }
   });
 });

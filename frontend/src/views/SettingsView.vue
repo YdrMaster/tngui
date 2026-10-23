@@ -18,9 +18,43 @@ import { useTngConfig } from "../composables/useTngConfig";
 import { useIngressState } from "../composables/useIngressState";
 import { deriveGatewayStateViews } from "../ingressStateViews";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
+import { useCacheSaltConfig } from "../composables/useCacheSaltConfig";
+import {
+  MAX_REFRESH_MINUTES,
+  MIN_REFRESH_MINUTES,
+  normalizeRefreshMinutes,
+  randomSaltValue,
+  type CacheSaltSettings,
+} from "../cacheSaltConfig";
 
 const { model, isDirty, markSaved, serializeCurrent } = useTngConfig();
 const { apiKey } = useInferenceConfig();
+const { cacheSalt, updateCacheSalt } = useCacheSaltConfig();
+
+// 盐配置改动即时下发反代：不进 TNG dirty，不触发保存或重启。
+function commitCacheSalt(patch: Partial<CacheSaltSettings>) {
+  void updateCacheSalt({ ...cacheSalt.value, ...patch });
+}
+const saltMode = computed({
+  get: () => cacheSalt.value.mode,
+  set: (mode: CacheSaltSettings["mode"]) => commitCacheSalt({ mode }),
+});
+const saltRefreshMinutes = computed({
+  get: () => cacheSalt.value.refreshMinutes,
+  set: (value: number | null) =>
+    commitCacheSalt({ refreshMinutes: normalizeRefreshMinutes(value) }),
+});
+const saltFixedValue = computed({
+  get: () => cacheSalt.value.fixedValue,
+  set: (value: string) => commitCacheSalt({ fixedValue: value }),
+});
+const saltOverwrite = computed({
+  get: () => cacheSalt.value.overwrite,
+  set: (value: boolean) => commitCacheSalt({ overwrite: value }),
+});
+function generateSaltValue() {
+  commitCacheSalt({ fixedValue: randomSaltValue() });
+}
 const { ingressKeys, states } = useIngressState();
 const gatewayViews = computed(() => deriveGatewayStateViews(states.value));
 const showRemoteAttestationServiceConfig = computed(() => isRemoteAttestationEnabled(model.value));
@@ -143,6 +177,53 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
           <a-input-password v-model:value="apiKey" placeholder="请输入 API Key" autocapitalize="off" autocorrect="off" spellcheck="false">
             <template #prefix><ApiOutlined /></template>
           </a-input-password>
+        </a-form-item>
+
+        <div style="height:1px;background:var(--border-subtle,#f0f0f0);margin:2px 0 16px"></div>
+
+        <a-form-item label="缓存盐模式">
+          <a-radio-group v-model:value="saltMode" button-style="solid" data-test="salt-mode">
+            <a-radio-button value="off">关闭</a-radio-button>
+            <a-radio-button value="fixed">固定值</a-radio-button>
+            <a-radio-button value="auto">定时刷新</a-radio-button>
+          </a-radio-group>
+          <div class="small-text" style="color:var(--text-secondary);margin-top:6px">
+            cache_salt 会作为顶层字段注入三类推理请求体做缓存隔离；只进请求体，不进请求头、日志与诊断。
+          </div>
+        </a-form-item>
+
+        <a-form-item v-if="saltMode === 'auto'" label="刷新周期">
+          <a-input-number
+            v-model:value="saltRefreshMinutes"
+            data-test="salt-refresh-minutes"
+            :min="MIN_REFRESH_MINUTES"
+            :max="MAX_REFRESH_MINUTES"
+            :step="1"
+            style="width:200px"
+          />
+          <span class="small-text" style="color:var(--text-secondary);margin-left:8px">分钟，到点后自动换新随机盐</span>
+        </a-form-item>
+
+        <a-form-item v-else-if="saltMode === 'fixed'" label="盐值">
+          <a-input-group compact>
+            <a-input
+              v-model:value="saltFixedValue"
+              data-test="salt-fixed-value"
+              placeholder="固定盐值"
+              style="width:320px"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+            />
+            <a-button data-test="salt-generate" @click="generateSaltValue">生成随机值</a-button>
+          </a-input-group>
+        </a-form-item>
+
+        <a-form-item label="覆盖已有 cache_salt">
+          <a-switch v-model:checked="saltOverwrite" data-test="salt-overwrite" :disabled="saltMode === 'off'" />
+          <span class="small-text" style="color:var(--text-secondary);margin-left:8px">
+            默认关闭：请求体里已有 cache_salt 时保留原值。
+          </span>
         </a-form-item>
       </a-form>
     </a-card>

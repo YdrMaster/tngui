@@ -12,7 +12,8 @@
 //! - 对 `POST /v1/chat/completions`、`POST /v1/messages` 和无状态
 //!   `POST /v1/responses`，解析 UTF-8 JSON object 顶层字符串 `model` 后生成
 //!   单一路径 model segment。非法/缺失 model fail-closed。
-//! - 不注入、不生成、不读取 `x-model`；body 字节原样保留。
+//! - 不注入、不生成、不读取 `x-model`；对三类端点按缓存盐策略向 body 顶层注入
+//!   `cache_salt`，其余 body 字节尽力保留。
 //!
 //! 实现：原生 tokio TCP（无额外依赖，与 `inference.rs` 同向；design D2 由 axum 调整为
 //! 原生 TCP：本沙箱网络受限、避免拉新依赖、与 codebase 风格一致，且非流式单跳足够）。
@@ -27,6 +28,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+use crate::cache_salt::{CacheSaltHandle, SaltDecision};
 
 /// 对外绑定 host 候选（D1：默认仅本机；0.0.0.0 为用户显式 opt-in）。
 pub const BIND_LOCALHOST: &str = "127.0.0.1";
@@ -169,11 +172,14 @@ impl ProxyHandle {
 
 /// 对每条 route 起一个对外监听器。任一绑定失败即整批失败并回滚已起的（fail-fast：
 /// 不留 tng 在跑却缺对外入口的状态）。
-pub async fn start_proxy(routes: Vec<ProxyRoute>) -> Result<ProxyHandle, String> {
+pub async fn start_proxy(
+    routes: Vec<ProxyRoute>,
+    salt: Arc<CacheSaltHandle>,
+) -> Result<ProxyHandle, String> {
     let diagnostics = Arc::new(ProxyDiagnostics::default());
     let mut listeners = Vec::with_capacity(routes.len());
     for route in routes {
-        match start_one(route, diagnostics.clone()).await {
+        match start_one(route, diagnostics.clone(), salt.clone()).await {
             Ok(l) => listeners.push(l),
             Err(e) => {
                 for l in listeners {
@@ -192,6 +198,7 @@ pub async fn start_proxy(routes: Vec<ProxyRoute>) -> Result<ProxyHandle, String>
 async fn start_one(
     route: ProxyRoute,
     diagnostics: Arc<ProxyDiagnostics>,
+    salt: Arc<CacheSaltHandle>,
 ) -> Result<ProxyListener, String> {
     let bind = format!("{}:{}", route.out_host, route.out_port);
     let listener = TcpListener::bind(&bind)
@@ -215,8 +222,9 @@ async fn start_one(
                     let rh = remote_host.clone();
                     let mo = models_origin.clone();
                     let dg = diagnostics.clone();
+                    let salt = salt.clone();
                     tokio::spawn(async move {
-                        let _ = handle_conn(stream, port, rh, mo, dg).await;
+                        let _ = handle_conn(stream, port, rh, mo, dg, salt).await;
                     });
                 }
             }
@@ -239,6 +247,7 @@ async fn handle_conn(
     remote_host: String,
     models_origin: Option<String>,
     diagnostics: Arc<ProxyDiagnostics>,
+    salt: Arc<CacheSaltHandle>,
 ) -> std::io::Result<()> {
     // 1. 读请求头（到 \r\n\r\n）
     let (buf, body_off) = match read_until_double_crlf(&mut client).await? {
@@ -304,8 +313,9 @@ async fn handle_conn(
     }
 
     // 3. pre-TNG 模型 path：只从 supported endpoint 的原始 body 语义决定 path。
-    //    body 本身永不改写；`x-model` 与模型身份解耦，不做读取、覆盖或删除决策。
-    let path = match resolve_model_path(&method, &path, &body) {
+    //    `x-model` 与模型身份解耦，不做读取、覆盖或删除决策。
+    let (model_override, parsed_object) = resolve_model_path_with_object(&method, &path, &body);
+    let path = match model_override {
         ModelOverride::Unsupported => path,
         ModelOverride::Invalid => {
             diagnostics.increment_identity_rejected();
@@ -316,6 +326,15 @@ async fn handle_conn(
             v
         }
     };
+
+    // 3.1 缓存盐注入：只在支持端点解析出有效模型身份后发生（此时 body 已是合法顶层 object），
+    //     且在设 Content-Length 与转发之前——早于进入链路加密。关闭盐模式、或已有盐且不
+    //     覆盖时，body 保持原字节。
+    if let Some(object) = parsed_object.as_ref()
+        && let Some(decision) = salt.current()
+    {
+        inject_cache_salt(&mut body, object, &decision);
+    }
 
     // 4. 剥离 hop-by-hop 头；对 upstream 设 Connection: close。
     //    Host 须为远端目标（mapping 的 out.host / http_proxy 的 domain）：tng 内部 ingress
@@ -520,33 +539,184 @@ enum ModelOverride {
 
 /// `body.model` → pre-TNG path。supported endpoint 必须产出有效路径；其余路径
 /// 不产生模型语义。
+///
+/// 仅供单测直接校验路径解析；生产路径用 [`resolve_model_path_with_object`] 复用同一次解析。
+#[cfg(test)]
 fn resolve_model_path(method: &str, path_with_query: &str, body: &[u8]) -> ModelOverride {
+    resolve_model_path_with_object(method, path_with_query, body).0
+}
+
+/// 与 [`resolve_model_path`] 同源，但把解析出的顶层 object 一并返回，供缓存盐注入复用，
+/// 避免对 body 重复解析。
+fn resolve_model_path_with_object(
+    method: &str,
+    path_with_query: &str,
+    body: &[u8],
+) -> (ModelOverride, Option<serde_json::Value>) {
     if !is_supported_model_method(method) || !is_supported_model_path(path_with_query) {
-        return ModelOverride::Unsupported;
+        return (ModelOverride::Unsupported, None);
     }
-    let model = match extract_body_model(body) {
+    let object = match extract_body_object(body) {
         Some(v) => v,
-        None => return ModelOverride::Invalid,
+        None => return (ModelOverride::Invalid, None),
+    };
+    // 顶层字符串 `model`，身份保持原样、不做 trim。
+    let model = match object.get("model").and_then(|v| v.as_str()) {
+        Some(model) if !model.is_empty() => model.to_string(),
+        _ => return (ModelOverride::Invalid, None),
     };
     let (raw_path, query) = path_with_query
         .split_once('?')
         .unwrap_or((path_with_query, ""));
     let prefix = format!("/models/{}", encode_model_segment(&model));
-    ModelOverride::Path(if query.is_empty() {
+    let path = if query.is_empty() {
         prefix + raw_path
     } else {
         prefix + raw_path + "?" + query
-    })
+    };
+    (ModelOverride::Path(path), Some(object))
 }
 
-/// 解析 UTF-8 JSON object 顶层字符串 `model`；字符串身份保持原样，不做 trim。
-fn extract_body_model(body: &[u8]) -> Option<String> {
+/// 解析 UTF-8 JSON object；非 object 或非法 JSON 返回 None。
+fn extract_body_object(body: &[u8]) -> Option<serde_json::Value> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    if !v.is_object() {
+    v.is_object().then_some(v)
+}
+
+const CACHE_SALT_FIELD: &str = "cache_salt";
+
+/// 按盐决定把 `cache_salt` 写进请求体顶层。
+///
+/// 只在顶层 JSON object 首个 `{` 之后插入一个成员；覆盖场景只替换已有成员的值。两种情况
+/// 都不改动 body 其余字节、字段顺序、空白与转义。返回是否改写了 body。
+fn inject_cache_salt(
+    body: &mut Vec<u8>,
+    object: &serde_json::Value,
+    decision: &SaltDecision,
+) -> bool {
+    let encoded = match serde_json::to_string(&decision.value) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    if object.get(CACHE_SALT_FIELD).is_some() {
+        if !decision.overwrite {
+            return false;
+        }
+        let Some((start, end)) = find_top_level_member_value(body, CACHE_SALT_FIELD) else {
+            return false; // 解析与扫描结果不一致时保守不改写
+        };
+        let mut rewritten = Vec::with_capacity(body.len());
+        rewritten.extend_from_slice(&body[..start]);
+        rewritten.extend_from_slice(encoded.as_bytes());
+        rewritten.extend_from_slice(&body[end..]);
+        *body = rewritten;
+        true
+    } else {
+        let Some(open) = body.iter().position(|&b| b == b'{') else {
+            return false;
+        };
+        let mut rewritten = Vec::with_capacity(body.len() + encoded.len() + 8);
+        rewritten.extend_from_slice(&body[..=open]);
+        rewritten.extend_from_slice(b"\"");
+        rewritten.extend_from_slice(CACHE_SALT_FIELD.as_bytes());
+        rewritten.extend_from_slice(b"\":");
+        rewritten.extend_from_slice(encoded.as_bytes());
+        rewritten.push(b',');
+        rewritten.extend_from_slice(&body[open + 1..]);
+        *body = rewritten;
+        true
+    }
+}
+
+/// 在顶层 object 中找到成员 `key` 值的字节范围 `[start, end)`；只扫描顶层深度，
+/// 跳过字符串与嵌套结构。找不到返回 None。
+fn find_top_level_member_value(body: &[u8], key: &str) -> Option<(usize, usize)> {
+    let mut i = body.iter().position(|&b| b == b'{')? + 1;
+    loop {
+        skip_json_ws(body, &mut i);
+        match body.get(i)? {
+            b'}' => return None,
+            b',' => i += 1,
+            b'"' => {
+                let key_start = i;
+                let key_end = skip_json_string(body, i)?;
+                let decoded: String = serde_json::from_slice(&body[key_start..key_end]).ok()?;
+                let mut j = key_end;
+                skip_json_ws(body, &mut j);
+                if body.get(j) != Some(&b':') {
+                    return None;
+                }
+                j += 1;
+                skip_json_ws(body, &mut j);
+                let value_end = skip_json_value(body, j)?;
+                if decoded == key {
+                    return Some((j, value_end));
+                }
+                i = value_end;
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn skip_json_ws(body: &[u8], i: &mut usize) {
+    while *i < body.len() && matches!(body[*i], b' ' | b'\t' | b'\r' | b'\n') {
+        *i += 1;
+    }
+}
+
+/// 跳过 JSON 字符串字面量，返回闭合引号之后的索引。
+fn skip_json_string(body: &[u8], start: usize) -> Option<usize> {
+    if body.get(start) != Some(&b'"') {
         return None;
     }
-    let model = v.get("model")?.as_str()?.to_string();
-    if model.is_empty() { None } else { Some(model) }
+    let mut i = start + 1;
+    while i < body.len() {
+        match body[i] {
+            b'\\' => i += 2,
+            b'"' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// 跳过任意 JSON 值，返回其后的索引。
+fn skip_json_value(body: &[u8], start: usize) -> Option<usize> {
+    match body.get(start)? {
+        b'"' => skip_json_string(body, start),
+        b'{' | b'[' => {
+            let mut i = start;
+            let mut depth = 0i32;
+            while i < body.len() {
+                match body[i] {
+                    b'"' => i = skip_json_string(body, i)?,
+                    b'{' | b'[' => {
+                        depth += 1;
+                        i += 1;
+                    }
+                    b'}' | b']' => {
+                        depth -= 1;
+                        i += 1;
+                        if depth == 0 {
+                            return Some(i);
+                        }
+                    }
+                    _ => i += 1,
+                }
+            }
+            None
+        }
+        _ => {
+            let mut i = start;
+            while i < body.len()
+                && !matches!(body[i], b',' | b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n')
+            {
+                i += 1;
+            }
+            Some(i)
+        }
+    }
 }
 
 /// 模型名作为**单一路径 segment** 编码：只保留 RFC3986 unreserved
@@ -724,6 +894,7 @@ async fn write_simple_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache_salt::{CacheSaltMode, CacheSaltPolicy};
     use std::sync::Arc;
     use tokio::sync::{Mutex, Notify};
 
@@ -776,6 +947,17 @@ mod tests {
         client_headers: &[(&str, &str)],
         body: Vec<u8>,
     ) -> (String, Option<MockReceived>) {
+        run_once_with_salt(no_salt(), method, path, client_headers, body).await
+    }
+
+    /// 用给定盐句柄跑一次请求，供盐开启/关闭的正反用例使用。
+    async fn run_once_with_salt(
+        salt: Arc<CacheSaltHandle>,
+        method: &str,
+        path: &str,
+        client_headers: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> (String, Option<MockReceived>) {
         let up_port = unique_port();
         let out_port = unique_port();
         let received = Arc::new(Mutex::new(None));
@@ -788,19 +970,37 @@ mod tests {
             });
         }
         ready.notified().await;
-        let handle = start_proxy(vec![ProxyRoute {
-            out_host: BIND_LOCALHOST.to_string(),
-            out_port,
-            internal_port: up_port,
-            remote_host: "10.0.0.1".to_string(),
-            models_origin: None,
-        }])
+        let handle = start_proxy(
+            vec![ProxyRoute {
+                out_host: BIND_LOCALHOST.to_string(),
+                out_port,
+                internal_port: up_port,
+                remote_host: "10.0.0.1".to_string(),
+                models_origin: None,
+            }],
+            salt,
+        )
         .await
         .unwrap();
         let resp = send_request_bytes(out_port, method, path, client_headers, body).await;
         handle.stop().await;
         let got = received.lock().await.clone();
         (resp, got)
+    }
+
+    /// 只用既有透传语义的测试默认关闭盐，保持 body 逐字节断言。
+    fn no_salt() -> Arc<CacheSaltHandle> {
+        Arc::new(CacheSaltHandle::new(CacheSaltPolicy::off()))
+    }
+
+    /// 固定盐的句柄，用于验证注入行为。
+    fn salt_on() -> Arc<CacheSaltHandle> {
+        Arc::new(CacheSaltHandle::new(CacheSaltPolicy {
+            mode: CacheSaltMode::Fixed,
+            fixed_value: "salt-xyz".to_string(),
+            refresh_minutes: 30,
+            overwrite: false,
+        }))
     }
 
     async fn send_request_bytes(
@@ -1033,13 +1233,16 @@ Connection: close
         let received = Arc::new(Mutex::new(None));
         let capi_port = start_capi_mock(received.clone()).await;
         let proxy_port = unique_port();
-        let handle = start_proxy(vec![ProxyRoute {
-            out_host: BIND_LOCALHOST.to_string(),
-            out_port: proxy_port,
-            internal_port: 1,
-            remote_host: "10.0.0.1".to_string(),
-            models_origin: Some(format!("http://127.0.0.1:{capi_port}")),
-        }])
+        let handle = start_proxy(
+            vec![ProxyRoute {
+                out_host: BIND_LOCALHOST.to_string(),
+                out_port: proxy_port,
+                internal_port: 1,
+                remote_host: "10.0.0.1".to_string(),
+                models_origin: Some(format!("http://127.0.0.1:{capi_port}")),
+            }],
+            no_salt(),
+        )
         .await
         .unwrap();
         let response = send_request_bytes(
@@ -1096,13 +1299,16 @@ Connection: close
     async fn unreachable_models_origin_returns_explicit_failure() {
         let capi_port = unique_port();
         let out_port = unique_port();
-        let handle = start_proxy(vec![ProxyRoute {
-            out_host: BIND_LOCALHOST.to_string(),
-            out_port,
-            internal_port: 1,
-            remote_host: "10.0.0.1".to_string(),
-            models_origin: Some(format!("http://127.0.0.1:{capi_port}")),
-        }])
+        let handle = start_proxy(
+            vec![ProxyRoute {
+                out_host: BIND_LOCALHOST.to_string(),
+                out_port,
+                internal_port: 1,
+                remote_host: "10.0.0.1".to_string(),
+                models_origin: Some(format!("http://127.0.0.1:{capi_port}")),
+            }],
+            no_salt(),
+        )
         .await
         .unwrap();
         let response = send_request_bytes(out_port, "GET", "/v1/models", &[], vec![]).await;
@@ -1118,13 +1324,16 @@ Connection: close
     #[tokio::test]
     async fn model_discovery_without_origin_returns_explicit_failure() {
         let out_port = unique_port();
-        let handle = start_proxy(vec![ProxyRoute {
-            out_host: BIND_LOCALHOST.to_string(),
-            out_port,
-            internal_port: 1,
-            remote_host: "10.0.0.1".to_string(),
-            models_origin: None,
-        }])
+        let handle = start_proxy(
+            vec![ProxyRoute {
+                out_host: BIND_LOCALHOST.to_string(),
+                out_port,
+                internal_port: 1,
+                remote_host: "10.0.0.1".to_string(),
+                models_origin: None,
+            }],
+            no_salt(),
+        )
         .await
         .unwrap();
         let response = send_request_bytes(out_port, "GET", "/v1/models", &[], vec![]).await;
@@ -1147,13 +1356,16 @@ Connection: close
             });
         }
         ready.notified().await;
-        let handle = start_proxy(vec![ProxyRoute {
-            out_host: BIND_LOCALHOST.to_string(),
-            out_port,
-            internal_port: up_port,
-            remote_host: "10.0.0.1".to_string(),
-            models_origin: None,
-        }])
+        let handle = start_proxy(
+            vec![ProxyRoute {
+                out_host: BIND_LOCALHOST.to_string(),
+                out_port,
+                internal_port: up_port,
+                remote_host: "10.0.0.1".to_string(),
+                models_origin: None,
+            }],
+            no_salt(),
+        )
         .await
         .unwrap();
 
@@ -1218,13 +1430,16 @@ Connection: close
     async fn upstream_connect_failure_bumps_upstream_category() {
         let out_port = unique_port();
         let internal_port = unique_port();
-        let handle = start_proxy(vec![ProxyRoute {
-            out_host: BIND_LOCALHOST.to_string(),
-            out_port,
-            internal_port,
-            remote_host: "10.0.0.1".to_string(),
-            models_origin: None,
-        }])
+        let handle = start_proxy(
+            vec![ProxyRoute {
+                out_host: BIND_LOCALHOST.to_string(),
+                out_port,
+                internal_port,
+                remote_host: "10.0.0.1".to_string(),
+                models_origin: None,
+            }],
+            no_salt(),
+        )
         .await
         .unwrap();
         let response = send_request_bytes(
@@ -1266,9 +1481,10 @@ Connection: close
         assert_eq!(got.body, json);
     }
 
-    /// 直接反代客户端没有调试页功能开关参数；同一原始 body 在两次调用间必须字节一致。
+    /// 直接反代客户端没有调试页功能开关参数：盐关闭时同一原始 body 两次调用必须字节一致，
+    /// 也不得新增身份专用头。加盐是唯一允许的 body 增量，由注入测试另行覆盖。
     #[tokio::test]
-    async fn direct_client_body_is_identity_feature_invariant() {
+    async fn direct_client_body_is_invariant_without_salt() {
         let raw_body =
             r#"{"model":"direct-model","messages":[{"role":"user","content":"直接客户端原文"}]}"#
                 .as_bytes();
@@ -1409,5 +1625,326 @@ Connection: close
         assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
         assert!(resp.contains("Connection: close"));
         assert!(resp.contains(r#""ok":true"#), "resp={resp}");
+    }
+
+    #[test]
+    fn inject_cache_salt_inserts_after_first_brace_preserving_other_bytes() {
+        let body = br#"{  "model":"m", "messages":[{"role":"user","content":"x"}]  }"#;
+        let object: serde_json::Value = serde_json::from_slice(body).unwrap();
+        let decision = SaltDecision {
+            value: "abc".to_string(),
+            overwrite: false,
+        };
+        let mut out = body.to_vec();
+        assert!(inject_cache_salt(&mut out, &object, &decision));
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            r#"{"cache_salt":"abc",  "model":"m", "messages":[{"role":"user","content":"x"}]  }"#
+        );
+    }
+
+    #[test]
+    fn inject_cache_salt_escapes_salt_value() {
+        let body = br#"{"model":"m"}"#;
+        let object: serde_json::Value = serde_json::from_slice(body).unwrap();
+        let decision = SaltDecision {
+            value: "a\"b\\c".to_string(),
+            overwrite: false,
+        };
+        let mut out = body.to_vec();
+        assert!(inject_cache_salt(&mut out, &object, &decision));
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            r#"{"cache_salt":"a\"b\\c","model":"m"}"#
+        );
+    }
+
+    #[test]
+    fn inject_skips_when_existing_and_not_overwriting() {
+        let body = br#"{"cache_salt":"client","model":"m"}"#;
+        let object: serde_json::Value = serde_json::from_slice(body).unwrap();
+        let decision = SaltDecision {
+            value: "server".to_string(),
+            overwrite: false,
+        };
+        let mut out = body.to_vec();
+        assert!(!inject_cache_salt(&mut out, &object, &decision));
+        assert_eq!(out, body.to_vec());
+    }
+
+    #[test]
+    fn inject_overwrites_existing_value_and_preserves_rest() {
+        let body = br#"{"cache_salt":"client","model":"m", "messages":[]}"#;
+        let object: serde_json::Value = serde_json::from_slice(body).unwrap();
+        let decision = SaltDecision {
+            value: "server".to_string(),
+            overwrite: true,
+        };
+        let mut out = body.to_vec();
+        assert!(inject_cache_salt(&mut out, &object, &decision));
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            r#"{"cache_salt":"server","model":"m", "messages":[]}"#
+        );
+    }
+
+    #[test]
+    fn find_top_level_member_value_ignores_nested_keys() {
+        let body = br#"{"a":{"cache_salt":"nested"},"cache_salt":"top","b":[1,2]}"#;
+        let (start, end) = find_top_level_member_value(body, "cache_salt").unwrap();
+        assert_eq!(&body[start..end], br#""top""#);
+    }
+
+    #[tokio::test]
+    async fn injects_cache_salt_on_all_three_endpoints() {
+        for path in ["/v1/chat/completions", "/v1/messages", "/v1/responses"] {
+            let body = br#"{"model":"model-a","messages":[]}"#.to_vec();
+            let (resp, got) = run_once_with_salt(salt_on(), "POST", path, &[], body.clone()).await;
+            assert!(resp.starts_with("HTTP/1.1 200"), "{path} resp={resp}");
+            let got = got.expect("upstream should receive request");
+            assert_eq!(got.path, format!("/models/model-a{path}"));
+            let value: serde_json::Value = serde_json::from_slice(&got.body).unwrap();
+            assert_eq!(
+                value.get("cache_salt").and_then(|v| v.as_str()),
+                Some("salt-xyz"),
+                "{path}"
+            );
+            assert_eq!(value.get("model").and_then(|v| v.as_str()), Some("model-a"));
+            assert!(
+                !got.headers
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("cache_salt"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn salt_off_mode_forwards_body_unchanged() {
+        let body = br#"{"model":"m","messages":[]}"#.to_vec();
+        let (resp, got) =
+            run_once_with_salt(no_salt(), "POST", "/v1/chat/completions", &[], body.clone()).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
+        assert_eq!(got.unwrap().body, body);
+    }
+
+    #[tokio::test]
+    async fn unsupported_endpoint_is_not_injected() {
+        let body = br#"{"model":"m"}"#.to_vec();
+        let (resp, got) =
+            run_once_with_salt(salt_on(), "POST", "/v1/completions", &[], body.clone()).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
+        let got = got.unwrap();
+        assert_eq!(got.path, "/v1/completions");
+        assert_eq!(got.body, body);
+    }
+
+    #[tokio::test]
+    async fn invalid_model_still_fails_closed_with_400_when_salted() {
+        let (resp, got) = run_once_with_salt(
+            salt_on(),
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            b"{}".to_vec(),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 400"), "resp={resp}");
+        assert!(got.is_none(), "invalid request must not reach upstream");
+    }
+
+    #[tokio::test]
+    async fn oversized_body_still_fails_closed_with_413_when_salted() {
+        let (resp, got) = run_once_with_salt(
+            salt_on(),
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            vec![b' '; BODY_LIMIT + 1],
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 413"), "resp={resp}");
+        assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn model_discovery_branch_unchanged_when_salted() {
+        let (resp, got) = run_once_with_salt(salt_on(), "GET", "/v1/models", &[], Vec::new()).await;
+        assert!(resp.starts_with("HTTP/1.1 502"), "resp={resp}");
+        assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn salt_never_appears_in_forwarded_headers() {
+        let header_names = |h: &Headers| {
+            h.iter()
+                .map(|(k, _)| k.to_ascii_lowercase())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let body = br#"{"model":"m","messages":[]}"#.to_vec();
+        let (_resp, off) = run_once_with_salt(
+            no_salt(),
+            "POST",
+            "/v1/chat/completions",
+            &[("Authorization", "Bearer k")],
+            body.clone(),
+        )
+        .await;
+        let (_resp, on) = run_once_with_salt(
+            salt_on(),
+            "POST",
+            "/v1/chat/completions",
+            &[("Authorization", "Bearer k")],
+            body,
+        )
+        .await;
+        let off = off.unwrap();
+        let on = on.unwrap();
+        assert_eq!(header_names(&off.headers), header_names(&on.headers));
+        assert!(
+            !header_names(&on.headers)
+                .iter()
+                .any(|name| name == "cache_salt")
+        );
+    }
+
+    #[tokio::test]
+    async fn salted_request_keeps_fixed_diagnostics_categories() {
+        let up_port = unique_port();
+        let out_port = unique_port();
+        let received = Arc::new(Mutex::new(None));
+        let ready = Arc::new(Notify::new());
+        {
+            let received = received.clone();
+            let ready = ready.clone();
+            tokio::spawn(async move {
+                mock_upstream(up_port, received, ready).await;
+            });
+        }
+        ready.notified().await;
+        let handle = start_proxy(
+            vec![ProxyRoute {
+                out_host: BIND_LOCALHOST.to_string(),
+                out_port,
+                internal_port: up_port,
+                remote_host: "10.0.0.1".to_string(),
+                models_origin: None,
+            }],
+            salt_on(),
+        )
+        .await
+        .unwrap();
+        let resp = send_request_bytes(
+            out_port,
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            br#"{"model":"m"}"#.to_vec(),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
+        assert_eq!(
+            handle.diagnostics(),
+            ProxyDiagnosticsSnapshot {
+                proxy_running: true,
+                identity_valid_total: 1,
+                identity_rejected_total: 0,
+                payload_rejected_total: 0,
+                discovery_success_total: 0,
+                discovery_failure_total: 0,
+                upstream_failure_total: 0,
+            }
+        );
+        handle.stop().await;
+    }
+
+    #[tokio::test]
+    async fn salt_policy_updates_apply_without_restart() {
+        let up_port = unique_port();
+        let out_port = unique_port();
+        let received = Arc::new(Mutex::new(Vec::<MockReceived>::new()));
+        let ready = Arc::new(Notify::new());
+        {
+            let received = received.clone();
+            let ready = ready.clone();
+            tokio::spawn(async move {
+                let listener = TcpListener::bind(("127.0.0.1", up_port)).await.unwrap();
+                ready.notify_one();
+                for _ in 0..2 {
+                    let (mut s, _) = listener.accept().await.unwrap();
+                    let (buf, off) = read_until_double_crlf(&mut s).await.unwrap().unwrap();
+                    let head = String::from_utf8_lossy(&buf[..off]);
+                    let (method, path) = parse_request_line(&head).unwrap();
+                    received.lock().await.push(MockReceived {
+                        method,
+                        path,
+                        headers: parse_headers(&head),
+                        body: buf[off..].to_vec(),
+                    });
+                    let body = "{}";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    s.write_all(resp.as_bytes()).await.unwrap();
+                    s.flush().await.unwrap();
+                }
+            });
+        }
+        ready.notified().await;
+
+        let salt = Arc::new(CacheSaltHandle::new(CacheSaltPolicy {
+            mode: CacheSaltMode::Fixed,
+            fixed_value: "first".to_string(),
+            refresh_minutes: 30,
+            overwrite: false,
+        }));
+        let handle = start_proxy(
+            vec![ProxyRoute {
+                out_host: BIND_LOCALHOST.to_string(),
+                out_port,
+                internal_port: up_port,
+                remote_host: "10.0.0.1".to_string(),
+                models_origin: None,
+            }],
+            salt.clone(),
+        )
+        .await
+        .unwrap();
+
+        let _ = send_request_bytes(
+            out_port,
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            br#"{"model":"m"}"#.to_vec(),
+        )
+        .await;
+        // 运行中直接改策略：下一个请求应立即用新盐，无需重启反代。
+        salt.update(CacheSaltPolicy {
+            mode: CacheSaltMode::Fixed,
+            fixed_value: "second".to_string(),
+            ..CacheSaltPolicy::default()
+        });
+        let _ = send_request_bytes(
+            out_port,
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            br#"{"model":"m"}"#.to_vec(),
+        )
+        .await;
+        handle.stop().await;
+
+        let got = received.lock().await;
+        let first: serde_json::Value = serde_json::from_slice(&got[0].body).unwrap();
+        let second: serde_json::Value = serde_json::from_slice(&got[1].body).unwrap();
+        assert_eq!(
+            first.get("cache_salt").and_then(|v| v.as_str()),
+            Some("first")
+        );
+        assert_eq!(
+            second.get("cache_salt").and_then(|v| v.as_str()),
+            Some("second")
+        );
     }
 }

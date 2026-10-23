@@ -1,5 +1,6 @@
 // 与 Tauri 后端的 invoke 封装 + 原生对话框（导入/导出取路径）。
 import { Channel, invoke } from "@tauri-apps/api/core";
+import type { CacheSaltSettings } from "./cacheSaltConfig";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 export interface StatusReport {
@@ -177,6 +178,27 @@ export async function exportRemoteAttestationReport(
 ): Promise<void> {
   return exportConfig(path, JSON.stringify(report, null, 2));
 }
+/** 反代缓存盐配置的下发入参（周期以字符串传给后端，由后端规整）。 */
+export interface CacheSaltApplyInput {
+  mode: string;
+  refreshMinutes: number;
+  fixedValue: string;
+  overwrite: boolean;
+}
+
+/**
+ * 把缓存盐策略推给运行中的反代。改动即时生效，不写盘、不重启 tng，
+ * 也不进入 TNG 配置的保存流程。
+ */
+export async function configureCacheSalt(input: CacheSaltApplyInput): Promise<void> {
+  return invoke<void>("configure_cache_salt", {
+    mode: input.mode,
+    refreshMinutes: String(input.refreshMinutes),
+    fixedValue: input.fixedValue,
+    overwrite: input.overwrite,
+  });
+}
+
 /** 独立设置缓存 payload；后端只校验信封，不解析 `tng` 字段。 */
 export interface SettingsCachePayload {
   schemaVersion: 1;
@@ -184,6 +206,7 @@ export interface SettingsCachePayload {
     configJson: string;
     apiKey: string;
     rvsUrl: string;
+    cacheSalt: CacheSaltSettings;
   };
 }
 

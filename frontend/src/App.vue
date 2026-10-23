@@ -11,6 +11,7 @@ import InferenceView from "./views/InferenceView.vue";
 import SettingsView from "./views/SettingsView.vue";
 import { useTngConfig } from "./composables/useTngConfig";
 import { useInferenceConfig } from "./composables/useInferenceConfig";
+import { useCacheSaltConfig } from "./composables/useCacheSaltConfig";
 import {
   buildSettingsCacheSnapshot,
   flushSettingsAndClose,
@@ -99,8 +100,14 @@ onMounted(async () => {
     event.preventDefault();
     const { serializeCurrent, currentRvsUrl } = useTngConfig();
     const { apiKey } = useInferenceConfig();
+    const { currentCacheSalt } = useCacheSaltConfig();
     await flushSettingsAndClose(
-      buildSettingsCacheSnapshot(serializeCurrent(), apiKey.value, currentRvsUrl()),
+      buildSettingsCacheSnapshot(
+        serializeCurrent(),
+        apiKey.value,
+        currentRvsUrl(),
+        currentCacheSalt(),
+      ),
       flushSettingsCache,
       () => getCurrentWindow().destroy(),
     );
@@ -111,6 +118,7 @@ onMounted(async () => {
     initialize: useTngConfig().initialize,
     initializeRvsUrl: useTngConfig().initializeRvsUrl,
     initializeApiKey: useInferenceConfig().initializeApiKey,
+    initializeCacheSalt: useCacheSaltConfig().initializeCacheSalt,
   });
   settingsReady.value = true;
 

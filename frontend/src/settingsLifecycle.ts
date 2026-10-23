@@ -1,5 +1,6 @@
 // App 生命周期的可测试入口：启动恢复设置、关闭 flush、切出设置自动保存。
 import type { ConfigModel } from "./formspec";
+import type { CacheSaltSettings } from "./cacheSaltConfig";
 import { parseSettingsCache } from "./settingsCache";
 import type { SettingsCachePayload } from "./tauri";
 
@@ -7,6 +8,8 @@ export interface SettingsRestoreTarget {
   initialize(config: ConfigModel): void;
   initializeApiKey(apiKey: string): void;
   initializeRvsUrl(rvsUrl: string): void;
+  /** 恢复盐配置并即时下发反代；与 TNG 配置的 dirty 基线无关。 */
+  initializeCacheSalt(cacheSalt: CacheSaltSettings): void | Promise<void>;
 }
 
 export async function bootstrapSettings(
@@ -19,12 +22,14 @@ export async function bootstrapSettings(
     target.initialize(restored.config);
     target.initializeApiKey(restored.apiKey);
     target.initializeRvsUrl(restored.rvsUrl);
+    await target.initializeCacheSalt(restored.cacheSalt);
   } catch (error) {
     console.error("读取设置缓存失败", error);
     const fallback = parseSettingsCache({});
     target.initialize(fallback.config);
     target.initializeApiKey(fallback.apiKey);
     target.initializeRvsUrl(fallback.rvsUrl);
+    await target.initializeCacheSalt(fallback.cacheSalt);
   }
 }
 

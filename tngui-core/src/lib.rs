@@ -7,6 +7,7 @@
 //!
 //! 本 crate 不链接任何 TNG 代码，纯逻辑可脱离 webview 单独编译与测试。
 
+pub mod cache_salt;
 pub mod config;
 pub mod inference;
 pub mod log;
@@ -15,6 +16,10 @@ pub mod process;
 pub mod proxy;
 pub mod status;
 
+pub use cache_salt::{
+    CacheSaltHandle, CacheSaltMode, CacheSaltPolicy, DEFAULT_REFRESH_MINUTES, SaltDecision,
+    normalize_refresh_minutes,
+};
 pub use config::{
     PrepareError, TNGUI_RVS_URL_FIELD, control_port, pick_free_port, pick_free_ports,
     pick_launch_ports, prepare_config, prepare_launch, sanitize_user_config_for_tng,

@@ -95,6 +95,7 @@ function onRemTypeChange(val: string | number) {
           <a-switch
             v-model:checked="outwardExternal"
             :disabled="disabled"
+            aria-label="反代对外绑定"
             checked-children="0.0.0.0"
             un-checked-children="127.0.0.1"
           />

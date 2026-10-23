@@ -1,13 +1,19 @@
-// 设置页跨会话缓存：只快照“已提交”的结构化模型、API Key 与 RVS 地址。
+// 设置页跨会话缓存：只快照“已提交”的结构化模型、API Key、RVS 地址与缓存盐配置。
 // 未应用原始 JSON 文本、推理 model/prompt 绝不在这里出现。
 import { parse } from "./configmodel";
 import { DEFAULT_RVS_URL, defaultModel, type ConfigModel } from "./formspec";
+import {
+  DEFAULT_CACHE_SALT,
+  restoredCacheSalt,
+  type CacheSaltSettings,
+} from "./cacheSaltConfig";
 import type { SettingsCachePayload } from "./tauri";
 
 export interface SettingsState {
   config: ConfigModel;
   apiKey: string;
   rvsUrl: string;
+  cacheSalt: CacheSaltSettings;
 }
 
 function restoredRvsUrl(value: unknown): string {
@@ -18,6 +24,7 @@ export function buildSettingsCacheSnapshot(
   configJson: string,
   apiKey: string,
   rvsUrl: string,
+  cacheSalt: CacheSaltSettings = DEFAULT_CACHE_SALT,
 ): SettingsCachePayload {
   return {
     schemaVersion: 1,
@@ -25,6 +32,7 @@ export function buildSettingsCacheSnapshot(
       configJson,
       apiKey,
       rvsUrl,
+      cacheSalt: { ...cacheSalt },
     },
   };
 }
@@ -33,14 +41,24 @@ export function buildSettingsCacheSnapshot(
 export function parseSettingsCache(payload: unknown): SettingsState {
   const envelope = payload as {
     schemaVersion?: unknown;
-    tng?: { configJson?: unknown; apiKey?: unknown; rvsUrl?: unknown };
+    tng?: {
+      configJson?: unknown;
+      apiKey?: unknown;
+      rvsUrl?: unknown;
+      cacheSalt?: unknown;
+    };
   } | null;
   if (
     !envelope ||
     typeof envelope !== "object" ||
     envelope.schemaVersion !== 1
   ) {
-    return { config: defaultModel(), apiKey: "", rvsUrl: DEFAULT_RVS_URL };
+    return {
+      config: defaultModel(),
+      apiKey: "",
+      rvsUrl: DEFAULT_RVS_URL,
+      cacheSalt: { ...DEFAULT_CACHE_SALT },
+    };
   }
 
   const cachedTng = envelope.tng;
@@ -48,16 +66,18 @@ export function parseSettingsCache(payload: unknown): SettingsState {
   const parsedConfig = configJson ? parse(configJson) : { error: "missing" };
   const apiKey = typeof cachedTng?.apiKey === "string" ? cachedTng.apiKey : "";
   const rvsUrl = restoredRvsUrl(cachedTng?.rvsUrl);
+  // 盐配置独立回落：非法字段不影响 apiKey 与 TNG 配置的恢复。
+  const cacheSalt = restoredCacheSalt(cachedTng?.cacheSalt);
   if (parsedConfig.error) {
     // 配置 JSON 无效只回退 TNG 配置；独立缓存中的有效 RVS 地址仍属于用户显式值，
     // 不得被默认值覆盖。
     const config = defaultModel();
     config.rvsUrl = rvsUrl;
-    return { config, apiKey, rvsUrl };
+    return { config, apiKey, rvsUrl, cacheSalt };
   }
   const config = parsedConfig.model!;
   config.rvsUrl = rvsUrl;
-  return { config, apiKey, rvsUrl };
+  return { config, apiKey, rvsUrl, cacheSalt };
 }
 
 /** 把已校验的缓存应用到 GUI 共享状态；dirty 基线以恢复后的模型为准。 */

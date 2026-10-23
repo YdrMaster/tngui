@@ -4,9 +4,14 @@ TNG（可信网络网关）的桌面 GUI 包装器：配置编辑 + 启停 + 只
 与 tng **松耦合**——不链接任何 tng 代码，仅通过 (A) `tng launch` CLI、(B) 只读控制面 REST、(C) 子进程输出捕获 三条契约对接。tngui 是图形操作系统上的 client-side pre-TNG 反向代理与 tng-ingress 本地包装器：它只写本地配置、启动子进程并把观测结果展示给用户，不定义服务端授权、全局模型注册或远端路由。
 
 
-tngui 自带本机 pre-TNG reverse proxy。对 `POST /v1/chat/completions`、`POST /v1/messages` 与 `POST /v1/responses` 三类端点，它读取请求体顶层字符串 `body.model`，把该确切模型字符串编码为单一 URI path segment 生成 `/models/{encoded-model-segment}{original-path}`，并保留 query、credential header 和原始 body 字节。path 生成不做本地认证或路由决策；`x-model` 不作为模型身份。例如：`{"model":"auto"}` 对应 `/models/auto/...`；`{"model":"provider/model"}` 对应 `/models/provider%2Fmodel/...`。`POST /v1/responses` 在当前边界中服务于无状态、自包含的模型请求形态：每次发送完整输入与模型身份，不引入 tngui 侧本地会话或后台任务；多轮上下文由调用方在请求体中自行携带。
+tngui 自带本机 pre-TNG reverse proxy。对 `POST /v1/chat/completions`、`POST /v1/messages` 与 `POST /v1/responses` 三类端点，它读取请求体顶层字符串 `body.model`，把该确切模型字符串编码为单一 URI path segment 生成 `/models/{encoded-model-segment}{original-path}`，并保留 query、credential header 和原始 body 字节（唯一的 body 增量是下文的缓存盐注入）。path 生成不做本地认证或路由决策；`x-model` 不作为模型身份。例如：`{"model":"auto"}` 对应 `/models/auto/...`；`{"model":"provider/model"}` 对应 `/models/provider%2Fmodel/...`。`POST /v1/responses` 在当前边界中服务于无状态、自包含的模型请求形态：每次发送完整输入与模型身份，不引入 tngui 侧本地会话或后台任务；多轮上下文由调用方在请求体中自行携带。
 
 对精确的 `GET /v1/models`，本地模型发现例外的请求头规则是确定的：本地剔除 hop-by-hop 头、`host`、`content-length` 与 `x-model`；若请求中已有 `Authorization` 或 `x-api-key`，按原样透传到 capi origin（`mapping` 形态派生的 origin 从远端 host:port 得出；`http_proxy` 形态按 `ohttp.tls` 与 `dst_filters[0].domain[:port]` 得出 HTTP 或 HTTPS origin）。tngui 不新增业务凭证，不校验业务凭证语义，也不剥离业务凭证；透传凭证头不表示 tngui 参与授权，剥离或校验授权凭证由服务端授权边界处理。该直连分支不经 tng ingress，也不进入 OHTTP / RA 链路，不做模型 path 注入或 body 改写；发现请求不属于模型授权链路，模型清单也不构成远端可用性或授权能力。若 capi origin 缺失、无效或不可达，返回明确的模型发现失败响应，而不是空模型清单。推理请求仍通过 TNG 加密与远程证明链路转发；tngui 不定义、不判定、不重写远端授权或路由，实际行为由 TNG / 下游服务侧决定。
+
+对上述三类端点，反代默认在转发前（进入 TNG 链路加密之前）向请求体顶层写入字符串字段 `cache_salt`。它是本机侧持有的缓存分区键：只有盐相同的请求才可能复用彼此的前缀缓存。盐有三种模式——关闭、固定值、按周期自动刷新的随机值（默认 30 分钟）；默认不覆盖请求体里已有的 `cache_salt`，只在缺少时注入。
+
+盐配置在“设置”视图的“密态推理”功能卡中编辑，随设置缓存持久化，改动即时生效且不重启 tng。盐只进请求体：不写入任何请求头，也不进入进程日志、错误详情或诊断快照；自动模式的当前随机盐只存在于进程内存。关闭盐模式、或已有盐且不覆盖时请求体保持原始字节；注入时只在顶层 JSON object 首个 `{` 之后新增一个成员，其余字节与 `body.model` 的 path 注入结果不变。无盐请求照常转发，不被拒绝或降级。
+
 
 反代另有当前会话内的本地诊断快照（本地物理观察）：界面在选项卡行右侧以“代理状态”展示当前反代状态和身份通过/身份拒绝、请求过大、发现成功/发现失败、上游失败计数。固定计数语义是请求体中是否解析出可用模型身份，与认证、授权、凭证有效性或远端可访问性无关。快照只在 tngui 进程内存中随当前反代生命周期存在，重启重置，不发送到外部 collector；固定诊断类别不携带模型名、prompt、output、raw API key 或 attestation token，也不表示模型授权结果、远端模型健康、TNG key rotation 或跨实例 key 一致性。
 

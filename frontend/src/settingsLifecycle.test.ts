@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { beforeLeaveSettings, bootstrapSettings } from "./settingsLifecycle";
+import { DEFAULT_CACHE_SALT } from "./cacheSaltConfig";
 import { DEFAULT_RVS_URL, defaultModel } from "./formspec";
 import { serialize } from "./configmodel";
 import { buildSettingsCacheSnapshot, parseSettingsCache } from "./settingsCache";
@@ -9,6 +10,7 @@ describe("settings bootstrap", () => {
     initialize: vi.fn(),
     initializeApiKey: vi.fn(),
     initializeRvsUrl: vi.fn(),
+    initializeCacheSalt: vi.fn(),
   });
 
   it("restores cached settings without exposing or calling a launch path", async () => {
@@ -22,6 +24,7 @@ describe("settings bootstrap", () => {
           configJson: serialize(model),
           apiKey: "key",
           rvsUrl: "https://private-rvs.example.com:8443",
+          cacheSalt: { mode: "fixed", refreshMinutes: 30, fixedValue: "abc", overwrite: true },
         },
       }),
       target,
@@ -32,6 +35,13 @@ describe("settings bootstrap", () => {
     expect(target.initializeRvsUrl).toHaveBeenCalledWith(
       "https://private-rvs.example.com:8443",
     );
+    // bootstrap 把恢复后的盐配置推给命令，配置变更不落入 launch 路径。
+    expect(target.initializeCacheSalt).toHaveBeenCalledWith({
+      mode: "fixed",
+      refreshMinutes: 30,
+      fixedValue: "abc",
+      overwrite: true,
+    });
 
     const snapshot = buildSettingsCacheSnapshot(
       serialize(restored),
@@ -50,6 +60,7 @@ describe("settings bootstrap", () => {
     expect(target.initialize).toHaveBeenCalledWith(defaultModel());
     expect(target.initializeApiKey).toHaveBeenCalledWith("");
     expect(target.initializeRvsUrl).toHaveBeenCalledWith(DEFAULT_RVS_URL);
+    expect(target.initializeCacheSalt).toHaveBeenCalledWith(DEFAULT_CACHE_SALT);
     expect(errorSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -59,6 +70,41 @@ describe("settings bootstrap", () => {
     expect(target.initialize).toHaveBeenCalledWith(defaultModel());
     expect(target.initializeApiKey).toHaveBeenCalledWith("");
     expect(target.initializeRvsUrl).toHaveBeenCalledWith(DEFAULT_RVS_URL);
+    expect(target.initializeCacheSalt).toHaveBeenCalledWith(DEFAULT_CACHE_SALT);
+  });
+
+  it("缺失盐配置时按默认（自动/30/不覆盖）推给命令", async () => {
+    const target = makeTarget();
+    await bootstrapSettings(
+      () => Promise.resolve({
+        schemaVersion: 1,
+        tng: {
+          configJson: serialize(defaultModel()),
+          apiKey: "key",
+          rvsUrl: DEFAULT_RVS_URL,
+        },
+      }),
+      target,
+    );
+    expect(target.initializeCacheSalt).toHaveBeenCalledWith(DEFAULT_CACHE_SALT);
+  });
+
+  it("盐配置非法时回落默认并推给命令，不影响配置与 API Key 恢复", async () => {
+    const target = makeTarget();
+    await bootstrapSettings(
+      () => Promise.resolve({
+        schemaVersion: 1,
+        tng: {
+          configJson: serialize(defaultModel()),
+          apiKey: "key",
+          rvsUrl: DEFAULT_RVS_URL,
+          cacheSalt: { mode: "nope", refreshMinutes: "abc", fixedValue: 7, overwrite: 1 },
+        },
+      }),
+      target,
+    );
+    expect(target.initializeCacheSalt).toHaveBeenCalledWith(DEFAULT_CACHE_SALT);
+    expect(target.initializeApiKey).toHaveBeenCalledWith("key");
   });
 });
 
@@ -122,6 +168,22 @@ describe("before leaving settings", () => {
       "https://private-rvs.example.com:8443",
     );
     expect(markSaved).toHaveBeenCalledTimes(1);
+  });
+
+  it("盐配置单独变化不触发保存与重启（不进入 TNG dirty）", async () => {
+    const saveConfig = vi.fn();
+    const launchTng = vi.fn();
+    await beforeLeaveSettings({
+      ...base,
+      isDirty: () => false,
+      serializeCurrent: () => "{}",
+      currentRvsUrl: () => DEFAULT_RVS_URL,
+      saveConfig,
+      getStatus: () => Promise.resolve({ reachable: true }),
+      launchTng,
+    });
+    expect(saveConfig).not.toHaveBeenCalled();
+    expect(launchTng).not.toHaveBeenCalled();
   });
 
   it("does not restart after cache-only save or API key change", async () => {

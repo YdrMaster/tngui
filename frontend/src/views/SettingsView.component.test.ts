@@ -11,6 +11,8 @@ import {
   InputGroup,
   InputNumber,
   InputPassword,
+  RadioButton,
+  RadioGroup,
   Select,
   Space,
   Switch,
@@ -29,6 +31,8 @@ import {
   defaultModel,
 } from "../formspec";
 import { useTngConfig } from "../composables/useTngConfig";
+import { useCacheSaltConfig } from "../composables/useCacheSaltConfig";
+import { DEFAULT_CACHE_SALT } from "../cacheSaltConfig";
 
 const messageMocks = vi.hoisted(() => ({
   success: vi.fn(),
@@ -45,6 +49,7 @@ vi.mock("ant-design-vue", async () => {
 
 const tauriMocks = vi.hoisted(() => ({
   appInfo: vi.fn(),
+  configureCacheSalt: vi.fn(),
   exportConfig: vi.fn(),
   exportTngLog: vi.fn(),
   getStatus: vi.fn(),
@@ -85,6 +90,8 @@ const globalComponents = {
     "a-input-group": InputGroup,
     "a-input-number": InputNumber,
     "a-input-password": InputPassword,
+    "a-radio-button": RadioButton,
+    "a-radio-group": RadioGroup,
     "a-select": Select,
     "a-space": Space,
     "a-switch": Switch,
@@ -97,6 +104,7 @@ const globalComponents = {
 };
 
 const { model, markSaved } = useTngConfig();
+const { cacheSalt } = useCacheSaltConfig();
 
 async function mountView() {
   const wrapper = mount(SettingsView, { global: globalComponents });
@@ -117,10 +125,22 @@ beforeEach(() => {
   vi.clearAllMocks();
   model.value = defaultModel();
   markSaved();
+  cacheSalt.value = { ...DEFAULT_CACHE_SALT };
   tauriMocks.appInfo.mockResolvedValue({ version: "0.0.0-test", os: "Linux" });
   tauriMocks.getStatus.mockResolvedValue(statusReport);
   tauriMocks.getOutput.mockResolvedValue([]);
+  tauriMocks.configureCacheSalt.mockResolvedValue(undefined);
 });
+
+async function selectSaltMode(wrapper: ReturnType<typeof mount>, mode: string) {
+  const group = wrapper.find('[data-test="salt-mode"]');
+  const radio = group
+    .findAll('input[type="radio"]')
+    .find((item) => (item.element as HTMLInputElement).value === mode);
+  expect(radio).toBeDefined();
+  await radio!.setValue();
+  await flushPromises();
+}
 
 describe("SettingsView TNG 配置布局与默认值", () => {
   it("仅渲染一个入口配置，默认使用中文域名代理和常用默认值", async () => {
@@ -161,7 +181,7 @@ describe("SettingsView TNG 配置布局与默认值", () => {
     const wrapper = await mountView();
     const lock = wrapper.find('[aria-label="锁定 TNG 配置"]');
     const remoteAttestation = wrapper.find('[aria-label="远程证明"]');
-    const outwardBinding = wrapper.find(".ant-card-body .ant-switch");
+    const outwardBinding = wrapper.find('[aria-label="反代对外绑定"]');
     const domain = wrapper.find('input[placeholder^="如 https://"]');
     const remotePort = wrapper.find('input[placeholder="远端端口（可留空）"]');
     const outwardPort = wrapper.find('input[placeholder="端口（必填）"]');
@@ -190,7 +210,7 @@ describe("SettingsView TNG 配置布局与默认值", () => {
     await nextTick();
 
     const remoteAttestation = wrapper.find('[aria-label="远程证明"]');
-    const outwardBinding = wrapper.find(".ant-card-body .ant-switch");
+    const outwardBinding = wrapper.find('[aria-label="反代对外绑定"]');
     const domain = wrapper.find('input[placeholder^="如 https://"]');
     const remotePort = wrapper.find('input[placeholder="远端端口（可留空）"]');
     const outwardPort = wrapper.find('input[placeholder="端口（必填）"]');
@@ -310,6 +330,93 @@ describe("SettingsView 远端证明报告导出", () => {
       servers: [{ server_public_key: "key" }],
     });
     expect(action.find("button").attributes("disabled")).toBeDefined();
+    wrapper.unmount();
+  });
+});
+
+describe("密态推理缓存盐配置", () => {
+  it("默认定时刷新、30 分钟、不覆盖已有盐", async () => {
+    const wrapper = await mountView();
+
+    const radioChecked = wrapper
+      .findAll('[data-test="salt-mode"] input[type="radio"]')
+      .find((item) => (item.element as HTMLInputElement).checked);
+    expect((radioChecked!.element as HTMLInputElement).value).toBe("auto");
+
+    const minutes = wrapper.find('[data-test="salt-refresh-minutes"]');
+    expect((minutes.element as HTMLInputElement).value).toBe("30");
+
+    // 固定值输入只在固定模式出现。
+    expect(wrapper.find('[data-test="salt-fixed-value"]').exists()).toBe(false);
+    expect(wrapper.find('button[data-test="salt-overwrite"]').classes())
+      .not.toContain("ant-switch-checked");
+    wrapper.unmount();
+  });
+
+  it("盐配置控件用默认表单行高，不放大密态推理卡", async () => {
+    const wrapper = await mountView();
+    expect(wrapper.find(".feature-card .ant-input-lg").exists()).toBe(false);
+    expect(wrapper.find(".feature-card .ant-input-number-lg").exists()).toBe(false);
+    expect(wrapper.find(".feature-card .ant-input-password-lg").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("切到固定值后出现盐值输入，填入即下发后端", async () => {
+    const wrapper = await mountView();
+    await selectSaltMode(wrapper, "fixed");
+
+    expect(wrapper.find('[data-test="salt-refresh-minutes"]').exists()).toBe(false);
+    const fixedInput = wrapper.find('input[data-test="salt-fixed-value"]');
+    expect(fixedInput.exists()).toBe(true);
+    expect(fixedInput.attributes("autocapitalize")).toBe("off");
+    expect(fixedInput.attributes("autocorrect")).toBe("off");
+
+    await fixedInput.setValue("my-salt");
+    await flushPromises();
+    expect(tauriMocks.configureCacheSalt).toHaveBeenLastCalledWith({
+      mode: "fixed",
+      refreshMinutes: 30,
+      fixedValue: "my-salt",
+      overwrite: false,
+    });
+    wrapper.unmount();
+  });
+
+  it("生成随机值写入盐值输入并下发", async () => {
+    const wrapper = await mountView();
+    await selectSaltMode(wrapper, "fixed");
+
+    await wrapper.find('[data-test="salt-generate"]').trigger("click");
+    await flushPromises();
+
+    const call = tauriMocks.configureCacheSalt.mock.calls.at(-1)![0] as {
+      fixedValue: string;
+    };
+    expect(call.fixedValue).toMatch(/^[0-9a-f]{32}$/);
+    wrapper.unmount();
+  });
+
+  it("切到关闭后覆盖开关不可用，切回自动后恢复且下发周期", async () => {
+    const wrapper = await mountView();
+
+    await wrapper.find('button[data-test="salt-overwrite"]').trigger("click");
+    await flushPromises();
+    expect(tauriMocks.configureCacheSalt).toHaveBeenLastCalledWith({
+      mode: "auto",
+      refreshMinutes: 30,
+      fixedValue: "",
+      overwrite: true,
+    });
+
+    await selectSaltMode(wrapper, "off");
+    expect(wrapper.find('[data-test="salt-refresh-minutes"]').exists()).toBe(false);
+    expect(wrapper.find('button[data-test="salt-overwrite"]').attributes("disabled"))
+      .toBeDefined();
+
+    await selectSaltMode(wrapper, "auto");
+    expect(wrapper.find('[data-test="salt-refresh-minutes"]').exists()).toBe(true);
+    expect(wrapper.find('button[data-test="salt-overwrite"]').attributes("disabled"))
+      .toBeUndefined();
     wrapper.unmount();
   });
 });
