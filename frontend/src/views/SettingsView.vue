@@ -187,24 +187,27 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
             <a-radio-button value="fixed">固定值</a-radio-button>
             <a-radio-button value="auto">定时刷新</a-radio-button>
           </a-radio-group>
-          <div class="small-text" style="color:var(--text-secondary);margin-top:6px">
-            cache_salt 会作为顶层字段注入三类推理请求体做缓存隔离；只进请求体，不进请求头、日志与诊断。
-          </div>
         </a-form-item>
 
         <a-form-item v-if="saltMode === 'auto'" label="刷新周期">
-          <a-input-number
-            v-model:value="saltRefreshMinutes"
-            data-test="salt-refresh-minutes"
-            :min="MIN_REFRESH_MINUTES"
-            :max="MAX_REFRESH_MINUTES"
-            :step="1"
-            style="width:200px"
-          />
-          <span class="small-text" style="color:var(--text-secondary);margin-left:8px">分钟，到点后自动换新随机盐</span>
+          <div style="display:flex;align-items:center;gap:10px">
+            <a-input-number
+              v-model:value="saltRefreshMinutes"
+              data-test="salt-refresh-minutes"
+              :min="MIN_REFRESH_MINUTES"
+              :max="MAX_REFRESH_MINUTES"
+              :step="1"
+              style="width:200px"
+            />
+            <span class="salt-unit">分钟</span>
+          </div>
         </a-form-item>
 
-        <a-form-item v-else-if="saltMode === 'fixed'" label="盐值">
+        <a-form-item label="覆盖已有 cache_salt">
+          <a-switch v-model:checked="saltOverwrite" data-test="salt-overwrite" :disabled="saltMode === 'off'" />
+        </a-form-item>
+
+        <a-form-item v-if="saltMode === 'fixed'" label="盐值">
           <a-input-group compact>
             <a-input
               v-model:value="saltFixedValue"
@@ -217,13 +220,6 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
             />
             <a-button data-test="salt-generate" @click="generateSaltValue">生成随机值</a-button>
           </a-input-group>
-        </a-form-item>
-
-        <a-form-item label="覆盖已有 cache_salt">
-          <a-switch v-model:checked="saltOverwrite" data-test="salt-overwrite" :disabled="saltMode === 'off'" />
-          <span class="small-text" style="color:var(--text-secondary);margin-left:8px">
-            默认关闭：请求体里已有 cache_salt 时保留原值。
-          </span>
         </a-form-item>
       </a-form>
     </a-card>

@@ -361,6 +361,34 @@ describe("密态推理缓存盐配置", () => {
     wrapper.unmount();
   });
 
+  it("刷新周期只留“分钟”单位，说明文案已移除", async () => {
+    const wrapper = await mountView();
+
+    const unit = wrapper.find(".salt-unit");
+    expect(unit.exists()).toBe(true);
+    expect(unit.text()).toBe("分钟");
+    expect(unit.classes()).not.toContain("small-text");
+
+    const cardText = wrapper.find(".feature-card").text();
+    expect(cardText).not.toContain("到点后自动换新随机盐");
+    expect(cardText).not.toContain("cache_salt 会作为顶层字段注入");
+    expect(cardText).not.toContain("请求体里已有 cache_salt 时保留原值");
+    wrapper.unmount();
+  });
+
+  it("固定模式下覆盖开关排在盐值输入上方", async () => {
+    const wrapper = await mountView();
+    await selectSaltMode(wrapper, "fixed");
+
+    const html = wrapper.find(".feature-card").html();
+    const toggleAt = html.indexOf('data-test="salt-overwrite"');
+    const valueAt = html.indexOf('data-test="salt-fixed-value"');
+    expect(toggleAt).toBeGreaterThanOrEqual(0);
+    expect(valueAt).toBeGreaterThanOrEqual(0);
+    expect(toggleAt).toBeLessThan(valueAt);
+    wrapper.unmount();
+  });
+
   it("切到固定值后出现盐值输入，填入即下发后端", async () => {
     const wrapper = await mountView();
     await selectSaltMode(wrapper, "fixed");
