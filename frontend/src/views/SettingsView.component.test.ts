@@ -50,6 +50,8 @@ vi.mock("ant-design-vue", async () => {
 const tauriMocks = vi.hoisted(() => ({
   appInfo: vi.fn(),
   configureCacheSalt: vi.fn(),
+  currentCacheSalt: vi.fn(),
+  setCacheSaltValue: vi.fn(),
   exportConfig: vi.fn(),
   exportTngLog: vi.fn(),
   getStatus: vi.fn(),
@@ -130,6 +132,8 @@ beforeEach(() => {
   tauriMocks.getStatus.mockResolvedValue(statusReport);
   tauriMocks.getOutput.mockResolvedValue([]);
   tauriMocks.configureCacheSalt.mockResolvedValue(undefined);
+  tauriMocks.setCacheSaltValue.mockResolvedValue(undefined);
+  tauriMocks.currentCacheSalt.mockResolvedValue(null);
 });
 
 async function selectSaltMode(wrapper: ReturnType<typeof mount>, mode: string) {
@@ -335,21 +339,53 @@ describe("SettingsView 远端证明报告导出", () => {
 });
 
 describe("密态推理缓存盐配置", () => {
-  it("默认定时刷新、30 分钟、不覆盖已有盐", async () => {
+  const CONFIG_CONTROLS = [
+    "salt-value",
+    "salt-generate",
+    "salt-timer-enabled",
+    "salt-refresh-minutes",
+    "salt-count-enabled",
+    "salt-count-threshold",
+  ];
+
+  function switchChecked(wrapper: ReturnType<typeof mount>, test: string) {
+    return wrapper.find(`button[data-test="${test}"]`).classes().includes("ant-switch-checked");
+  }
+
+  it("默认添加模式、定时 30 分钟、不开定量刷新", async () => {
     const wrapper = await mountView();
 
     const radioChecked = wrapper
       .findAll('[data-test="salt-mode"] input[type="radio"]')
       .find((item) => (item.element as HTMLInputElement).checked);
-    expect((radioChecked!.element as HTMLInputElement).value).toBe("auto");
+    expect((radioChecked!.element as HTMLInputElement).value).toBe("add");
 
     const minutes = wrapper.find('[data-test="salt-refresh-minutes"]');
     expect((minutes.element as HTMLInputElement).value).toBe("30");
 
-    // 固定值输入只在固定模式出现。
-    expect(wrapper.find('[data-test="salt-fixed-value"]').exists()).toBe(false);
-    expect(wrapper.find('button[data-test="salt-overwrite"]').classes())
-      .not.toContain("ant-switch-checked");
+    expect(switchChecked(wrapper, "salt-timer-enabled")).toBe(true);
+    expect(switchChecked(wrapper, "salt-count-enabled")).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("忽略模式隐藏下方全部盐配置控件", async () => {
+    const wrapper = await mountView();
+    await selectSaltMode(wrapper, "ignore");
+
+    for (const test of CONFIG_CONTROLS) {
+      expect(wrapper.find(`[data-test="${test}"]`).exists(), test).toBe(false);
+    }
+    wrapper.unmount();
+  });
+
+  it("添加与覆盖模式显示同一组控件", async () => {
+    const wrapper = await mountView();
+    for (const mode of ["add", "overwrite"]) {
+      await selectSaltMode(wrapper, mode);
+      for (const test of CONFIG_CONTROLS) {
+        expect(wrapper.find(`[data-test="${test}"]`).exists(), `${mode}:${test}`).toBe(true);
+      }
+    }
     wrapper.unmount();
   });
 
@@ -361,90 +397,150 @@ describe("密态推理缓存盐配置", () => {
     wrapper.unmount();
   });
 
-  it("刷新周期只留“分钟”单位，说明文案已移除", async () => {
+  it("刷新设置的单位与输入框同一行，用正常字号与颜色，说明文案已移除", async () => {
     const wrapper = await mountView();
 
-    const unit = wrapper.find(".salt-unit");
-    expect(unit.exists()).toBe(true);
-    expect(unit.text()).toBe("分钟");
-    expect(unit.classes()).not.toContain("small-text");
+    const units = wrapper.findAll(".salt-unit");
+    expect(units.map((unit) => unit.text())).toEqual(["分钟", "个请求"]);
+    for (const unit of units) {
+      expect(unit.classes()).not.toContain("small-text");
+      expect(unit.element.closest(".salt-refresh-row")).not.toBeNull();
+    }
 
     const cardText = wrapper.find(".feature-card").text();
-    expect(cardText).not.toContain("到点后自动换新随机盐");
     expect(cardText).not.toContain("cache_salt 会作为顶层字段注入");
     expect(cardText).not.toContain("请求体里已有 cache_salt 时保留原值");
+    expect(cardText).not.toContain("到点后自动换新随机盐");
     wrapper.unmount();
   });
 
-  it("固定模式下覆盖开关排在盐值输入上方", async () => {
+  it("改刷新参数只下发配置，不动盐值", async () => {
     const wrapper = await mountView();
-    await selectSaltMode(wrapper, "fixed");
 
-    const html = wrapper.find(".feature-card").html();
-    const toggleAt = html.indexOf('data-test="salt-overwrite"');
-    const valueAt = html.indexOf('data-test="salt-fixed-value"');
-    expect(toggleAt).toBeGreaterThanOrEqual(0);
-    expect(valueAt).toBeGreaterThanOrEqual(0);
-    expect(toggleAt).toBeLessThan(valueAt);
-    wrapper.unmount();
-  });
-
-  it("切到固定值后出现盐值输入，填入即下发后端", async () => {
-    const wrapper = await mountView();
-    await selectSaltMode(wrapper, "fixed");
-
-    expect(wrapper.find('[data-test="salt-refresh-minutes"]').exists()).toBe(false);
-    const fixedInput = wrapper.find('input[data-test="salt-fixed-value"]');
-    expect(fixedInput.exists()).toBe(true);
-    expect(fixedInput.attributes("autocapitalize")).toBe("off");
-    expect(fixedInput.attributes("autocorrect")).toBe("off");
-
-    await fixedInput.setValue("my-salt");
+    await wrapper.find('button[data-test="salt-timer-enabled"]').trigger("click");
     await flushPromises();
     expect(tauriMocks.configureCacheSalt).toHaveBeenLastCalledWith({
-      mode: "fixed",
+      mode: "add",
+      timerEnabled: false,
       refreshMinutes: 30,
-      fixedValue: "my-salt",
-      overwrite: false,
+      countEnabled: false,
+      countThreshold: 50,
     });
+    expect(tauriMocks.setCacheSaltValue).not.toHaveBeenCalled();
+
+    await wrapper.find('button[data-test="salt-count-enabled"]').trigger("click");
+    await flushPromises();
+    await wrapper.find('[data-test="salt-count-threshold"]').setValue("80");
+    await flushPromises();
+    expect(tauriMocks.configureCacheSalt).toHaveBeenLastCalledWith({
+      mode: "add",
+      timerEnabled: false,
+      refreshMinutes: 30,
+      countEnabled: true,
+      countThreshold: 80,
+    });
+    expect(tauriMocks.setCacheSaltValue).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
-  it("生成随机值写入盐值输入并下发", async () => {
+  it("盐值输入框失焦时内容有变化则提交为新盐", async () => {
+    tauriMocks.currentCacheSalt.mockResolvedValue("server-salt");
     const wrapper = await mountView();
-    await selectSaltMode(wrapper, "fixed");
+    const input = wrapper.find('input[data-test="salt-value"]');
+    expect((input.element as HTMLInputElement).value).toBe("server-salt");
+
+    await input.trigger("focus");
+    await input.setValue("my-salt");
+    await input.trigger("blur");
+    await flushPromises();
+
+    expect(tauriMocks.setCacheSaltValue).toHaveBeenCalledWith("my-salt");
+    expect(tauriMocks.configureCacheSalt).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("失焦时内容为空则回填当前盐，不提交空串", async () => {
+    tauriMocks.currentCacheSalt.mockResolvedValue("server-salt");
+    const wrapper = await mountView();
+    const input = wrapper.find('input[data-test="salt-value"]');
+
+    await input.trigger("focus");
+    await input.setValue("");
+    await input.trigger("blur");
+    await flushPromises();
+
+    expect(tauriMocks.setCacheSaltValue).not.toHaveBeenCalled();
+    expect(
+      (wrapper.find('input[data-test="salt-value"]').element as HTMLInputElement).value,
+    ).toBe("server-salt");
+    wrapper.unmount();
+  });
+
+  it("失焦时内容未变则保持当前盐，不提交", async () => {
+    tauriMocks.currentCacheSalt.mockResolvedValue("server-salt");
+    const wrapper = await mountView();
+    const input = wrapper.find('input[data-test="salt-value"]');
+
+    await input.trigger("focus");
+    await input.trigger("blur");
+    await flushPromises();
+
+    expect(tauriMocks.setCacheSaltValue).not.toHaveBeenCalled();
+    expect(
+      (wrapper.find('input[data-test="salt-value"]').element as HTMLInputElement).value,
+    ).toBe("server-salt");
+    wrapper.unmount();
+  });
+
+  it("后台轮询把新盐回填进未聚焦的输入框", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      tauriMocks.currentCacheSalt.mockResolvedValue("salt-1");
+      const wrapper = await mountView();
+      const input = () => wrapper.find('input[data-test="salt-value"]');
+      expect((input().element as HTMLInputElement).value).toBe("salt-1");
+
+      tauriMocks.currentCacheSalt.mockResolvedValue("salt-2");
+      await vi.advanceTimersByTimeAsync(2000);
+      await flushPromises();
+      expect((input().element as HTMLInputElement).value).toBe("salt-2");
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("编辑期间后台换盐不回填输入框", async () => {
+    const wrapper = await mountView();
+    const input = wrapper.find('input[data-test="salt-value"]');
+
+    await input.trigger("focus");
+    await input.setValue("typing");
+
+    // 后台换了盐，但输入框有焦点，回填路径应当跳过。
+    tauriMocks.currentCacheSalt.mockResolvedValue("salt-2");
+    await selectSaltMode(wrapper, "overwrite");
+    await flushPromises();
+
+    expect(
+      (wrapper.find('input[data-test="salt-value"]').element as HTMLInputElement).value,
+    ).toBe("typing");
+    wrapper.unmount();
+  });
+
+  it("生成随机值等同直接改盐值", async () => {
+    tauriMocks.currentCacheSalt.mockResolvedValue("server-salt");
+    const wrapper = await mountView();
 
     await wrapper.find('[data-test="salt-generate"]').trigger("click");
     await flushPromises();
 
-    const call = tauriMocks.configureCacheSalt.mock.calls.at(-1)![0] as {
-      fixedValue: string;
-    };
-    expect(call.fixedValue).toMatch(/^[0-9a-f]{32}$/);
-    wrapper.unmount();
-  });
-
-  it("切到关闭后覆盖开关不可用，切回自动后恢复且下发周期", async () => {
-    const wrapper = await mountView();
-
-    await wrapper.find('button[data-test="salt-overwrite"]').trigger("click");
-    await flushPromises();
-    expect(tauriMocks.configureCacheSalt).toHaveBeenLastCalledWith({
-      mode: "auto",
-      refreshMinutes: 30,
-      fixedValue: "",
-      overwrite: true,
-    });
-
-    await selectSaltMode(wrapper, "off");
-    expect(wrapper.find('[data-test="salt-refresh-minutes"]').exists()).toBe(false);
-    expect(wrapper.find('button[data-test="salt-overwrite"]').attributes("disabled"))
-      .toBeDefined();
-
-    await selectSaltMode(wrapper, "auto");
-    expect(wrapper.find('[data-test="salt-refresh-minutes"]').exists()).toBe(true);
-    expect(wrapper.find('button[data-test="salt-overwrite"]').attributes("disabled"))
-      .toBeUndefined();
+    const value = tauriMocks.setCacheSaltValue.mock.calls.at(-1)![0] as string;
+    expect(value).toMatch(/^[0-9a-f]{32}$/);
+    expect(
+      (wrapper.find('input[data-test="salt-value"]').element as HTMLInputElement).value,
+    ).toBe(value);
+    expect(tauriMocks.configureCacheSalt).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 });

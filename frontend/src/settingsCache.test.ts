@@ -178,20 +178,22 @@ describe("cached domain normalization", () => {
   });
 });
 
-describe("自动模式的实时盐不落盘", () => {
+describe("实时盐不落盘", () => {
   it("快照只带盐配置字段，不携带任何实时盐值", () => {
     const snapshot = buildSettingsCacheSnapshot("{}", "key", DEFAULT_RVS_URL, {
-      mode: "auto",
+      mode: "add",
+      timerEnabled: true,
       refreshMinutes: 30,
-      fixedValue: "",
-      overwrite: false,
+      countEnabled: false,
+      countThreshold: 50,
     });
-    // 结构化保证：盐配置只有这 4 个字段，实时随机盐没有落脚处。
+    // 结构化保证：盐配置只有这 5 个字段，实时盐值没有落脚处。
     expect(Object.keys(snapshot.tng.cacheSalt)).toEqual([
       "mode",
+      "timerEnabled",
       "refreshMinutes",
-      "fixedValue",
-      "overwrite",
+      "countEnabled",
+      "countThreshold",
     ]);
     expect(JSON.stringify(snapshot)).not.toMatch(/[0-9a-f]{32}/);
   });
@@ -206,21 +208,28 @@ describe("缓存盐配置的缓存恢复", () => {
       tng: {
         ...base,
         rvsUrl: DEFAULT_RVS_URL,
-        cacheSalt: { mode: "off", refreshMinutes: 15, fixedValue: "abc", overwrite: true },
+        cacheSalt: {
+          mode: "ignore",
+          timerEnabled: false,
+          refreshMinutes: 15,
+          countEnabled: true,
+          countThreshold: 70,
+        },
       },
     });
     expect(state.cacheSalt).toEqual({
-      mode: "off",
+      mode: "ignore",
+      timerEnabled: false,
       refreshMinutes: 15,
-      fixedValue: "abc",
-      overwrite: true,
+      countEnabled: true,
+      countThreshold: 70,
     });
     // 盐字段存在不影响其它字段的恢复。
     expect(state.apiKey).toBe("secret");
     expect(state.config).not.toEqual(defaultModel());
   });
 
-  it("缺失字段整体回落默认（自动/30/不覆盖）", () => {
+  it("缺失字段整体回落默认（添加/定时 30 分钟/不开定量）", () => {
     const state = parseSettingsCache({ schemaVersion: 1, tng: base });
     expect(state.cacheSalt).toEqual(DEFAULT_CACHE_SALT);
   });
@@ -230,7 +239,13 @@ describe("缓存盐配置的缓存恢复", () => {
       schemaVersion: 1,
       tng: {
         ...base,
-        cacheSalt: { mode: "weird", refreshMinutes: 0, fixedValue: 42, overwrite: "yes" },
+        cacheSalt: {
+          mode: "weird",
+          timerEnabled: "yes",
+          refreshMinutes: 0,
+          countEnabled: 1,
+          countThreshold: 0,
+        },
       },
     });
     expect(state.cacheSalt).toEqual(DEFAULT_CACHE_SALT);
@@ -242,10 +257,20 @@ describe("缓存盐配置的缓存恢复", () => {
     for (const refreshMinutes of [1.5, 0, -3, 1441, Number.NaN]) {
       const state = parseSettingsCache({
         schemaVersion: 1,
-        tng: { ...base, cacheSalt: { mode: "auto", refreshMinutes } },
+        tng: { ...base, cacheSalt: { mode: "add", refreshMinutes } },
       });
       expect(state.cacheSalt.refreshMinutes).toBe(DEFAULT_CACHE_SALT.refreshMinutes);
-      expect(state.cacheSalt.mode).toBe("auto");
+      expect(state.cacheSalt.mode).toBe("add");
+    }
+  });
+
+  it("非整数或越界阈值回落默认值", () => {
+    for (const countThreshold of [2.5, 0, -4, 100001, Number.NaN]) {
+      const state = parseSettingsCache({
+        schemaVersion: 1,
+        tng: { ...base, cacheSalt: { mode: "add", countThreshold } },
+      });
+      expect(state.cacheSalt.countThreshold).toBe(DEFAULT_CACHE_SALT.countThreshold);
     }
   });
 });

@@ -208,38 +208,57 @@ async fn stop_tng(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// 更新反代缓存盐策略（模式/刷新周期/固定值/覆盖开关）。改动即时作用于当前运行的反代，
-/// 不触发 TNG 配置 dirty、不写盘、不重启 tng。周期与固定值按字符串接收并在核心侧规整。
+/// 更新反代缓存盐策略（模式、定时刷新开关与周期、定量刷新开关与阈值）。改动即时作用于
+/// 当前运行的反代，不触发 TNG 配置 dirty、不写盘、不重启 tng；当前盐值不受影响，只把定时
+/// 基线与定量计数重置。两个数值按字符串接收并在核心侧规整。
 #[tauri::command]
 fn configure_cache_salt(
     state: State<'_, AppState>,
     mode: String,
+    timer_enabled: bool,
     refresh_minutes: String,
-    fixed_value: String,
-    overwrite: bool,
+    count_enabled: bool,
+    count_threshold: String,
 ) -> Result<(), String> {
     state.salt.update(cache_salt_policy(
         &mode,
+        timer_enabled,
         &refresh_minutes,
-        fixed_value,
-        overwrite,
+        count_enabled,
+        &count_threshold,
     ));
     Ok(())
 }
 
-/// 由前端输入构造盐策略；模式、周期与固定值的非法输入都在核心侧规整为默认值。
+/// 直接改盐值：把当前使用的盐换成给定值，并重置定时基线与定量计数。前端提交输入框内容与
+/// “生成随机值”都走这里。
+#[tauri::command]
+fn set_cache_salt_value(state: State<'_, AppState>, value: String) -> Result<(), String> {
+    state.salt.set_value(value);
+    Ok(())
+}
+
+/// 当前实际使用的盐值；忽略模式返回 `None`。只读，不轮换也不推进定量计数。
+#[tauri::command]
+fn current_cache_salt(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(state.salt.peek_current())
+}
+
+/// 由前端输入构造盐策略；模式与两个数值的非法输入都在核心侧规整为默认值。
 /// 命令与单测共用这一处，保证测的就是线上路径。
 fn cache_salt_policy(
     mode: &str,
+    timer_enabled: bool,
     refresh_minutes: &str,
-    fixed_value: String,
-    overwrite: bool,
+    count_enabled: bool,
+    count_threshold: &str,
 ) -> CacheSaltPolicy {
     CacheSaltPolicy::from_inputs(
         CacheSaltMode::parse(mode),
+        timer_enabled,
         refresh_minutes,
-        fixed_value,
-        overwrite,
+        count_enabled,
+        count_threshold,
     )
 }
 
@@ -552,30 +571,55 @@ mod tests {
     #[test]
     fn cache_salt_state_reflects_policy_updates() {
         let state = command_test_state();
-        assert_eq!(state.salt.current(), None, "测试态默认关闭盐");
+        assert_eq!(state.salt.current(), None, "测试态默认忽略盐");
 
-        // 与命令同源的策略构造：固定模式带固定值与覆盖开关。
-        state.salt.update(cache_salt_policy(
-            "fixed",
-            "15",
-            "fixed-x".to_string(),
-            true,
-        ));
-        let decision = state.salt.current().expect("固定模式注入");
-        assert_eq!(decision.value, "fixed-x");
-        assert!(decision.overwrite);
-
-        // 命令收到非法周期时回落默认值，并切到自动模式注入随机盐。
-        let policy = cache_salt_policy("auto", "not-a-number", String::new(), false);
-        assert_eq!(policy.refresh_minutes, tngui_core::DEFAULT_REFRESH_MINUTES);
-        state.salt.update(policy);
-        assert!(state.salt.current().is_some(), "自动模式注入随机盐");
-
-        // 关闭模式不注入。
+        // 与命令同源的策略构造：覆盖模式，定时 15 分钟。
         state
             .salt
-            .update(cache_salt_policy("off", "30", String::new(), false));
+            .update(cache_salt_policy("overwrite", true, "15", false, "50"));
+        let decision = state.salt.current().expect("覆盖模式注入");
+        assert!(decision.overwrite);
+
+        // 两个数值非法时各自回落默认值，添加模式不覆盖已有盐。
+        let policy = cache_salt_policy("add", true, "not-a-number", true, "not-a-number");
+        assert_eq!(policy.refresh_minutes, tngui_core::DEFAULT_REFRESH_MINUTES);
+        assert_eq!(policy.count_threshold, tngui_core::DEFAULT_COUNT_THRESHOLD);
+        assert!(policy.timer_enabled && policy.count_enabled);
+        state.salt.update(policy);
+        let decision = state.salt.current().expect("添加模式注入");
+        assert!(!decision.overwrite);
+
+        // 忽略模式不注入。
+        state
+            .salt
+            .update(cache_salt_policy("ignore", true, "30", false, "50"));
         assert_eq!(state.salt.current(), None);
+    }
+
+    #[test]
+    fn cache_salt_value_reads_back_without_counting() {
+        let state = command_test_state();
+        state
+            .salt
+            .update(cache_salt_policy("add", false, "30", true, "2"));
+
+        // 直接改盐值：立即读到新值。
+        state.salt.set_value("user-salt".to_string());
+        assert_eq!(state.salt.peek_current().as_deref(), Some("user-salt"));
+
+        // 读数不推进定量计数：读 10 次后仍然要发满 2 个请求才刷新。
+        for _ in 0..10 {
+            assert_eq!(state.salt.peek_current().as_deref(), Some("user-salt"));
+        }
+        assert_eq!(state.salt.current().unwrap().value, "user-salt");
+        assert_eq!(state.salt.current().unwrap().value, "user-salt");
+        assert_ne!(state.salt.current().unwrap().value, "user-salt");
+
+        // 忽略模式读到 None。
+        state
+            .salt
+            .update(cache_salt_policy("ignore", false, "30", false, "2"));
+        assert_eq!(state.salt.peek_current(), None);
     }
 
     fn command_test_state() -> AppState {
@@ -584,7 +628,7 @@ mod tests {
             port: Arc::new(StdMutex::new(None)),
             proxy: Arc::new(Mutex::new(None)),
             inference_cancellations: Arc::new(StdMutex::new(HashMap::new())),
-            salt: Arc::new(CacheSaltHandle::new(CacheSaltPolicy::off())),
+            salt: Arc::new(CacheSaltHandle::new(CacheSaltPolicy::ignore())),
         }
     }
 
@@ -946,6 +990,8 @@ pub fn run() {
             proxy_endpoint,
             proxy_diagnostics,
             configure_cache_salt,
+            set_cache_salt_value,
+            current_cache_salt,
             get_status,
             get_output,
             export_tng_log,

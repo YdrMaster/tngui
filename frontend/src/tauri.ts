@@ -178,25 +178,37 @@ export async function exportRemoteAttestationReport(
 ): Promise<void> {
   return exportConfig(path, JSON.stringify(report, null, 2));
 }
-/** 反代缓存盐配置的下发入参（周期以字符串传给后端，由后端规整）。 */
+/** 反代缓存盐配置的下发入参（两个数值以字符串传给后端，由后端规整）。 */
 export interface CacheSaltApplyInput {
   mode: string;
+  timerEnabled: boolean;
   refreshMinutes: number;
-  fixedValue: string;
-  overwrite: boolean;
+  countEnabled: boolean;
+  countThreshold: number;
 }
 
 /**
  * 把缓存盐策略推给运行中的反代。改动即时生效，不写盘、不重启 tng，
- * 也不进入 TNG 配置的保存流程。
+ * 也不进入 TNG 配置的保存流程；当前盐值不受影响，只重置定时与定量记录。
  */
 export async function configureCacheSalt(input: CacheSaltApplyInput): Promise<void> {
   return invoke<void>("configure_cache_salt", {
     mode: input.mode,
+    timerEnabled: input.timerEnabled,
     refreshMinutes: String(input.refreshMinutes),
-    fixedValue: input.fixedValue,
-    overwrite: input.overwrite,
+    countEnabled: input.countEnabled,
+    countThreshold: String(input.countThreshold),
   });
+}
+
+/** 直接改盐值：立即换用该值并重置定时与定量记录。 */
+export async function setCacheSaltValue(value: string): Promise<void> {
+  return invoke<void>("set_cache_salt_value", { value });
+}
+
+/** 读取当前实际使用的盐值；忽略模式返回 null。只读，不影响刷新记录。 */
+export async function currentCacheSalt(): Promise<string | null> {
+  return invoke<string | null>("current_cache_salt");
 }
 
 /** 独立设置缓存 payload；后端只校验信封，不解析 `tng` 字段。 */

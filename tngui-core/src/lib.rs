@@ -17,8 +17,8 @@ pub mod proxy;
 pub mod status;
 
 pub use cache_salt::{
-    CacheSaltHandle, CacheSaltMode, CacheSaltPolicy, DEFAULT_REFRESH_MINUTES, SaltDecision,
-    normalize_refresh_minutes,
+    CacheSaltHandle, CacheSaltMode, CacheSaltPolicy, DEFAULT_COUNT_THRESHOLD,
+    DEFAULT_REFRESH_MINUTES, SaltDecision, normalize_count_threshold, normalize_refresh_minutes,
 };
 pub use config::{
     PrepareError, TNGUI_RVS_URL_FIELD, control_port, pick_free_port, pick_free_ports,

@@ -100,13 +100,13 @@ onMounted(async () => {
     event.preventDefault();
     const { serializeCurrent, currentRvsUrl } = useTngConfig();
     const { apiKey } = useInferenceConfig();
-    const { currentCacheSalt } = useCacheSaltConfig();
+    const { cacheSaltSnapshot } = useCacheSaltConfig();
     await flushSettingsAndClose(
       buildSettingsCacheSnapshot(
         serializeCurrent(),
         apiKey.value,
         currentRvsUrl(),
-        currentCacheSalt(),
+        cacheSaltSnapshot(),
       ),
       flushSettingsCache,
       () => getCurrentWindow().destroy(),

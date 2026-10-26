@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { message } from "ant-design-vue";
 import {
   ApiOutlined, ExperimentOutlined, ImportOutlined, ExportOutlined,
@@ -20,8 +20,11 @@ import { deriveGatewayStateViews } from "../ingressStateViews";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
 import { useCacheSaltConfig } from "../composables/useCacheSaltConfig";
 import {
+  MAX_COUNT_THRESHOLD,
   MAX_REFRESH_MINUTES,
+  MIN_COUNT_THRESHOLD,
   MIN_REFRESH_MINUTES,
+  normalizeCountThreshold,
   normalizeRefreshMinutes,
   randomSaltValue,
   type CacheSaltSettings,
@@ -29,9 +32,10 @@ import {
 
 const { model, isDirty, markSaved, serializeCurrent } = useTngConfig();
 const { apiKey } = useInferenceConfig();
-const { cacheSalt, updateCacheSalt } = useCacheSaltConfig();
+const { cacheSalt, updateCacheSalt, applyCacheSaltValue, fetchCurrentSalt } =
+  useCacheSaltConfig();
 
-// 盐配置改动即时下发反代：不进 TNG dirty，不触发保存或重启。
+// 盐配置改动即时下发反代：不进 TNG dirty，不触发保存或重启；只把定时与定量记录重置。
 function commitCacheSalt(patch: Partial<CacheSaltSettings>) {
   void updateCacheSalt({ ...cacheSalt.value, ...patch });
 }
@@ -39,22 +43,68 @@ const saltMode = computed({
   get: () => cacheSalt.value.mode,
   set: (mode: CacheSaltSettings["mode"]) => commitCacheSalt({ mode }),
 });
+const saltTimerEnabled = computed({
+  get: () => cacheSalt.value.timerEnabled,
+  set: (value: boolean) => commitCacheSalt({ timerEnabled: value }),
+});
 const saltRefreshMinutes = computed({
   get: () => cacheSalt.value.refreshMinutes,
   set: (value: number | null) =>
     commitCacheSalt({ refreshMinutes: normalizeRefreshMinutes(value) }),
 });
-const saltFixedValue = computed({
-  get: () => cacheSalt.value.fixedValue,
-  set: (value: string) => commitCacheSalt({ fixedValue: value }),
+const saltCountEnabled = computed({
+  get: () => cacheSalt.value.countEnabled,
+  set: (value: boolean) => commitCacheSalt({ countEnabled: value }),
 });
-const saltOverwrite = computed({
-  get: () => cacheSalt.value.overwrite,
-  set: (value: boolean) => commitCacheSalt({ overwrite: value }),
+const saltCountThreshold = computed({
+  get: () => cacheSalt.value.countThreshold,
+  set: (value: number | null) =>
+    commitCacheSalt({ countThreshold: normalizeCountThreshold(value) }),
 });
-function generateSaltValue() {
-  commitCacheSalt({ fixedValue: randomSaltValue() });
+
+// 盐值输入框的草稿只活在这一会话里：不落盘、不持久化。
+// 焦点只压住回填，压不住后台换盐——定时、定量渠道照常轮换并用新盐发请求。
+const saltDraft = ref("");
+const saltFocused = ref(false);
+let saltPollTimer: number | undefined;
+
+async function syncSaltDraft() {
+  if (saltFocused.value) return;
+  const current = await fetchCurrentSalt();
+  if (current !== null) saltDraft.value = current;
 }
+
+function onSaltFocus() {
+  saltFocused.value = true;
+}
+
+/** 失焦对账：内容有变且非空就当作一次直接刷新；为空或未变则回填当前盐。 */
+async function onSaltBlur() {
+  saltFocused.value = false;
+  const current = await fetchCurrentSalt();
+  if (current === null) return;
+  if (saltDraft.value !== "" && saltDraft.value !== current) {
+    void applyCacheSaltValue(saltDraft.value);
+    return;
+  }
+  saltDraft.value = current;
+}
+
+function generateSaltValue() {
+  const value = randomSaltValue();
+  saltDraft.value = value;
+  void applyCacheSaltValue(value);
+}
+
+onMounted(() => {
+  void syncSaltDraft();
+  // 设置页可见期间轮询当前盐：后台轮换后回填；聚焦时 syncSaltDraft 自行跳过。
+  saltPollTimer = window.setInterval(syncSaltDraft, 2000);
+});
+onBeforeUnmount(() => {
+  if (saltPollTimer !== undefined) window.clearInterval(saltPollTimer);
+});
+watch(saltMode, () => void syncSaltDraft());
 const { ingressKeys, states } = useIngressState();
 const gatewayViews = computed(() => deriveGatewayStateViews(states.value));
 const showRemoteAttestationServiceConfig = computed(() => isRemoteAttestationEnabled(model.value));
@@ -183,44 +233,62 @@ watch(() => model.value, () => { if (activeTab.value === "raw") syncRaw(); }, { 
 
         <a-form-item label="缓存盐模式">
           <a-radio-group v-model:value="saltMode" button-style="solid" data-test="salt-mode">
-            <a-radio-button value="off">关闭</a-radio-button>
-            <a-radio-button value="fixed">固定值</a-radio-button>
-            <a-radio-button value="auto">定时刷新</a-radio-button>
+            <a-radio-button value="ignore">忽略</a-radio-button>
+            <a-radio-button value="add">添加</a-radio-button>
+            <a-radio-button value="overwrite">覆盖</a-radio-button>
           </a-radio-group>
         </a-form-item>
 
-        <a-form-item v-if="saltMode === 'auto'" label="刷新周期">
-          <div style="display:flex;align-items:center;gap:10px">
-            <a-input-number
-              v-model:value="saltRefreshMinutes"
-              data-test="salt-refresh-minutes"
-              :min="MIN_REFRESH_MINUTES"
-              :max="MAX_REFRESH_MINUTES"
-              :step="1"
-              style="width:200px"
-            />
-            <span class="salt-unit">分钟</span>
-          </div>
-        </a-form-item>
+        <template v-if="saltMode !== 'ignore'">
+          <a-form-item label="盐值">
+            <a-input-group compact>
+              <a-input
+                v-model:value="saltDraft"
+                data-test="salt-value"
+                placeholder="当前使用的盐值"
+                style="width:320px"
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck="false"
+                @focus="onSaltFocus"
+                @blur="onSaltBlur"
+              />
+              <a-button data-test="salt-generate" @click="generateSaltValue">生成随机值</a-button>
+            </a-input-group>
+          </a-form-item>
 
-        <a-form-item label="覆盖已有 cache_salt">
-          <a-switch v-model:checked="saltOverwrite" data-test="salt-overwrite" :disabled="saltMode === 'off'" />
-        </a-form-item>
+          <a-form-item label="定时刷新">
+            <div class="salt-refresh-row">
+              <a-switch v-model:checked="saltTimerEnabled" data-test="salt-timer-enabled" />
+              <a-input-number
+                v-model:value="saltRefreshMinutes"
+                data-test="salt-refresh-minutes"
+                :min="MIN_REFRESH_MINUTES"
+                :max="MAX_REFRESH_MINUTES"
+                :step="1"
+                :disabled="!saltTimerEnabled"
+                style="width:200px"
+              />
+              <span class="salt-unit">分钟</span>
+            </div>
+          </a-form-item>
 
-        <a-form-item v-if="saltMode === 'fixed'" label="盐值">
-          <a-input-group compact>
-            <a-input
-              v-model:value="saltFixedValue"
-              data-test="salt-fixed-value"
-              placeholder="固定盐值"
-              style="width:320px"
-              autocapitalize="off"
-              autocorrect="off"
-              spellcheck="false"
-            />
-            <a-button data-test="salt-generate" @click="generateSaltValue">生成随机值</a-button>
-          </a-input-group>
-        </a-form-item>
+          <a-form-item label="定量刷新">
+            <div class="salt-refresh-row">
+              <a-switch v-model:checked="saltCountEnabled" data-test="salt-count-enabled" />
+              <a-input-number
+                v-model:value="saltCountThreshold"
+                data-test="salt-count-threshold"
+                :min="MIN_COUNT_THRESHOLD"
+                :max="MAX_COUNT_THRESHOLD"
+                :step="1"
+                :disabled="!saltCountEnabled"
+                style="width:200px"
+              />
+              <span class="salt-unit">个请求</span>
+            </div>
+          </a-form-item>
+        </template>
       </a-form>
     </a-card>
 

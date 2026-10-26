@@ -328,8 +328,8 @@ async fn handle_conn(
     };
 
     // 3.1 缓存盐注入：只在支持端点解析出有效模型身份后发生（此时 body 已是合法顶层 object），
-    //     且在设 Content-Length 与转发之前——早于进入链路加密。关闭盐模式、或已有盐且不
-    //     覆盖时，body 保持原字节。
+    //     且在设 Content-Length 与转发之前——早于进入链路加密。忽略模式直接跳过改写；添加模式
+    //     在请求已有盐时不改写。
     if let Some(object) = parsed_object.as_ref()
         && let Some(decision) = salt.current()
     {
@@ -361,7 +361,7 @@ async fn handle_conn(
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => {
             diagnostics.increment_upstream_failure();
-            return Err(error.into());
+            return Err(error);
         }
         Err(_) => {
             diagnostics.increment_upstream_failure();
@@ -404,9 +404,7 @@ async fn handle_conn(
         if n == 0 {
             break;
         }
-        if let Err(error) = client.write_all(&pipe[..n]).await {
-            return Err(error);
-        }
+        client.write_all(&pipe[..n]).await?;
     }
     client.flush().await?;
     Ok(())
@@ -988,19 +986,26 @@ mod tests {
         (resp, got)
     }
 
-    /// 只用既有透传语义的测试默认关闭盐，保持 body 逐字节断言。
+    /// 忽略盐的句柄：只用既有透传语义的测试，保持 body 逐字节断言。
     fn no_salt() -> Arc<CacheSaltHandle> {
-        Arc::new(CacheSaltHandle::new(CacheSaltPolicy::off()))
+        Arc::new(CacheSaltHandle::new(CacheSaltPolicy::ignore()))
     }
 
-    /// 固定盐的句柄，用于验证注入行为。
+    /// 添加模式、盐值已知的句柄，用于验证注入行为。
     fn salt_on() -> Arc<CacheSaltHandle> {
-        Arc::new(CacheSaltHandle::new(CacheSaltPolicy {
-            mode: CacheSaltMode::Fixed,
-            fixed_value: "salt-xyz".to_string(),
-            refresh_minutes: 30,
-            overwrite: false,
-        }))
+        let handle = Arc::new(CacheSaltHandle::new(CacheSaltPolicy::default()));
+        handle.set_value("salt-xyz".to_string());
+        handle
+    }
+
+    /// 覆盖模式的句柄，用于验证替换请求已有盐。
+    fn salt_overwrite() -> Arc<CacheSaltHandle> {
+        let handle = Arc::new(CacheSaltHandle::new(CacheSaltPolicy {
+            mode: CacheSaltMode::Overwrite,
+            ..CacheSaltPolicy::default()
+        }));
+        handle.set_value("salt-xyz".to_string());
+        handle
     }
 
     async fn send_request_bytes(
@@ -1719,12 +1724,41 @@ Connection: close
     }
 
     #[tokio::test]
-    async fn salt_off_mode_forwards_body_unchanged() {
-        let body = br#"{"model":"m","messages":[]}"#.to_vec();
+    async fn salt_ignore_mode_forwards_body_unchanged() {
+        for body in [
+            br#"{"model":"m","messages":[]}"#.to_vec(),
+            br#"{"cache_salt":"client","model":"m"}"#.to_vec(),
+        ] {
+            let (resp, got) =
+                run_once_with_salt(no_salt(), "POST", "/v1/chat/completions", &[], body.clone())
+                    .await;
+            assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
+            assert_eq!(got.unwrap().body, body, "忽略模式既不读也不写盐");
+        }
+    }
+
+    #[tokio::test]
+    async fn salt_add_mode_keeps_client_salt() {
+        let body = br#"{"cache_salt":"client","model":"m"}"#.to_vec();
         let (resp, got) =
-            run_once_with_salt(no_salt(), "POST", "/v1/chat/completions", &[], body.clone()).await;
+            run_once_with_salt(salt_on(), "POST", "/v1/chat/completions", &[], body.clone()).await;
         assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
-        assert_eq!(got.unwrap().body, body);
+        assert_eq!(got.unwrap().body, body, "添加模式不动请求已有的盐");
+    }
+
+    #[tokio::test]
+    async fn salt_overwrite_mode_replaces_client_salt() {
+        let body = br#"{"cache_salt":"client","model":"m"}"#.to_vec();
+        let (resp, got) =
+            run_once_with_salt(salt_overwrite(), "POST", "/v1/chat/completions", &[], body).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
+        let got = got.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&got.body).unwrap();
+        assert_eq!(
+            value.get("cache_salt").and_then(|v| v.as_str()),
+            Some("salt-xyz"),
+            "覆盖模式把已有盐换成当前盐"
+        );
     }
 
     #[tokio::test]
@@ -1892,12 +1926,8 @@ Connection: close
         }
         ready.notified().await;
 
-        let salt = Arc::new(CacheSaltHandle::new(CacheSaltPolicy {
-            mode: CacheSaltMode::Fixed,
-            fixed_value: "first".to_string(),
-            refresh_minutes: 30,
-            overwrite: false,
-        }));
+        let salt = Arc::new(CacheSaltHandle::new(CacheSaltPolicy::default()));
+        salt.set_value("first".to_string());
         let handle = start_proxy(
             vec![ProxyRoute {
                 out_host: BIND_LOCALHOST.to_string(),
@@ -1919,12 +1949,8 @@ Connection: close
             br#"{"model":"m"}"#.to_vec(),
         )
         .await;
-        // 运行中直接改策略：下一个请求应立即用新盐，无需重启反代。
-        salt.update(CacheSaltPolicy {
-            mode: CacheSaltMode::Fixed,
-            fixed_value: "second".to_string(),
-            ..CacheSaltPolicy::default()
-        });
+        // 运行中直接改盐值：下一个请求应立即用新盐，无需重启反代。
+        salt.set_value("second".to_string());
         let _ = send_request_bytes(
             out_port,
             "POST",

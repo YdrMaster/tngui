@@ -24,7 +24,13 @@ describe("settings bootstrap", () => {
           configJson: serialize(model),
           apiKey: "key",
           rvsUrl: "https://private-rvs.example.com:8443",
-          cacheSalt: { mode: "fixed", refreshMinutes: 30, fixedValue: "abc", overwrite: true },
+          cacheSalt: {
+            mode: "overwrite",
+            timerEnabled: false,
+            refreshMinutes: 30,
+            countEnabled: true,
+            countThreshold: 80,
+          },
         },
       }),
       target,
@@ -37,10 +43,11 @@ describe("settings bootstrap", () => {
     );
     // bootstrap 把恢复后的盐配置推给命令，配置变更不落入 launch 路径。
     expect(target.initializeCacheSalt).toHaveBeenCalledWith({
-      mode: "fixed",
+      mode: "overwrite",
+      timerEnabled: false,
       refreshMinutes: 30,
-      fixedValue: "abc",
-      overwrite: true,
+      countEnabled: true,
+      countThreshold: 80,
     });
 
     const snapshot = buildSettingsCacheSnapshot(
@@ -73,7 +80,7 @@ describe("settings bootstrap", () => {
     expect(target.initializeCacheSalt).toHaveBeenCalledWith(DEFAULT_CACHE_SALT);
   });
 
-  it("缺失盐配置时按默认（自动/30/不覆盖）推给命令", async () => {
+  it("缺失盐配置时按默认（添加/定时 30 分钟/不开定量）推给命令", async () => {
     const target = makeTarget();
     await bootstrapSettings(
       () => Promise.resolve({
@@ -98,7 +105,7 @@ describe("settings bootstrap", () => {
           configJson: serialize(defaultModel()),
           apiKey: "key",
           rvsUrl: DEFAULT_RVS_URL,
-          cacheSalt: { mode: "nope", refreshMinutes: "abc", fixedValue: 7, overwrite: 1 },
+          cacheSalt: { mode: "nope", timerEnabled: "yes", refreshMinutes: "abc", countEnabled: 1, countThreshold: 0 },
         },
       }),
       target,
