@@ -9,7 +9,6 @@
 
 pub mod cache_salt;
 pub mod config;
-pub mod inference;
 pub mod log;
 pub mod models;
 pub mod process;
@@ -24,10 +23,6 @@ pub use config::{
     PrepareError, TNGUI_RVS_URL_FIELD, control_port, pick_free_port, pick_free_ports,
     pick_launch_ports, prepare_config, prepare_launch, sanitize_user_config_for_tng,
     validate_user_config, write_runtime_config,
-};
-pub use inference::{
-    InferenceDelta, InferenceDeltaKind, InferenceEffort, InferenceMessage, InferenceRole,
-    InferenceStreamOutcome, send_inference_stream,
 };
 pub use log::BoundedLog;
 pub use models::{list_models, parse_model_list};

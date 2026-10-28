@@ -29,7 +29,7 @@ source ~/.cargo/env
 cargo test -p tngui-core -- --test-threads=1
 ```
 
-约 1 秒，127 个用例。在宿主跑 `cargo test --workspace` 或 `cargo test -p tngui-app` 会在**构建阶段**就失败：
+约 1 秒，116 个用例。在宿主跑 `cargo test --workspace` 或 `cargo test -p tngui-app` 会在**构建阶段**就失败：
 
 ```text
 Package 'webkit2gtk-4.1', required by 'virtual:world', not found
@@ -52,6 +52,8 @@ sudo chroot --userspec="$(id -u):$(id -g)" /tmp/tngui-ubuntu /bin/bash -c '
   set -e
   export HOME=/home/admin
   export PATH=/home/admin/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  # 把构建产物放到 chroot 的 /tmp（overlay，空间充足），避免撑满只有 20G 的 /home。
+  export CARGO_TARGET_DIR=/tmp/cargo-target
   cd /home/admin/yangderui.ydr/yangderui.ydr/trust-inference/tngui
   cargo test --workspace -- --test-threads=1
 '
@@ -59,9 +61,13 @@ sudo chroot --userspec="$(id -u):$(id -g)" /tmp/tngui-ubuntu /bin/bash -c '
 
 当前该命令会运行：
 
-- `tngui-app` 主 crate：14 个测试
-- `tngui-core`：127 个测试
-- 两个 crate 的 doc-tests（当前均为 0 个）
+- `tngui-app` 主 crate：19 个测试
+- `tngui-core`：116 个测试
+- `tngui-chat`：20 个测试
+- `tngui-agent`：10 个测试
+- 各 crate 的 doc-tests（当前均为 0 个）
+
+> `tngui-agent` 的用例会改动 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量，必须单线程跑（命令里已带 `--test-threads=1`）。
 
 几个容易踩的点：
 
@@ -72,7 +78,8 @@ sudo chroot --userspec="$(id -u):$(id -g)" /tmp/tngui-ubuntu /bin/bash -c '
   sudo find . -not -user "$(id -un)" -exec chown "$(id -un):$(id -gn)" {} +
   ```
 
-- **`target/` 由宿主和 chroot 共用**。混用过环境、遇到奇怪的链接或运行错误时，在 chroot 里 `cargo clean` 后重跑。
+- **磁盘很紧**：`/home` 只有 20G，而 `target/` 动辄 10G（`tngui-app` 的 staticlib 单个就 700M+）。用上面的 `CARGO_TARGET_DIR=/tmp/cargo-target` 把构建产物挪到 chroot 的 `/tmp`（overlay 文件系统，空间充足），既省 `/home` 又保留编译缓存。空间还是不够时，`cargo clean` 是安全的（本来就要重编一大批），但代价是下一次全量重编。
+- **`target/` 不要由宿主和 chroot 混用**（宿主 glibc 2.32 编不出 Tauri 所需的产物）。挪到 `CARGO_TARGET_DIR` 后天然隔离；仍在仓库里共用 `target/` 时，混用过环境、遇到奇怪的链接或运行错误，就在 chroot 里 `cargo clean` 后重跑。
 - 仓库根目录的 `cargo test` 只跑当前 package（`tngui-app`），全量回归用 `cargo test --workspace`。
 
 ### chroot 不存在时怎么重建
@@ -143,7 +150,7 @@ npm test
 npm run typecheck
 ```
 
-只改文档可以跳过；动过前端代码后建议三条都跑一遍（`npm test` 当前 20 个文件、184 个用例）。
+只改文档可以跳过；动过前端代码后建议三条都跑一遍（`npm test` 当前 20 个文件、207 个用例）。
 
 ## Lockfile 依赖来源检查结果
 

@@ -18,6 +18,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 const {
   exportRemoteAttestationReport,
   pickRemoteAttestationReportPath,
+  runAgentMessage,
   sendInferenceStream,
   stopInferenceStream,
 } = await import("./tauri");
@@ -64,12 +65,13 @@ describe("sendInferenceStream Tauri wrapper", () => {
     invokeMock.mockReset();
   });
 
-  it("streams each typed delta through a per-invocation channel and resolves on completion", async () => {
-    const deltas: unknown[] = [];
+  it("streams each unified event through a per-invocation channel and resolves on completion", async () => {
+    const events: unknown[] = [];
     invokeMock.mockImplementation(async (_cmd, args) => {
-      const channel = args.onDelta as { onmessage?: (delta: unknown) => void };
-      channel.onmessage?.({ kind: "reasoning", text: "先分析" });
-      channel.onmessage?.({ kind: "content", text: "回答" });
+      const channel = args.onEvent as { onmessage?: (event: unknown) => void };
+      channel.onmessage?.({ kind: "reasoningDelta", text: "先分析" });
+      channel.onmessage?.({ kind: "contentDelta", text: "回答" });
+      channel.onmessage?.({ kind: "done" });
       return "completed";
     });
 
@@ -87,13 +89,14 @@ describe("sendInferenceStream Tauri wrapper", () => {
         messages,
         "  身份快照\n包含空白保留  ",
         "medium",
-        (delta) => deltas.push(delta),
+        (event) => events.push(event),
       ),
     ).resolves.toBe("completed");
 
-    expect(deltas).toEqual([
-      { kind: "reasoning", text: "先分析" },
-      { kind: "content", text: "回答" },
+    expect(events).toEqual([
+      { kind: "reasoningDelta", text: "先分析" },
+      { kind: "contentDelta", text: "回答" },
+      { kind: "done" },
     ]);
     expect(invokeMock).toHaveBeenCalledTimes(1);
     const [command, payload] = invokeMock.mock.calls[0];
@@ -106,14 +109,14 @@ describe("sendInferenceStream Tauri wrapper", () => {
       messages,
       systemPrompt: "  身份快照\n包含空白保留  ",
       reasoningEffort: "medium",
-      onDelta: expect.anything(),
+      onEvent: expect.anything(),
     });
     // stream 由后端负责组装；调用层绝不发送 x-model。
     expect(Object.keys(payload).sort()).toEqual([
       "apiKey",
       "messages",
       "model",
-      "onDelta",
+      "onEvent",
       "port",
       "reasoningEffort",
       "requestId",
@@ -147,5 +150,71 @@ describe("sendInferenceStream Tauri wrapper", () => {
     expect(invokeMock).toHaveBeenCalledWith("stop_inference_stream", {
       requestId: "assistant-1",
     });
+  });
+});
+
+describe("runAgentMessage Tauri wrapper", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it("streams agent events through one channel and returns the produced messages", async () => {
+    const events: unknown[] = [];
+    invokeMock.mockImplementation(async (_cmd, args) => {
+      const channel = args.onEvent as { onmessage?: (event: unknown) => void };
+      channel.onmessage?.({ kind: "turnStart", turn: 1 });
+      channel.onmessage?.({ kind: "toolStart", id: "c1", name: "read", arguments: "{}" });
+      channel.onmessage?.({ kind: "toolEnd", id: "c1", status: "ok", summary: "文件内容" });
+      channel.onmessage?.({ kind: "done" });
+      return { stopped: false, messages: [{ role: "assistant", content: "最终回答" }] };
+    });
+
+    const messages = [
+      { role: "user" as const, content: "读文件" },
+    ];
+    await expect(
+      runAgentMessage(
+        "assistant-1",
+        18080,
+        "model-a",
+        "key-t",
+        messages,
+        null,
+        "high",
+        (event) => events.push(event),
+      ),
+    ).resolves.toEqual({
+      stopped: false,
+      messages: [{ role: "assistant", content: "最终回答" }],
+    });
+
+    expect(events).toEqual([
+      { kind: "turnStart", turn: 1 },
+      { kind: "toolStart", id: "c1", name: "read", arguments: "{}" },
+      { kind: "toolEnd", id: "c1", status: "ok", summary: "文件内容" },
+      { kind: "done" },
+    ]);
+    const [command, payload] = invokeMock.mock.calls[0];
+    expect(command).toBe("run_agent_message");
+    expect(payload).toEqual({
+      requestId: "assistant-1",
+      port: 18080,
+      model: "model-a",
+      apiKey: "key-t",
+      messages,
+      systemPrompt: null,
+      reasoningEffort: "high",
+      onEvent: expect.anything(),
+    });
+    expect(Object.keys(payload).sort()).toEqual([
+      "apiKey",
+      "messages",
+      "model",
+      "onEvent",
+      "port",
+      "reasoningEffort",
+      "requestId",
+      "systemPrompt",
+    ]);
   });
 });

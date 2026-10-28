@@ -24,8 +24,39 @@ tngui 自带本机 pre-TNG reverse proxy。对 `POST /v1/chat/completions`、`PO
 cd frontend && npm install        # Vue 3 + Vite + Ant Design Vue
 # 核心 + 外壳（需 WebKitGTK/WebView2）
 cargo test -p tngui-core          # 核心逻辑单测
+cargo test -p tngui-chat          # 对话模式 SSE 客户端单测
+cargo test -p tngui-agent         # Agent 模式运行器单测
 cargo tauri dev                   # 开发态开窗（开发期 tng 走 PATH 兜底）
 ```
+
+### Rust crate 结构
+
+| crate | 职责 | 依赖 rpi |
+| --- | --- | --- |
+| `tngui-core` | 与 tng 的三条契约：配置准备、子进程生命周期、只读状态轮询、本机 pre-TNG 反向代理、缓存盐（纯逻辑，可脱离 webview 编译与测试） | 否 |
+| `tngui-chat` | 对话模式的手写 OpenAI 兼容 SSE 客户端，以及两种运行模式共享的消息模型（含 `tool_calls` 与 `tool` 角色） | 否 |
+| `tngui-agent` | Agent 模式：基于 rpi（`rpi-ai` / `rpi-agent` / `rpi-tools` / `rpi-harness`）的单次多轮工具调用运行器 | 是 |
+| `tngui-app` | Tauri 外壳、命令层与事件桥，组合上面三个 crate（唯一组合根） | 间接 |
+
+依赖方向只有 `tngui-app → {tngui-core, tngui-chat, tngui-agent}`：这三个 crate **互为平行兄弟、互不依赖**，`tngui-core` 不链接 rpi，rpi 的整套依赖图只出现在 `tngui-agent` 上。Agent 模式与对话模式的会话上下文互通由 `tngui-app` 在命令层做机械转换完成。
+
+### 密态推理调试页：对话模式与 Agent 模式
+
+调试页把"密态推理"从"一次点击一次请求"扩展为两种运行模式，二者共用同一个**进程内共享会话**：会话逐字携带此前已完成的 user 消息、assistant 最终 `content` 与其 `tool_calls`、以及 `role:"tool"` 工具结果消息；assistant 的 `reasoning` 不进入后续上下文。模式**按请求生效**，切换只影响下一次发送，不清空也不改写既有会话。
+
+- **对话模式**（默认）：一次点击恰好发出一次 `POST /v1/chat/completions`，不注册工具、不执行工具；SSE 增量按 `reasoning` / `content` 分流渲染。
+- **Agent 模式**：一次点击内驱动"模型 ↔ 工具"多轮循环，直到模型不再请求工具或到达轮数上限；整轮交互渲染在同一个 assistant 气泡的内嵌时间线里（推理文本、工具步骤、最终回答），不按推理轮次拆分成多个气泡。
+
+Agent 模式的行为边界：
+
+- **只读工具集**：只注册 `read` / `ls` / `grep` / `find` 四个只读工具，不含任何写入、删除、修改或执行命令的工具。
+- **不限制访问路径**：工具以进程工作目录为基准在宿主文件系统上执行，不因路径位于工作目录之外而拒绝。
+- **轮数上限**：单次运行默认上限 `30` 轮，可由环境变量 `RPI_MAX_TURNS_PER_RUN` 覆盖；进程启动时若该变量未设置则写入 `30`。到达上限时保留已到达输出并给出"已达轮数上限"的终止摘要。
+- **回环绕过代理**：Agent 模式的 provider 只连接本机反代（`http://127.0.0.1:<port>`），显式绕过 `HTTP_PROXY` / `HTTPS_PROXY`。
+- **无持久化**：Agent 模式与会话都不做持久化——不写设置缓存、tng 配置或任何会话/工具记录文件，进程退出即丢弃。
+- **失败不丢输出**：工具执行失败只把错误作为工具结果回填并标记该步骤失败，不中止整轮；推理链路出错时保留已到达的 `reasoning` / `content` 并给出可读摘要。
+
+两种模式都通过同一套 `InferenceEvent`（`turnStart` / `reasoningDelta` / `contentDelta` / `toolStart` / `toolEnd` / `notice` / `done` / `error`）向前端推流：对话模式只用 `reasoningDelta` / `contentDelta` / `done` / `error` 子集，前端 reducer 按事件 `kind` 分派。本轮进行中且气泡尚无输出文本时，两种模式都在流式光标位置显示 `▶解密中`，首个非空增量到达即被取代。
 
 > Ant Codespace 中直接运行 Rust 测试会遇到宿主 glibc 兼容性问题，请按 [docs/ant-codespace-testing.md](docs/ant-codespace-testing.md) 使用 Ubuntu chroot 并单线程运行 workspace 测试。
 

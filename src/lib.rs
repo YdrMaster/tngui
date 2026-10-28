@@ -20,9 +20,17 @@ use tauri::{AppHandle, Manager, State};
 use tauri::{Builder, generate_context, generate_handler};
 use tokio::sync::{Mutex, oneshot};
 
+use tngui_agent::runner::{AgentRunConfig, AgentRunRequest, EventSink};
+use tngui_agent::{
+    AgentEffort, AgentMessage as AgentRunMessage, AgentRole, AgentToolCall, AgentToolCallFunction,
+    AgentToolCallKind,
+};
+use tngui_chat::{
+    InferenceDelta, InferenceDeltaKind, InferenceEffort, InferenceEvent, InferenceMessage,
+    InferenceRole, InferenceStreamOutcome, send_inference_stream as send_chat_inference_stream,
+};
 use tngui_core::{
-    CacheSaltHandle, CacheSaltMode, CacheSaltPolicy, InferenceDelta, InferenceEffort,
-    InferenceMessage, InferenceStreamOutcome, ProxyDiagnostics, ProxyDiagnosticsSnapshot,
+    CacheSaltHandle, CacheSaltMode, CacheSaltPolicy, ProxyDiagnostics, ProxyDiagnosticsSnapshot,
     ProxyHandle, StatusReport, TngSupervisor, fetch_status, pick_launch_ports, prepare_launch,
     sanitize_user_config_for_tng, start_proxy, write_runtime_config,
 };
@@ -382,21 +390,25 @@ fn write_settings_cache_file(dir: &std::path::Path, payload: &Value) -> Result<(
 mod tests {
     use super::{
         AppState, InferenceCancellationCell, RA_BIN_MISSING, SETTINGS_CACHE_FILE,
-        cache_salt_policy, cancel_inference_request, find_bin_under, format_process_log_lines,
-        ra_launch_precheck, race_inference_stream_with_cancellation, read_settings_cache_file,
+        cache_salt_policy, cancel_inference_request, chat_event_for_delta, find_bin_under,
+        format_process_log_lines, from_agent_message, ra_launch_precheck,
+        race_inference_stream_with_cancellation, read_settings_cache_file,
         register_inference_cancellation, run_send_inference_stream, tng_nora_resource_name_for,
-        tng_ra_resource_name_for, write_settings_cache_file,
+        tng_ra_resource_name_for, to_agent_effort, to_agent_message, write_settings_cache_file,
     };
+    use serde::de::DeserializeOwned;
     use serde_json::{Value, json};
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex as StdMutex};
-    use tauri::ipc::Channel;
-    use tngui_core::{
-        CacheSaltHandle, CacheSaltPolicy, InferenceDelta, InferenceEffort, InferenceMessage,
-        InferenceRole, InferenceStreamOutcome, TngSupervisor,
+    use tauri::ipc::{Channel, InvokeResponseBody};
+    use tngui_agent::AgentMessage as AgentRunMessage;
+    use tngui_chat::{
+        InferenceDelta, InferenceDeltaKind, InferenceEffort, InferenceEvent, InferenceMessage,
+        InferenceRole, InferenceStreamOutcome, ToolCall, ToolCallFunction, ToolCallKind,
     };
+    use tngui_core::{CacheSaltHandle, CacheSaltPolicy, TngSupervisor};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::{Mutex, oneshot};
 
@@ -692,6 +704,47 @@ mod tests {
         (port, seen)
     }
 
+    /// 收集 `Channel<T>` 推给前端的消息，供单测断言事件序列。
+    fn channel_collecting<T: serde::Serialize + DeserializeOwned + Send + 'static>()
+    -> (Channel<T>, Arc<StdMutex<Vec<T>>>) {
+        let captured: Arc<StdMutex<Vec<T>>> = Arc::new(StdMutex::new(Vec::new()));
+        let sink = captured.clone();
+        let channel = Channel::<T>::new(move |body| {
+            if let InvokeResponseBody::Json(json) = body
+                && let Ok(value) = serde_json::from_str::<T>(&json)
+            {
+                sink.lock().unwrap().push(value);
+            }
+            Ok(())
+        });
+        (channel, captured)
+    }
+
+    /// 起一个只接受一条请求、按脚本返回 SSE 帧（自动补 `data: [DONE]`）的服务。
+    async fn spawn_scripted_sse_server(frames: Vec<&'static str>) -> (u16, Arc<StdMutex<Vec<u8>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request_safely(&mut stream).await;
+            *seen2.lock().unwrap() = request;
+            let mut body = String::new();
+            for frame in frames {
+                body.push_str(&format!("data: {frame}\n\n"));
+            }
+            body.push_str("data: [DONE]\n\n");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.flush().await.unwrap();
+        });
+        (port, seen)
+    }
+
     #[tokio::test]
     async fn inference_command_round_trips_system_prompt_and_none_without_injection() {
         let identity_prompt = "  命令层身份提示\n保留空白  ";
@@ -701,11 +754,8 @@ mod tests {
         ] {
             let (port, seen) = spawn_one_sse_server().await;
             let state = command_test_state();
-            let messages = vec![InferenceMessage {
-                role: InferenceRole::User,
-                content: "第一轮".to_string(),
-            }];
-            let channel = Channel::<InferenceDelta>::new(|_| Ok(()));
+            let messages = vec![InferenceMessage::new(InferenceRole::User, "第一轮")];
+            let channel = Channel::<InferenceEvent>::new(|_| Ok(()));
             run_send_inference_stream(
                 &state,
                 request_id.to_string(),
@@ -763,6 +813,184 @@ mod tests {
         .unwrap();
         assert_eq!(outcome, InferenceStreamOutcome::Completed);
     }
+
+    #[tokio::test]
+    async fn chat_mode_emits_unified_events_and_sends_exactly_one_request() {
+        let (port, seen) = spawn_scripted_sse_server(vec![
+            r#"{"choices":[{"delta":{"reasoning":"先想一下"},"finish_reason":null}]}"#,
+            r#"{"choices":[{"delta":{"content":"你好"},"finish_reason":null}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+        ])
+        .await;
+        let state = command_test_state();
+        let (channel, events) = channel_collecting::<InferenceEvent>();
+        let outcome = run_send_inference_stream(
+            &state,
+            "chat-1".to_string(),
+            port,
+            "command-model".to_string(),
+            "command-key".to_string(),
+            vec![InferenceMessage::new(InferenceRole::User, "hi")],
+            None,
+            InferenceEffort::High,
+            channel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, InferenceStreamOutcome::Completed);
+        assert_eq!(
+            events.lock().unwrap().clone(),
+            vec![
+                InferenceEvent::ReasoningDelta {
+                    text: "先想一下".to_string()
+                },
+                InferenceEvent::ContentDelta {
+                    text: "你好".to_string()
+                },
+                InferenceEvent::Done,
+            ]
+        );
+
+        let request = String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
+        let (head, body) = request.split_once("\r\n\r\n").unwrap();
+        assert_eq!(head.matches("POST /v1/chat/completions").count(), 1);
+        assert!(!head.to_lowercase().contains("x-model"));
+        let body: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["stream"], json!(true));
+        assert_eq!(body["reasoning_effort"], json!("high"));
+    }
+
+    #[test]
+    fn chat_delta_maps_to_unified_events() {
+        assert_eq!(
+            chat_event_for_delta(InferenceDelta {
+                kind: InferenceDeltaKind::Reasoning,
+                text: "r".to_string()
+            }),
+            InferenceEvent::ReasoningDelta {
+                text: "r".to_string()
+            }
+        );
+        assert_eq!(
+            chat_event_for_delta(InferenceDelta {
+                kind: InferenceDeltaKind::Content,
+                text: "c".to_string()
+            }),
+            InferenceEvent::ContentDelta {
+                text: "c".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn agent_message_conversion_round_trips_without_distortion() {
+        let messages = vec![
+            InferenceMessage::new(InferenceRole::User, "  问题  "),
+            InferenceMessage::new(InferenceRole::Assistant, "").with_tool_calls(vec![ToolCall {
+                id: "call_1".to_string(),
+                kind: ToolCallKind::Function,
+                function: ToolCallFunction {
+                    name: "read".to_string(),
+                    arguments: "{\"path\":\"/tmp/a\"}".to_string(),
+                },
+            }]),
+            InferenceMessage::new(InferenceRole::Tool, "输出\n第二行").with_tool_call_id("call_1"),
+            InferenceMessage::new(InferenceRole::Assistant, "答案"),
+        ];
+        let agent: Vec<AgentRunMessage> = messages.iter().map(to_agent_message).collect();
+        let back: Vec<InferenceMessage> = agent.iter().map(from_agent_message).collect();
+        assert_eq!(back, messages);
+    }
+
+    #[test]
+    fn both_modes_share_one_inference_event_json_shape() {
+        let cases = [
+            (
+                InferenceEvent::TurnStart { turn: 2 },
+                tngui_agent::InferenceEvent::TurnStart { turn: 2 },
+            ),
+            (
+                InferenceEvent::ReasoningDelta {
+                    text: "r".to_string(),
+                },
+                tngui_agent::InferenceEvent::ReasoningDelta {
+                    text: "r".to_string(),
+                },
+            ),
+            (
+                InferenceEvent::ContentDelta {
+                    text: "c".to_string(),
+                },
+                tngui_agent::InferenceEvent::ContentDelta {
+                    text: "c".to_string(),
+                },
+            ),
+            (
+                InferenceEvent::ToolStart {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                tngui_agent::InferenceEvent::ToolStart {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            ),
+            (
+                InferenceEvent::ToolEnd {
+                    id: "call_1".to_string(),
+                    status: tngui_chat::ToolStatus::Cancelled,
+                    summary: "s".to_string(),
+                },
+                tngui_agent::InferenceEvent::ToolEnd {
+                    id: "call_1".to_string(),
+                    status: tngui_agent::ToolStatus::Cancelled,
+                    summary: "s".to_string(),
+                },
+            ),
+            (
+                InferenceEvent::Notice {
+                    message: "n".to_string(),
+                },
+                tngui_agent::InferenceEvent::Notice {
+                    message: "n".to_string(),
+                },
+            ),
+            (InferenceEvent::Done, tngui_agent::InferenceEvent::Done),
+            (
+                InferenceEvent::Error {
+                    message: "e".to_string(),
+                },
+                tngui_agent::InferenceEvent::Error {
+                    message: "e".to_string(),
+                },
+            ),
+        ];
+        for (chat, agent) in cases {
+            assert_eq!(
+                serde_json::to_value(&chat).unwrap(),
+                serde_json::to_value(&agent).unwrap(),
+                "两种模式的 InferenceEvent JSON 形状必须一致"
+            );
+        }
+        assert_eq!(
+            to_agent_effort(InferenceEffort::None),
+            tngui_agent::AgentEffort::None
+        );
+        assert_eq!(
+            to_agent_effort(InferenceEffort::Low),
+            tngui_agent::AgentEffort::Low
+        );
+        assert_eq!(
+            to_agent_effort(InferenceEffort::Medium),
+            tngui_agent::AgentEffort::Medium
+        );
+        assert_eq!(
+            to_agent_effort(InferenceEffort::High),
+            tngui_agent::AgentEffort::High
+        );
+    }
 }
 
 /// 导入配置：读用户所选文件路径，返回 JSON 字符串。
@@ -815,13 +1043,89 @@ async fn save_config(app: AppHandle, config_json: String) -> Result<(), String> 
     Ok(())
 }
 
-/// 通过 tngui 反代对外端点发送流式多轮推理请求（模型身份只按 `body.model` 经反代生成 path；
-/// 此处不注），body 恒含 `"stream": true` 与思考强度。每节非空
-/// `choices[0].delta.reasoning` / `choices[0].delta.content` 经 typed `on_delta`
-/// Channel 推送；收到 `data: [DONE]` 后命令成功返回。任何失败（连接失败、非 2xx、
-/// 非 SSE 响应、SSE 解析失败、`[DONE]` 前断流、响应超上限）返回既有格式诊断
-/// `system_prompt` 是调试页专用快照；`None` 不注入 system role。
-/// （Authorization 脱敏）。`port` 为反代对外端口（前端取自 `proxy_endpoint`）。
+/// 对话模式 delta → 统一事件（对话模式只发 reasoning/content 子集）。
+fn chat_event_for_delta(delta: InferenceDelta) -> InferenceEvent {
+    match delta.kind {
+        InferenceDeltaKind::Reasoning => InferenceEvent::ReasoningDelta { text: delta.text },
+        InferenceDeltaKind::Content => InferenceEvent::ContentDelta { text: delta.text },
+    }
+}
+
+/// 中性消息 → Agent 运行器消息（机械转换：role/content/tool_calls/tool_call_id 一一对应，
+/// 不拍平、不改写）。
+fn to_agent_message(message: &InferenceMessage) -> AgentRunMessage {
+    AgentRunMessage {
+        role: match message.role {
+            InferenceRole::User => AgentRole::User,
+            InferenceRole::Assistant => AgentRole::Assistant,
+            InferenceRole::Tool => AgentRole::Tool,
+        },
+        content: message.content.clone(),
+        tool_calls: message.tool_calls.as_ref().map(|calls| {
+            calls
+                .iter()
+                .map(|call| AgentToolCall {
+                    id: call.id.clone(),
+                    kind: AgentToolCallKind::Function,
+                    function: AgentToolCallFunction {
+                        name: call.function.name.clone(),
+                        arguments: call.function.arguments.clone(),
+                    },
+                })
+                .collect()
+        }),
+        tool_call_id: message.tool_call_id.clone(),
+    }
+}
+
+/// Agent 运行器消息 → 中性消息。
+fn from_agent_message(message: &AgentRunMessage) -> InferenceMessage {
+    InferenceMessage {
+        role: match message.role {
+            AgentRole::User => InferenceRole::User,
+            AgentRole::Assistant => InferenceRole::Assistant,
+            AgentRole::Tool => InferenceRole::Tool,
+        },
+        content: message.content.clone(),
+        tool_calls: message.tool_calls.as_ref().map(|calls| {
+            calls
+                .iter()
+                .map(|call| tngui_chat::ToolCall {
+                    id: call.id.clone(),
+                    kind: tngui_chat::ToolCallKind::Function,
+                    function: tngui_chat::ToolCallFunction {
+                        name: call.function.name.clone(),
+                        arguments: call.function.arguments.clone(),
+                    },
+                })
+                .collect()
+        }),
+        tool_call_id: message.tool_call_id.clone(),
+    }
+}
+
+/// 思考强度（两种模式共用一套档位语义）。
+fn to_agent_effort(effort: InferenceEffort) -> AgentEffort {
+    match effort {
+        InferenceEffort::None => AgentEffort::None,
+        InferenceEffort::Low => AgentEffort::Low,
+        InferenceEffort::Medium => AgentEffort::Medium,
+        InferenceEffort::High => AgentEffort::High,
+    }
+}
+
+/// Agent 模式命令结果：`stopped` 为 true 时 `messages` 必为空（停止的消息不进入上下文）。
+#[derive(serde::Serialize)]
+struct AgentRunResult {
+    stopped: bool,
+    messages: Vec<InferenceMessage>,
+}
+
+/// 通过 tngui 反代对外端点发送流式多轮推理请求（对话模式）。模型身份只按 `body.model`
+/// 经反代生成 path；body 恒含 `"stream": true` 与思考强度且**不**发 `x-model`。
+///
+/// 一次调用只发一次请求；reasoning/content 增量与 `[DONE]` 经统一 [`InferenceEvent`]
+/// 通道推送。失败时返回既有格式的脱敏诊断并同时推送 `Error` 事件。
 #[allow(clippy::too_many_arguments)] // Flat parameters preserve the typed Tauri IPC contract.
 async fn run_send_inference_stream(
     state: &AppState,
@@ -832,13 +1136,13 @@ async fn run_send_inference_stream(
     messages: Vec<InferenceMessage>,
     system_prompt: Option<String>,
     reasoning_effort: InferenceEffort,
-    on_delta: Channel<InferenceDelta>,
+    on_event: Channel<InferenceEvent>,
 ) -> Result<InferenceStreamOutcome, String> {
     let cancellation =
         register_inference_cancellation(&state.inference_cancellations, &request_id)?;
     let outcome = race_inference_stream_with_cancellation(
         cancellation,
-        tngui_core::send_inference_stream(
+        send_chat_inference_stream(
             port,
             &model,
             &api_key,
@@ -846,12 +1150,23 @@ async fn run_send_inference_stream(
             system_prompt.as_deref(),
             reasoning_effort,
             |delta| {
-                let _ = on_delta.send(delta);
+                let _ = on_event.send(chat_event_for_delta(delta));
             },
         ),
     )
     .await;
     remove_inference_cancellation(&state.inference_cancellations, &request_id);
+    match &outcome {
+        Ok(InferenceStreamOutcome::Completed) => {
+            let _ = on_event.send(InferenceEvent::Done);
+        }
+        Ok(InferenceStreamOutcome::Stopped) => {}
+        Err(message) => {
+            let _ = on_event.send(InferenceEvent::Error {
+                message: message.clone(),
+            });
+        }
+    }
     outcome
 }
 
@@ -866,7 +1181,7 @@ async fn send_inference_stream(
     messages: Vec<InferenceMessage>,
     system_prompt: Option<String>,
     reasoning_effort: InferenceEffort,
-    on_delta: Channel<InferenceDelta>,
+    on_event: Channel<InferenceEvent>,
 ) -> Result<InferenceStreamOutcome, String> {
     run_send_inference_stream(
         &state,
@@ -877,12 +1192,65 @@ async fn send_inference_stream(
         messages,
         system_prompt,
         reasoning_effort,
-        on_delta,
+        on_event,
     )
     .await
 }
 
-/// 按 request_id 请求停止进行中的推理流。无活跃请求时返回 false，不报错（幂等）。
+/// Agent 模式：单次发送内驱动"模型 ↔ 工具"多轮循环，事件经统一通道推送。
+///
+/// `messages` 与对话模式同形，最后一条必须是本轮用户输入（其余为既有上下文）；命令层
+/// 拆出 prompt 与 context 后做机械转换。取消复用既有 `request_id` 注册表。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Flat parameters preserve the typed Tauri IPC contract.
+async fn run_agent_message(
+    state: State<'_, AppState>,
+    request_id: String,
+    port: u16,
+    model: String,
+    api_key: String,
+    messages: Vec<InferenceMessage>,
+    system_prompt: Option<String>,
+    reasoning_effort: InferenceEffort,
+    on_event: Channel<tngui_agent::InferenceEvent>,
+) -> Result<AgentRunResult, String> {
+    let Some((prompt, context)) = messages.split_last() else {
+        return Err("Agent 模式至少需要一条用户消息".to_string());
+    };
+    if prompt.role != InferenceRole::User {
+        return Err("Agent 模式本轮输入必须是 user 消息".to_string());
+    }
+    let cancellation =
+        register_inference_cancellation(&state.inference_cancellations, &request_id)?;
+    let sink: EventSink = Arc::new(move |event| {
+        let _ = on_event.send(event);
+    });
+    let result = tngui_agent::runner::run_agent_turn(
+        AgentRunConfig {
+            port,
+            model_id: model,
+            api_key,
+            system_prompt,
+            effort: to_agent_effort(reasoning_effort),
+        },
+        AgentRunRequest {
+            context: context.iter().map(to_agent_message).collect(),
+            prompt: to_agent_message(prompt),
+        },
+        cancellation,
+        sink,
+    )
+    .await;
+    remove_inference_cancellation(&state.inference_cancellations, &request_id);
+    let outcome = result?;
+    Ok(AgentRunResult {
+        stopped: outcome.stopped,
+        messages: outcome.messages.iter().map(from_agent_message).collect(),
+    })
+}
+
+/// 按 request_id 请求停止进行中的推理流（对话模式断开 SSE，Agent 模式中止 harness 循环）。
+/// 无活跃请求时返回 false，不报错（幂等）。
 #[tauri::command]
 fn stop_inference_stream(state: State<'_, AppState>, request_id: String) -> Result<bool, String> {
     Ok(cancel_inference_request(
@@ -966,6 +1334,9 @@ fn ra_launch_precheck(ra_required: bool, ra_bin: Option<&str>) -> Result<(), Str
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 轮数上限：rpi 的 run budget 默认关闭，这里在命令可执行之前补上默认 30；
+    // 用户若已显式设置 RPI_MAX_TURNS_PER_RUN 则完全尊重用户值。
+    tngui_agent::runner::ensure_default_max_turns_env();
     Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -1001,6 +1372,7 @@ pub fn run() {
             flush_settings_cache,
             save_config,
             send_inference_stream,
+            run_agent_message,
             stop_inference_stream,
             list_models,
             app_info

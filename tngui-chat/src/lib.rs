@@ -1,4 +1,11 @@
-//! 密态推理请求：通过 tngui 反向代理对外端点发送 OpenAI 兼容的流式 POST 请求。
+//! 密态推理调试页的对话与流式契约：两种运行模式共享的消息模型与统一流式事件，
+//! 以及对话模式（一次点击 = 恰好一次请求）用的手写 OpenAI 兼容 SSE 客户端。
+//!
+//! 本 crate 不依赖 rpi：Agent 模式在 `tngui-agent`，两者由 `tngui-app` 组合。
+//!
+//! # 对话模式请求
+//!
+//! 通过 tngui 反向代理对外端点发送 OpenAI 兼容的流式 POST 请求。
 //!
 //! `send_inference_stream` 是普通 OpenAI 客户端：仅带 `Authorization: Bearer` + JSON
 //! body（`{model, messages, stream: true, reasoning_effort}`）POST 到
@@ -19,12 +26,15 @@ use tokio::net::TcpStream;
 /// 响应累计上限（头+体裸字节）。超过即失败，防异常流无限累积。
 const RESPONSE_LIMIT: usize = 10 * 1024 * 1024;
 
-/// OpenAI compatible chat message 的受限角色集合。命令边界只接受 user / assistant。
+/// OpenAI compatible chat message 的受限角色集合。命令边界接受 user / assistant / tool；
+/// `system` 不在此集合内——系统提示由 `system_prompt` 单独注入。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InferenceRole {
     User,
     Assistant,
+    /// 工具结果消息（`tool_calls` 的执行回填），须带 `tool_call_id`。
+    Tool,
 }
 
 /// 思考强度。默认值为 medium，与 GUI 默认“中”保持一致。
@@ -38,11 +48,68 @@ pub enum InferenceEffort {
     High,
 }
 
+/// 工具调用类型；当前只支持 `function`（OpenAI compatible 唯一形态）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolCallKind {
+    Function,
+}
+
+/// `tool_calls[].function`：工具名与 JSON 编码的参数串（原样透传，不做解析或改写）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolCallFunction {
+    pub name: String,
+    pub arguments: String,
+}
+
+/// OpenAI compatible 工具调用。仅出现在 assistant 消息的 `tool_calls` 中。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: ToolCallKind,
+    pub function: ToolCallFunction,
+}
+
 /// 发送端 OpenAI compatible 消息。
+///
+/// `content` 恒被序列化（与既有请求字节一致）；`tool_calls` / `tool_call_id` 是后加的
+/// 可选字段，缺失时完全不出现在 JSON 里，因此纯 user / assistant 文本消息的字节表示
+/// 与扩展前完全相同。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InferenceMessage {
     pub role: InferenceRole,
     pub content: String,
+    /// assistant 消息请求的工具调用（含 `id` / `function.name` / `function.arguments`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    /// `role: "tool"` 消息对应的工具调用 id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl InferenceMessage {
+    /// 构造纯文本消息（不带工具字段）。
+    pub fn new(role: InferenceRole, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// 附加工具调用（assistant 消息）。
+    pub fn with_tool_calls(mut self, tool_calls: Vec<ToolCall>) -> Self {
+        self.tool_calls = Some(tool_calls);
+        self
+    }
+
+    /// 附加工具调用 id（`role: "tool"` 的 tool 结果消息）。
+    pub fn with_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
+        self.tool_call_id = Some(tool_call_id.into());
+        self
+    }
 }
 
 /// SSE 增量类型。vLLM 0.26 thinking 模型使用 `delta.reasoning`，最终回答为
@@ -67,6 +134,59 @@ pub struct InferenceDelta {
 pub enum InferenceStreamOutcome {
     Completed,
     Stopped,
+}
+
+/// 工具调用在前端的执行状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolStatus {
+    /// 正在执行。
+    Running,
+    /// 执行成功。
+    Ok,
+    /// 执行失败（工具返回错误）。
+    Error,
+    /// 用户主动停止导致执行被取消。
+    Cancelled,
+}
+
+/// 密态推理视图的统一流式事件。
+///
+/// 两种运行模式共用这一个事件流：对话模式只会发出
+/// [`InferenceEvent::ReasoningDelta`] / [`InferenceEvent::ContentDelta`] /
+/// [`InferenceEvent::Done`] / [`InferenceEvent::Error`]，Agent 模式还会发出
+/// [`InferenceEvent::TurnStart`] / [`InferenceEvent::ToolStart`] /
+/// [`InferenceEvent::ToolEnd`] / [`InferenceEvent::Notice`]。
+///
+/// 序列化为带 `kind` 判别字段的 JSON object，例如
+/// `{"kind":"contentDelta","text":"你"}`、`{"kind":"done"}`。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum InferenceEvent {
+    /// 一轮模型请求开始；`turn` 从 1 开始计数（Agent 模式一次发送内会有多轮）。
+    TurnStart { turn: u32 },
+    /// reasoning 增量（不含 reasoning 的模型不产生该事件）。
+    ReasoningDelta { text: String },
+    /// 正文（最终回答）增量。
+    ContentDelta { text: String },
+    /// 工具调用开始：`arguments` 是模型给出的 JSON 参数原文。
+    ToolStart {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    /// 工具调用结束：`summary` 是结果摘要（成功为输出摘要，失败为错误信息）。
+    ToolEnd {
+        id: String,
+        status: ToolStatus,
+        summary: String,
+    },
+    /// 提示信息，例如单次运行达到轮数上限的终止摘要。
+    Notice { message: String },
+    /// 本轮全部完成。
+    Done,
+    /// 本轮失败，`message` 是可读错误（Authorization 已脱敏）。
+    Error { message: String },
 }
 
 /// 推理请求失败时的可读诊断。`request` 已脱敏 Authorization；
@@ -746,10 +866,7 @@ mod tests {
     }
 
     fn message(content: &str) -> InferenceMessage {
-        InferenceMessage {
-            role: InferenceRole::User,
-            content: content.to_string(),
-        }
+        InferenceMessage::new(InferenceRole::User, content)
     }
 
     #[test]
@@ -790,6 +907,118 @@ mod tests {
             serde_json::to_value(InferenceStreamOutcome::Stopped).unwrap(),
             serde_json::json!("stopped")
         );
+    }
+
+    /// 统一流式事件的 serde 形状（前端 reducer 依赖这些 `kind` 取值与字段名）。
+    #[test]
+    fn inference_events_serialize_to_kind_tagged_json() {
+        let cases = [
+            (
+                InferenceEvent::TurnStart { turn: 2 },
+                serde_json::json!({"kind":"turnStart","turn":2}),
+            ),
+            (
+                InferenceEvent::ReasoningDelta {
+                    text: "先分析".to_string(),
+                },
+                serde_json::json!({"kind":"reasoningDelta","text":"先分析"}),
+            ),
+            (
+                InferenceEvent::ContentDelta {
+                    text: "答案".to_string(),
+                },
+                serde_json::json!({"kind":"contentDelta","text":"答案"}),
+            ),
+            (
+                InferenceEvent::ToolStart {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    arguments: r#"{"path":"/tmp/a"}"#.to_string(),
+                },
+                serde_json::json!({
+                    "kind":"toolStart","id":"call_1","name":"read",
+                    "arguments":"{\"path\":\"/tmp/a\"}"
+                }),
+            ),
+            (
+                InferenceEvent::ToolEnd {
+                    id: "call_1".to_string(),
+                    status: ToolStatus::Ok,
+                    summary: "3 行".to_string(),
+                },
+                serde_json::json!({
+                    "kind":"toolEnd","id":"call_1","status":"ok","summary":"3 行"
+                }),
+            ),
+            (
+                InferenceEvent::Notice {
+                    message: "已达轮数上限".to_string(),
+                },
+                serde_json::json!({"kind":"notice","message":"已达轮数上限"}),
+            ),
+            (InferenceEvent::Done, serde_json::json!({"kind":"done"})),
+            (
+                InferenceEvent::Error {
+                    message: "发送失败".to_string(),
+                },
+                serde_json::json!({"kind":"error","message":"发送失败"}),
+            ),
+        ];
+        for (event, expected) in cases {
+            let value = serde_json::to_value(&event).unwrap();
+            assert_eq!(value, expected, "事件形状不匹配: {event:?}");
+            assert_eq!(event, serde_json::from_value(value).unwrap());
+        }
+        assert_eq!(
+            serde_json::to_value(ToolStatus::Cancelled).unwrap(),
+            serde_json::json!("cancelled")
+        );
+    }
+
+    /// 扩展后的消息模型：三类消息的 OpenAI compatible 形状与往返。
+    #[test]
+    fn message_model_round_trips_user_assistant_tool_calls_and_tool_result() {
+        // 纯文本 user 消息的字节表示与扩展前一致（可选字段不出现）。
+        let user = InferenceMessage::new(InferenceRole::User, "读一下 /tmp/a");
+        assert_eq!(
+            serde_json::to_value(&user).unwrap(),
+            serde_json::json!({"role":"user","content":"读一下 /tmp/a"})
+        );
+
+        // assistant + tool_calls
+        let assistant =
+            InferenceMessage::new(InferenceRole::Assistant, "").with_tool_calls(vec![ToolCall {
+                id: "call_1".to_string(),
+                kind: ToolCallKind::Function,
+                function: ToolCallFunction {
+                    name: "read".to_string(),
+                    arguments: r#"{"path":"/tmp/a"}"#.to_string(),
+                },
+            }]);
+        let value = serde_json::to_value(&assistant).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": "{\"path\":\"/tmp/a\"}"}
+                }]
+            })
+        );
+        assert_eq!(assistant, serde_json::from_value(value).unwrap());
+
+        // role: tool 的结果消息带 tool_call_id
+        let tool =
+            InferenceMessage::new(InferenceRole::Tool, "文件内容").with_tool_call_id("call_1");
+        let value = serde_json::to_value(&tool).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"role":"tool","content":"文件内容","tool_call_id":"call_1"})
+        );
+        assert_eq!(tool, serde_json::from_value(value).unwrap());
     }
 
     /// 无 reasoning/content 事件（仅 role / finish_reason / 空 delta）跳过；两类文本
@@ -902,10 +1131,7 @@ mod tests {
         let prompt = "  身份提示\n\t保留全部空白  ";
         let history = vec![
             message("第一轮"),
-            InferenceMessage {
-                role: InferenceRole::Assistant,
-                content: "第一轮回答".to_string(),
-            },
+            InferenceMessage::new(InferenceRole::Assistant, "第一轮回答"),
             message("第二轮"),
         ];
 
@@ -977,10 +1203,7 @@ mod tests {
         let identity_prompt = "  身份提示保留空白\n\t第二行  ";
         let request_messages = vec![
             message("第一轮"),
-            InferenceMessage {
-                role: InferenceRole::Assistant,
-                content: "第一轮回答".to_string(),
-            },
+            InferenceMessage::new(InferenceRole::Assistant, "第一轮回答"),
             message("第二轮"),
         ];
         let deltas = Arc::new(Mutex::new(Vec::new()));

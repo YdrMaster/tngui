@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick, watch } from "vue";
 import { message } from "ant-design-vue";
 import {
-  ExperimentOutlined, SendOutlined, InfoCircleOutlined, LockOutlined,
+  ExperimentOutlined, InfoCircleOutlined, LockOutlined, SendOutlined,
   SafetyCertificateOutlined, CloudServerOutlined, ApiOutlined, StopOutlined, CheckCircleOutlined,
 } from "@ant-design/icons-vue";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
@@ -11,14 +11,15 @@ import {
   listModels,
   proxyDiagnostics,
   proxyEndpoint,
+  runAgentMessage,
   sendInferenceStream,
   stopInferenceStream,
-  type InferenceDelta,
   type InferenceEffort,
+  type InferenceEvent,
   type InferenceMessage,
   type ProxyDiagnostics,
+  type ToolStatus,
 } from "../tauri";
-import SecureFlow from "../components/SecureFlow.vue";
 import ArchitectureFlow from "../components/ArchitectureFlow.vue";
 import ProtectionItem from "../components/ProtectionItem.vue";
 import hermesAgentConfigImage from "../assets/hermes-agent-config.png";
@@ -34,12 +35,16 @@ const {
   replaceModelList,
   startModelDiscovery,
   failModelDiscovery,
+  runMode,
+  selectRunMode,
+  appendSessionMessage,
+  toRequestMessages,
+  newSession,
 } = useInferenceConfig();
 const { tngRunning } = useIngressState();
+
 type InferenceChatTab = "request" | "integration" | "security";
-type ChatRole = "user" | "assistant";
-type ChatKind = ChatRole | "boundary";
-type ChatStatus = "stage-playing" | "streaming" | "complete" | "failed" | "stopped";
+type RunStatus = "streaming" | "complete" | "failed" | "stopped";
 
 interface UserChatMessage {
   id: string;
@@ -47,19 +52,30 @@ interface UserChatMessage {
   content: string;
 }
 
+/** 时间线片段：按到达顺序承载推理文本、工具步骤、终止摘要与最终回答。 */
+interface ReasoningEntry { kind: "reasoning"; text: string; }
+interface ContentEntry { kind: "content"; text: string; }
+interface ToolEntry {
+  kind: "tool";
+  id: string;
+  name: string;
+  arguments: string;
+  status: ToolStatus;
+  summary: string;
+}
+interface NoticeEntry { kind: "notice"; message: string; }
+type TimelineEntry = ReasoningEntry | ContentEntry | ToolEntry | NoticeEntry;
+
+/**
+ * 两种模式共用同一种 assistant 气泡结构：整轮交互都收在 `timeline` 里，因此 Agent 模式
+ * 的多轮推理与工具调用不会拆成多个气泡。
+ */
 interface AssistantChatMessage {
   id: string;
   role: "assistant";
-  reasoning: string;
-  content: string;
-  status: ChatStatus;
-  phase: number;
+  status: RunStatus;
+  timeline: TimelineEntry[];
   diagnostic?: string;
-  hasDelta: boolean;
-  bufferedReasoning: string;
-  bufferedContent: string;
-  networkComplete: boolean;
-  finalStageAt?: number;
 }
 
 interface ConversationBoundaryMessage {
@@ -68,10 +84,6 @@ interface ConversationBoundaryMessage {
 }
 
 type ChatMessage = UserChatMessage | AssistantChatMessage | ConversationBoundaryMessage;
-
-const STAGE_INTERVAL_MS = 520;
-const FINAL_STAGE_INDEX = 4;
-const FINAL_STAGE_HOLD_MS = 500;
 
 const activeTab = ref<InferenceChatTab>("request");
 const draft = ref("");
@@ -84,8 +96,6 @@ const diagnosticsSnapshot = ref<ProxyDiagnostics | null>(null);
 let proxyTimer: number | undefined;
 let scrollFrame: number | undefined;
 let messageSequence = 0;
-const stageTimers = new Map<string, number>();
-const revealTimers = new Map<string, number>();
 
 const thinkingLevels = [
   { value: 0, label: "关", effort: "none" },
@@ -95,6 +105,15 @@ const thinkingLevels = [
 ] as const;
 const thinkingLevel = ref(2);
 const thinkingMarks: Record<number, string> = { 0: "关", 1: "低", 2: "中", 3: "高" };
+
+/**
+ * 运行模式控件：`对话模式` / `Agent 模式` 二选一，按请求生效。切换只写入
+ * `useInferenceConfig.runMode`，下一次发送才读取；进行中请求已快照自己的模式。
+ */
+const agentModeEnabled = computed({
+  get: () => runMode.value === "agent",
+  set: (enabled: boolean) => selectRunMode(enabled ? "agent" : "chat"),
+});
 
 /** 调试页专属身份提示词。文本保持原样，不在渲染或发送前做 trim/格式化。 */
 const DEFAULT_IDENTITY_PROMPT = `你是由蚂蚁密算公司提供的密态推理方案驱动的 AI Agent。
@@ -108,7 +127,7 @@ const identityPrompt = ref(DEFAULT_IDENTITY_PROMPT);
 const identityPromptEditorOpen = ref(false);
 const thinkingEffort = computed(() => thinkingLevels[thinkingLevel.value].effort);
 
-function nextId(prefix: ChatKind): string {
+function nextId(prefix: "user" | "assistant" | "boundary"): string {
   messageSequence += 1;
   return `${prefix}-${messageSequence}`;
 }
@@ -156,7 +175,6 @@ onDeactivated(() => {
 });
 onBeforeUnmount(() => {
   if (proxyTimer) window.clearInterval(proxyTimer);
-  clearAllTurnTimers();
   if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
 });
 
@@ -231,61 +249,6 @@ const hermesAgentConfig = computed(() => `model:
   base_url: ${localEndpoint.value}
   api_key: sk-************************************`);
 
-function buildRequestMessages(history: ChatMessage[]): InferenceMessage[] {
-  const requestMessages: InferenceMessage[] = [];
-  let currentIndex = 0;
-  for (let index = history.length - 1; index >= 0; index -= 1) {
-    if (history[index].role === "boundary") {
-      currentIndex = index + 1;
-      break;
-    }
-  }
-  for (; currentIndex < history.length; currentIndex += 1) {
-    const chatMessage = history[currentIndex];
-    if (chatMessage.role === "user") {
-      requestMessages.push({ role: "user", content: chatMessage.content });
-    } else if (
-      chatMessage.role === "assistant" &&
-      chatMessage.status === "complete" &&
-      chatMessage.content.length > 0
-    ) {
-      requestMessages.push({ role: "assistant", content: chatMessage.content });
-    }
-  }
-  return requestMessages;
-}
-
-const canReset = computed(() => {
-  if (sending.value) return false;
-  const latestMessage = messages.value[messages.value.length - 1];
-  return latestMessage !== undefined && latestMessage.role !== "boundary";
-});
-
-const transcriptSegments = computed(() => {
-  const segments: { boundary: boolean; messages: (UserChatMessage | AssistantChatMessage)[] }[] = [];
-  let current: { boundary: boolean; messages: (UserChatMessage | AssistantChatMessage)[] } = {
-    boundary: false,
-    messages: [],
-  };
-  for (const chatMessage of messages.value) {
-    if (chatMessage.role === "boundary") {
-      if (current.boundary || current.messages.length > 0) segments.push(current);
-      current = { boundary: true, messages: [] };
-      continue;
-    }
-    if (chatMessage.role === "user") current.messages.push(chatMessage);
-    else current.messages.push(chatMessage);
-  }
-  if (current.boundary || current.messages.length > 0) segments.push(current);
-  return segments;
-});
-
-function onReset(): void {
-  if (!canReset.value) return;
-  messages.value.push({ id: nextId("boundary"), role: "boundary" });
-  scheduleScrollToBottom();
-}
-
 function findAssistant(id: string): AssistantChatMessage | undefined {
   const found = messages.value.find((chatMessage) => chatMessage.id === id);
   return found?.role === "assistant" ? found : undefined;
@@ -306,147 +269,126 @@ function scheduleScrollToBottom(): void {
   });
 }
 
-function clearTurnTimers(id: string): void {
-  const stageTimer = stageTimers.get(id);
-  if (stageTimer !== undefined) {
-    window.clearInterval(stageTimer);
-    stageTimers.delete(id);
-  }
-  const revealTimer = revealTimers.get(id);
-  if (revealTimer !== undefined) {
-    window.clearTimeout(revealTimer);
-    revealTimers.delete(id);
-  }
+/** 气泡内是否已出现可见文本（reasoning 或 content）。 */
+function hasVisibleOutput(turn: AssistantChatMessage): boolean {
+  return turn.timeline.some((entry) => entry.kind === "reasoning" || entry.kind === "content");
 }
 
-function clearAllTurnTimers(): void {
-  for (const id of [...stageTimers.keys(), ...revealTimers.keys()]) {
-    clearTurnTimers(id);
-  }
+function hasContentEntry(turn: AssistantChatMessage): boolean {
+  return turn.timeline.some((entry) => entry.kind === "content");
 }
 
-function startStageAnimation(id: string): void {
-  clearTurnTimers(id);
-  const turn = findAssistant(id);
-  if (!turn) return;
-  turn.phase = 0;
-  turn.finalStageAt = undefined;
-  const timer = window.setInterval(() => {
-    const current = findAssistant(id);
-    if (!current || current.status !== "stage-playing") {
-      clearTurnTimers(id);
-      return;
-    }
-    current.phase = Math.min(current.phase + 1, FINAL_STAGE_INDEX);
-    if (current.phase === FINAL_STAGE_INDEX) {
-      const stageTimer = stageTimers.get(id);
-      if (stageTimer !== undefined) {
-        window.clearInterval(stageTimer);
-        stageTimers.delete(id);
-      }
-      current.finalStageAt = Date.now();
-      scheduleFinalHold(id);
-    }
-    scheduleScrollToBottom();
-  }, STAGE_INTERVAL_MS);
-  stageTimers.set(id, timer);
+function contentText(turn: AssistantChatMessage): string {
+  return turn.timeline
+    .filter((entry): entry is ContentEntry => entry.kind === "content")
+    .map((entry) => entry.text)
+    .join("");
 }
 
-function scheduleFinalHold(id: string): void {
-  if (revealTimers.has(id)) return;
-  const timer = window.setTimeout(() => {
-    revealTimers.delete(id);
-    maybeReveal(id);
-  }, FINAL_STAGE_HOLD_MS);
-  revealTimers.set(id, timer);
+/** 尚无任何输出文本且仍在进行中：在流式光标位置固定显示 `▶解密中`。 */
+function showDecrypting(turn: AssistantChatMessage): boolean {
+  return turn.status === "streaming" && !hasVisibleOutput(turn);
 }
 
-function maybeReveal(id: string): void {
-  const turn = findAssistant(id);
-  if (!turn || turn.status !== "stage-playing") return;
-  const finalAt = turn.finalStageAt;
-  if (
-    turn.phase !== FINAL_STAGE_INDEX ||
-    finalAt === undefined ||
-    Date.now() - finalAt < FINAL_STAGE_HOLD_MS ||
-    !turn.hasDelta
-  ) {
+/** 已出现输出文本且仍在进行中：在文本末尾跟随一个流式光标。 */
+function showStreamingCaret(turn: AssistantChatMessage): boolean {
+  return turn.status === "streaming" && hasVisibleOutput(turn);
+}
+
+function showEmptyAnswer(turn: AssistantChatMessage): boolean {
+  return (turn.status === "complete" || turn.status === "failed") && !hasContentEntry(turn);
+}
+
+/** 把连续的同类型文本增量合并到同一条时间线片段，保持到达顺序。 */
+function appendTextTail(turn: AssistantChatMessage, kind: "reasoning" | "content", text: string): void {
+  const tail = turn.timeline[turn.timeline.length - 1];
+  if (tail && tail.kind === kind) {
+    tail.text += text;
     return;
   }
-  clearTurnTimers(id);
-  turn.reasoning = turn.bufferedReasoning;
-  turn.content = turn.bufferedContent;
-  turn.status = "streaming";
+  turn.timeline.push({ kind, text });
+}
+
+/** 统一事件 reducer：两种模式共用，按 `kind` 分派到同一条时间线。 */
+function applyEvent(id: string, event: InferenceEvent): void {
+  const turn = findAssistant(id);
+  if (!turn || turn.status !== "streaming") return;
+  switch (event.kind) {
+    case "turnStart":
+      break;
+    case "reasoningDelta":
+      if (event.text.length > 0) appendTextTail(turn, "reasoning", event.text);
+      break;
+    case "contentDelta":
+      if (event.text.length > 0) appendTextTail(turn, "content", event.text);
+      break;
+    case "toolStart":
+      turn.timeline.push({
+        kind: "tool",
+        id: event.id,
+        name: event.name,
+        arguments: event.arguments,
+        status: "running",
+        summary: "",
+      });
+      break;
+    case "toolEnd": {
+      const step = turn.timeline.find((entry) => entry.kind === "tool" && entry.id === event.id);
+      if (step && step.kind === "tool") {
+        step.status = event.status;
+        step.summary = event.summary;
+      }
+      break;
+    }
+    case "notice":
+      turn.timeline.push({ kind: "notice", message: event.message });
+      break;
+    case "done":
+      break;
+    case "error":
+      break;
+    default:
+      break;
+  }
   scheduleScrollToBottom();
-  if (turn.networkComplete) finalizeComplete(id);
 }
 
 function finalizeComplete(id: string): void {
   const turn = findAssistant(id);
-  if (!turn || turn.status === "failed" || turn.status === "stopped") return;
-  clearTurnTimers(id);
+  if (!turn || turn.status !== "streaming") return;
   turn.status = "complete";
-  if (activeAssistantId.value === id) {
-    activeAssistantId.value = undefined;
-    sending.value = false;
-  }
+  releaseSendLock(id);
   scheduleScrollToBottom();
 }
 
 function finalizeStopped(id: string): void {
   const turn = findAssistant(id);
-  if (!turn || turn.status === "complete" || turn.status === "failed" || turn.status === "stopped") return;
-  clearTurnTimers(id);
-  if (turn.status === "stage-playing") {
-    // 阶段动画中的一切后台缓冲都不揭示；对用户而言本轮如同没有收到任何 chunk。
-    turn.reasoning = "";
-    turn.content = "";
-    turn.bufferedReasoning = "";
-    turn.bufferedContent = "";
-    turn.hasDelta = false;
-    turn.networkComplete = false;
-  }
+  if (!turn || turn.status !== "streaming") return;
   turn.status = "stopped";
   turn.diagnostic = undefined;
-  if (activeAssistantId.value === id) {
-    activeAssistantId.value = undefined;
-    sending.value = false;
+  // 停止即把仍在执行的工具步骤就地标记为已取消：后端随之推送的迟到
+  // toolEnd（以及迟到文本增量）会被终态过滤掉，不改变这里的呈现。
+  for (const entry of turn.timeline) {
+    if (entry.kind === "tool" && entry.status === "running") entry.status = "cancelled";
   }
+  releaseSendLock(id);
   scheduleScrollToBottom();
 }
 
 function finalizeFailure(id: string, diagnostic: string): void {
   const turn = findAssistant(id);
-  if (!turn || turn.status === "complete" || turn.status === "failed" || turn.status === "stopped") return;
-  clearTurnTimers(id);
-  if (turn.status === "stage-playing") {
-    turn.reasoning = turn.bufferedReasoning;
-    turn.content = turn.bufferedContent;
-  }
+  if (!turn || turn.status !== "streaming") return;
   turn.status = "failed";
   turn.diagnostic = diagnostic;
+  releaseSendLock(id);
+  scheduleScrollToBottom();
+}
+
+function releaseSendLock(id: string): void {
   if (activeAssistantId.value === id) {
     activeAssistantId.value = undefined;
     sending.value = false;
   }
-  scheduleScrollToBottom();
-}
-
-function applyDelta(id: string, delta: InferenceDelta): void {
-  const turn = findAssistant(id);
-  if (!turn || delta.text.length === 0) return;
-  if (turn.status === "stage-playing") {
-    if (delta.kind === "reasoning") turn.bufferedReasoning += delta.text;
-    else turn.bufferedContent += delta.text;
-    turn.hasDelta = true;
-    maybeReveal(id);
-    return;
-  }
-  if (turn.status === "streaming") {
-    if (delta.kind === "reasoning") turn.reasoning += delta.text;
-    else turn.content += delta.text;
-  }
-  scheduleScrollToBottom();
 }
 
 async function onSend(): Promise<void> {
@@ -459,7 +401,10 @@ async function onSend(): Promise<void> {
   if (proxyPort.value === null) { message.warning("网关对外端口未就绪，无法发送"); return; }
 
   const originalInput = draft.value;
-  const requestMessages = buildRequestMessages(messages.value);
+  // 模式按请求生效：本轮在发起时快照，之后切换模式不影响它。
+  const mode = runMode.value;
+  // 请求上下文取共享会话逐字副本，再追加本轮用户输入原文（不 trim）。
+  const requestMessages = toRequestMessages();
   requestMessages.push({ role: "user", content: originalInput });
 
   // 只在发起发送时读取一次，生成参数快照；后续 UI 开关或编辑不影响进行中请求。
@@ -470,23 +415,38 @@ async function onSend(): Promise<void> {
   const assistantTurn: AssistantChatMessage = {
     id: assistantId,
     role: "assistant",
-    reasoning: "",
-    content: "",
-    status: "stage-playing",
-    phase: 0,
-    hasDelta: false,
-    bufferedReasoning: "",
-    bufferedContent: "",
-    networkComplete: false,
+    status: "streaming",
+    timeline: [],
   };
   messages.value.push(userTurn, assistantTurn);
   draft.value = "";
   sending.value = true;
   activeAssistantId.value = assistantId;
+  // 用户消息一旦发出就进入共享会话（无论本轮最终是完成、停止还是失败），
+  // 使下一轮上下文始终包含用户已经说过的内容。
+  appendSessionMessage({ role: "user", content: originalInput });
   scheduleScrollToBottom();
-  startStageAnimation(assistantId);
 
   try {
+    if (mode === "agent") {
+      const result = await runAgentMessage(
+        assistantId,
+        proxyPort.value,
+        model.value,
+        apiKey.value,
+        requestMessages,
+        systemPrompt,
+        thinkingEffort.value,
+        (event) => applyEvent(assistantId, event),
+      );
+      const turn = findAssistant(assistantId);
+      if (!turn || turn.status !== "streaming") return;
+      if (result.stopped) { finalizeStopped(assistantId); return; }
+      for (const produced of result.messages) appendSessionMessage(produced);
+      finalizeComplete(assistantId);
+      return;
+    }
+
     const outcome = await sendInferenceStream(
       assistantId,
       proxyPort.value,
@@ -495,28 +455,25 @@ async function onSend(): Promise<void> {
       requestMessages,
       systemPrompt,
       thinkingEffort.value,
-      (delta) => applyDelta(assistantId, delta),
+      (event) => applyEvent(assistantId, event),
     );
     const turn = findAssistant(assistantId);
-    if (!turn || turn.status === "failed" || turn.status === "stopped") return;
-    if (outcome === "stopped") {
-      finalizeStopped(assistantId);
-      return;
-    }
-    turn.networkComplete = true;
-    if (turn.status === "streaming") finalizeComplete(assistantId);
-    else maybeReveal(assistantId);
+    if (!turn || turn.status !== "streaming") return;
+    if (outcome === "stopped") { finalizeStopped(assistantId); return; }
+    const content = contentText(turn);
+    if (content.length > 0) appendSessionMessage({ role: "assistant", content });
+    finalizeComplete(assistantId);
   } catch (error) {
     finalizeFailure(assistantId, String(error));
   }
 }
 
-/** 用户主动停止：本地先进入 stopped 终态，再请求后端取消并忽略迟到 delta。 */
+/** 用户主动停止：本地先进入 stopped 终态，再请求后端取消并忽略迟到增量。 */
 async function onStop(): Promise<void> {
   const id = activeAssistantId.value;
   if (!id || !sending.value) return;
   const turn = findAssistant(id);
-  if (!turn || turn.status === "complete" || turn.status === "failed" || turn.status === "stopped") return;
+  if (!turn || turn.status !== "streaming") return;
   finalizeStopped(id);
   try {
     await stopInferenceStream(id);
@@ -525,18 +482,61 @@ async function onStop(): Promise<void> {
   }
 }
 
-function assistantStatusMeta(status: ChatStatus): { color: string; text: string } {
-  switch (status) {
-    case "stage-playing": return { color: "processing", text: "安全链路" };
-    case "streaming": return { color: "processing", text: "生成中" };
+/**
+ * 与旧「重置」一致的可交互条件：进行中不可用；末尾已经是分隔线时不可重复插入。
+ */
+const canNewSession = computed(() => {
+  if (sending.value) return false;
+  const latestMessage = messages.value[messages.value.length - 1];
+  return latestMessage !== undefined && latestMessage.role !== "boundary";
+});
+
+/**
+ * 新会话：在 transcript 末尾插入一条 `新对话` 分隔线，并清空共享会话（即下一轮请求的
+ * 上下文）。既有的聊天记录仍保留显示，模型清单/选中模型/思考强度/身份注入/草稿也保留。
+ */
+function onNewSession(): void {
+  if (!canNewSession.value) return;
+  newSession();
+  messages.value.push({ id: nextId("boundary"), role: "boundary" });
+  scheduleScrollToBottom();
+}
+
+
+function assistantStatusMeta(turn: AssistantChatMessage): { color: string; text: string } {
+  switch (turn.status) {
+    case "streaming":
+      return hasVisibleOutput(turn)
+        ? { color: "processing", text: "生成中" }
+        : { color: "processing", text: "解密中" };
     case "complete": return { color: "success", text: "200 OK" };
     case "failed": return { color: "error", text: "请求失败" };
     case "stopped": return { color: "warning", text: "已停止⚪响应不完整" };
   }
 }
 
+function assistantStatusDetail(turn: AssistantChatMessage): string {
+  switch (turn.status) {
+    case "streaming":
+      return hasVisibleOutput(turn) ? "正在生成，响应已在本地解密" : "正在解密响应";
+    case "complete": return "响应已在本地解密";
+    case "stopped": return "用户停止了本轮生成";
+    case "failed":
+      return hasVisibleOutput(turn) ? "响应不完整（已保留部分输出）" : "流中断，未收到可显示输出";
+  }
+}
+
+function toolStatusMeta(status: ToolStatus): { color: string; text: string } {
+  switch (status) {
+    case "running": return { color: "processing", text: "进行中" };
+    case "ok": return { color: "success", text: "成功" };
+    case "error": return { color: "error", text: "失败" };
+    case "cancelled": return { color: "warning", text: "已取消" };
+  }
+}
+
 /** 正常对话的进行中与完整状态共用淡绿色；停止和失败使用专用警示色。 */
-function assistantBubbleClass(status: ChatStatus): string {
+function assistantBubbleClass(status: RunStatus): string {
   if (status === "complete") return "assistant-bubble-complete";
   if (status === "stopped") return "assistant-bubble-stopped";
   if (status === "failed") return "assistant-bubble-failed";
@@ -581,6 +581,15 @@ function assistantBubbleClass(status: ChatStatus): string {
         <a-tab-pane key="request" tab="请求调试">
           <div class="chat-shell">
             <div class="chat-toolbar">
+              <a-button
+                class="new-session-button"
+                :disabled="!canNewSession"
+                aria-label="新会话"
+                title="新会话"
+                @click="onNewSession()"
+              >
+                新会话
+              </a-button>
               <div class="model-control">
                 <a-select
                   :value="model"
@@ -656,84 +665,102 @@ function assistantBubbleClass(status: ChatStatus): string {
                 <span>发送一条消息，开始多轮密态推理验证</span>
               </div>
               <template v-else>
-                <template
-                  v-for="(segment, segmentIndex) in transcriptSegments"
-                  :key="segment.boundary ? `boundary-${segmentIndex}` : segment.messages[0]?.id"
-                >
+                <template v-for="chatMessage in messages" :key="chatMessage.id">
                   <div
-                    v-if="segment.boundary"
+                    v-if="chatMessage.role === 'boundary'"
                     class="conversation-boundary"
                     aria-label="新对话分隔"
                   >
                     <span class="new-conversation-label">新对话</span>
                   </div>
-                  <template v-for="chatMessage in segment.messages" :key="chatMessage.id">
-                    <div v-if="chatMessage.role === 'user'" class="chat-message user-message">
-                      <div class="chat-bubble user-bubble">
-                        {{ chatMessage.content }}
-                      </div>
+                  <div v-else-if="chatMessage.role === 'user'" class="chat-message user-message">
+                    <div class="chat-bubble user-bubble">
+                      {{ chatMessage.content }}
                     </div>
-                    <div v-else class="chat-message assistant-message">
-                      <div :class="['chat-bubble', 'assistant-bubble', assistantBubbleClass(chatMessage.status)]">
-                        <div class="assistant-meta">
-                          <a-tag :color="assistantStatusMeta(chatMessage.status).color">
-                            {{ assistantStatusMeta(chatMessage.status).text }}
-                          </a-tag>
-                          <span v-if="chatMessage.status === 'stage-playing'">正在建立安全链路</span>
-                          <span v-else-if="chatMessage.status === 'streaming'">正在生成，响应已在本地解密</span>
-                          <span v-else-if="chatMessage.status === 'complete'">响应已在本地解密</span>
-                          <span v-else-if="chatMessage.status === 'stopped'">用户停止了本轮生成</span>
-                          <span v-else-if="chatMessage.content || chatMessage.reasoning">
-                            响应不完整（已保留部分输出）
-                          </span>
-                          <span v-else>流中断，未收到可显示输出</span>
-                        </div>
-
-                        <div v-if="chatMessage.status === 'stage-playing'" class="assistant-stage">
-                          <a-progress
-                            :percent="(chatMessage.phase + 1) * 20"
-                            :show-info="false"
-                          />
-                          <SecureFlow :active-index="chatMessage.phase" />
-                        </div>
-
-                        <template v-else>
-                          <section v-if="chatMessage.reasoning" class="reasoning-block">
-                            <span class="section-label">思考过程</span>
-                            <p class="reasoning-text">{{ chatMessage.reasoning }}</p>
-                          </section>
-                          <section
-                            v-if="chatMessage.content || chatMessage.status !== 'stopped'"
-                            class="assistant-content"
-                          >
-                            <span class="section-label">最终回答</span>
-                            <p v-if="chatMessage.content" class="response-text">{{ chatMessage.content }}</p>
-                            <p v-else class="empty-assistant-text">尚未返回最终回答</p>
-                          </section>
-                          <pre
-                            v-if="chatMessage.status === 'failed' && chatMessage.diagnostic"
-                            class="code-block assistant-debug"
-                          >{{ chatMessage.diagnostic }}</pre>
-                        </template>
+                  </div>
+                  <div v-else class="chat-message assistant-message">
+                    <div :class="['chat-bubble', 'assistant-bubble', assistantBubbleClass(chatMessage.status)]">
+                      <div class="assistant-meta">
+                        <a-tag :color="assistantStatusMeta(chatMessage).color">
+                          {{ assistantStatusMeta(chatMessage).text }}
+                        </a-tag>
+                        <span>{{ assistantStatusDetail(chatMessage) }}</span>
                       </div>
+
+                      <div
+                        v-if="showDecrypting(chatMessage)"
+                        class="assistant-decrypting"
+                        role="status"
+                        aria-label="解密中"
+                      >
+                        <span class="decrypting-indicator">▶解密中</span>
+                      </div>
+
+                      <template
+                        v-for="(entry, entryIndex) in chatMessage.timeline"
+                        :key="`${chatMessage.id}-${entryIndex}`"
+                      >
+                        <section v-if="entry.kind === 'reasoning'" class="reasoning-block">
+                          <span class="section-label">思考过程</span>
+                          <p class="reasoning-text">{{ entry.text }}</p>
+                        </section>
+                        <section v-else-if="entry.kind === 'content'" class="assistant-content">
+                          <span class="section-label">最终回答</span>
+                          <p class="response-text">{{ entry.text }}</p>
+                        </section>
+                        <section
+                          v-else-if="entry.kind === 'tool'"
+                          class="tool-step"
+                          :class="`tool-step-${entry.status}`"
+                        >
+                          <div class="tool-step-head">
+                            <span class="tool-step-name">{{ entry.name }}</span>
+                            <a-tag :color="toolStatusMeta(entry.status).color">
+                              {{ toolStatusMeta(entry.status).text }}
+                            </a-tag>
+                          </div>
+                          <p v-if="entry.arguments" class="tool-step-args">{{ entry.arguments }}</p>
+                          <p v-if="entry.summary" class="tool-step-summary">{{ entry.summary }}</p>
+                        </section>
+                        <a-alert
+                          v-else
+                          class="tool-notice"
+                          type="warning"
+                          show-icon
+                          :message="entry.message"
+                        />
+                      </template>
+
+                      <span
+                        v-if="showStreamingCaret(chatMessage)"
+                        class="streaming-caret"
+                        aria-hidden="true"
+                      >▍</span>
+
+                      <section v-if="showEmptyAnswer(chatMessage)" class="assistant-content">
+                        <span class="section-label">最终回答</span>
+                        <p class="empty-assistant-text">尚未返回最终回答</p>
+                      </section>
+
+                      <pre
+                        v-if="chatMessage.status === 'failed' && chatMessage.diagnostic"
+                        class="code-block assistant-debug"
+                      >{{ chatMessage.diagnostic }}</pre>
                     </div>
-                  </template>
+                  </div>
                 </template>
               </template>
             </div>
 
             <div class="chat-composer">
-              <a-button
-                type="text"
-                danger
-                class="reset-button"
-                :disabled="!canReset"
-                aria-label="重置"
-                title="重置"
-                @click="onReset()"
-              >
-                重置
-              </a-button>
+              <div class="run-mode-control">
+                <a-switch
+                  v-model:checked="agentModeEnabled"
+                  aria-label="运行模式"
+                  checked-children="Agent 模式"
+                  un-checked-children="对话模式"
+                />
+              </div>
               <a-textarea
                 v-model:value="draft"
                 class="prompt-textarea"

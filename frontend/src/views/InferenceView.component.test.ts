@@ -12,7 +12,6 @@ import {
   Divider,
   Form,
   Input,
-  Progress,
   Result,
   Row,
   Col,
@@ -28,7 +27,7 @@ import {
   Switch,
 } from "ant-design-vue";
 import { useInferenceConfig } from "../composables/useInferenceConfig";
-import SecureFlow from "../components/SecureFlow.vue";
+import type { InferenceMessage } from "../tauri";
 import InferenceView from "./InferenceView.vue";
 
 const messageMocks = vi.hoisted(() => ({
@@ -47,6 +46,7 @@ const tauriMocks = vi.hoisted(() => ({
   proxyDiagnostics: vi.fn(),
   listModels: vi.fn(),
   sendInferenceStream: vi.fn(),
+  runAgentMessage: vi.fn(),
   stopInferenceStream: vi.fn(),
   flushSettingsCache: vi.fn(),
   saveConfig: vi.fn(),
@@ -72,7 +72,6 @@ const globalComponents = {
     "a-form": Form,
     "a-form-item": Form.Item,
     "a-input": Input,
-    "a-progress": Progress,
     "a-result": Result,
     "a-row": Row,
     "a-select": Select,
@@ -88,8 +87,6 @@ const globalComponents = {
   },
 };
 
-type TestDelta = { kind: "reasoning" | "content"; text: string };
-
 const expectedIdentityPrompt = [
   "你是由蚂蚁密算公司提供的密态推理方案驱动的 AI Agent。",
   "你的模型路由服务与推理计算完全发生在可信执行环境（TEE）中，并通过远程证明报告验证运行环境、软件度量与服务身份的可信状态，安全可信。",
@@ -97,11 +94,28 @@ const expectedIdentityPrompt = [
   "除可信执行环境内的必要服务外，任何外部系统都不能读取或留存用户的明文数据。",
   "如需说明身份或运行背景，可描述自己运行在由远程证明验证的密态推理环境中；但不得虚构具体硬件型号、证明服务实现细节或其他未提供的体系结构信息。",
 ].join("\n");
-type StreamCallback = (delta: TestDelta) => void;
 
-interface StreamCapture {
-  onDelta: StreamCallback;
-  resolve: () => void;
+type StreamEvent =
+  | { kind: "turnStart"; turn: number }
+  | { kind: "reasoningDelta"; text: string }
+  | { kind: "contentDelta"; text: string }
+  | { kind: "toolStart"; id: string; name: string; arguments: string }
+  | { kind: "toolEnd"; id: string; status: "running" | "ok" | "error" | "cancelled"; summary: string }
+  | { kind: "notice"; message: string }
+  | { kind: "done" }
+  | { kind: "error"; message: string };
+
+type StreamCallback = (event: StreamEvent) => void;
+
+interface ChatCapture {
+  emit: StreamCallback;
+  resolveChat: () => void;
+  reject: (error: unknown) => void;
+}
+
+interface AgentCapture {
+  emit: StreamCallback;
+  resolveAgent: (result: { stopped: boolean; messages: InferenceMessage[] }) => void;
   reject: (error: unknown) => void;
 }
 
@@ -130,13 +144,8 @@ function useSynchronousAnimationFrame(): void {
   });
 }
 
-function useTestClock(): void {
-  vi.useFakeTimers({ now: 0 });
-  useSynchronousAnimationFrame();
-}
-
-function mockStreamOnce(): StreamCapture {
-  const capture = {} as StreamCapture;
+function mockStreamOnce(): ChatCapture {
+  const capture = {} as ChatCapture;
   tauriMocks.sendInferenceStream.mockImplementationOnce(
     (
       _requestId: string,
@@ -146,11 +155,33 @@ function mockStreamOnce(): StreamCapture {
       _messages: unknown[],
       _systemPrompt: string | null,
       _reasoningEffort: string,
-      onDelta: StreamCallback,
+      onEvent: StreamCallback,
     ) =>
       new Promise<"completed" | "stopped">((resolve, reject) => {
-        capture.onDelta = onDelta;
-        capture.resolve = () => resolve("completed");
+        capture.emit = onEvent;
+        capture.resolveChat = () => resolve("completed");
+        capture.reject = reject;
+      }),
+  );
+  return capture;
+}
+
+function mockAgentRunOnce(): AgentCapture {
+  const capture = {} as AgentCapture;
+  tauriMocks.runAgentMessage.mockImplementationOnce(
+    (
+      _requestId: string,
+      _port: number,
+      _model: string,
+      _apiKey: string,
+      _messages: unknown[],
+      _systemPrompt: string | null,
+      _reasoningEffort: string,
+      onEvent: StreamCallback,
+    ) =>
+      new Promise<{ stopped: boolean; messages: InferenceMessage[] }>((resolve, reject) => {
+        capture.emit = onEvent;
+        capture.resolveAgent = (result) => resolve(result);
         capture.reject = reject;
       }),
   );
@@ -167,9 +198,9 @@ function mockResolvedStreamOnce(text = "最终回答"): void {
       _messages: unknown[],
       _systemPrompt: string | null,
       _reasoningEffort: string,
-      onDelta: StreamCallback,
+      onEvent: StreamCallback,
     ) => {
-      onDelta({ kind: "content", text });
+      onEvent({ kind: "contentDelta", text });
       return Promise.resolve("completed");
     },
   );
@@ -190,25 +221,19 @@ async function sendDraft(wrapper: VueWrapper, text: string): Promise<void> {
   await nextTick();
 }
 
-async function advanceUntilFinalStage(): Promise<void> {
-  await vi.advanceTimersByTimeAsync(4 * 520);
-  await flushPromises();
-  await nextTick();
-}
-
-async function advanceAlmostThroughFinalHold(): Promise<void> {
-  await advanceUntilFinalStage();
-  await vi.advanceTimersByTimeAsync(499);
-  await flushPromises();
-  await nextTick();
-}
-
-async function completeResolvedTurn(wrapper: VueWrapper, text: string): Promise<void> {
-  mockResolvedStreamOnce("回答");
+/** 完整跑完一轮对话模式：发一轮、回一段 content、resolve 为 completed。 */
+async function completeChatTurn(wrapper: VueWrapper, text: string, answer = "回答"): Promise<void> {
+  const capture = mockStreamOnce();
   await sendDraft(wrapper, text);
-  await advanceUntilFinalStage();
-  await vi.advanceTimersByTimeAsync(500);
+  capture.emit({ kind: "contentDelta", text: answer });
+  capture.resolveChat();
   await flushPromises();
+  await nextTick();
+}
+
+/** 把运行模式切到 Agent：直接驱动控件，验证切换本身也生效。 */
+async function switchToAgentMode(wrapper: VueWrapper): Promise<void> {
+  wrapper.findAllComponents(Switch)[1].vm.$emit("update:checked", true);
   await nextTick();
 }
 
@@ -233,6 +258,15 @@ function mountKeepAliveHarness(): VueWrapper {
 }
 
 describe("InferenceView", () => {
+  /** 身份注入开关：工具条里的第一个 Switch。 */
+  function identitySwitch(wrapper: VueWrapper) {
+    return wrapper.findAllComponents(Switch)[0];
+  }
+  /** 运行模式开关：输入框左侧的第二个 Switch。 */
+  function modeSwitch(wrapper: VueWrapper) {
+    return wrapper.findAllComponents(Switch)[1];
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     window.document.body.innerHTML = "";
@@ -240,6 +274,9 @@ describe("InferenceView", () => {
     const inference = useInferenceConfig();
     inference.initializeApiKey("test-key");
     inference.failModelDiscovery();
+    // 共享会话与运行模式是模块级进程状态：每个用例都从干净状态开始。
+    inference.newSession();
+    inference.selectRunMode("chat");
     tauriMocks.proxyEndpoint.mockReset().mockResolvedValue([{ port: 18080 }]);
     tauriMocks.proxyDiagnostics.mockReset().mockResolvedValue({
       proxy_running: true,
@@ -252,6 +289,7 @@ describe("InferenceView", () => {
     });
     tauriMocks.listModels.mockReset().mockResolvedValue(["model-a"]);
     tauriMocks.sendInferenceStream.mockReset().mockResolvedValue("completed");
+    tauriMocks.runAgentMessage.mockReset().mockResolvedValue({ stopped: false, messages: [] });
     tauriMocks.stopInferenceStream.mockReset().mockResolvedValue(true);
     tauriMocks.flushSettingsCache.mockReset().mockResolvedValue(undefined);
     tauriMocks.saveConfig.mockReset().mockResolvedValue(undefined);
@@ -406,10 +444,9 @@ describe("InferenceView", () => {
 
   it("turns identity injection off without adding a system message to the debug request", async () => {
     const wrapper = await mountAndLoadModels(["identity-off"]);
-    const identitySwitch = wrapper.findComponent(Switch);
-    identitySwitch.vm.$emit("update:checked", false);
+    identitySwitch(wrapper).vm.$emit("update:checked", false);
     await nextTick();
-    expect(identitySwitch.props("checked")).toBe(false);
+    expect(identitySwitch(wrapper).props("checked")).toBe(false);
     expect(wrapper.find(".identity-editor-backdrop").exists()).toBe(false);
 
     mockResolvedStreamOnce("无身份回答");
@@ -420,7 +457,7 @@ describe("InferenceView", () => {
   });
 
   it("sends an edited identity prompt verbatim and only on the next request", async () => {
-    useTestClock();
+    useSynchronousAnimationFrame();
     const customPrompt = "  自定义身份\n\t保留空白  ";
     const first = await mountAndLoadModels(["identity-edit"]);
     await first.get("button.identity-label-trigger").trigger("click");
@@ -435,11 +472,6 @@ describe("InferenceView", () => {
     await first.get("textarea.identity-prompt-textarea").setValue("发送后修改的身份");
     expect(tauriMocks.sendInferenceStream.mock.calls[0][5]).toBe(customPrompt);
 
-    await advanceUntilFinalStage();
-    await vi.advanceTimersByTimeAsync(500);
-    await flushPromises();
-    await nextTick();
-
     mockResolvedStreamOnce("下一轮回答");
     await sendDraft(first, "第二轮身份");
     expect(tauriMocks.sendInferenceStream).toHaveBeenCalledTimes(2);
@@ -447,8 +479,8 @@ describe("InferenceView", () => {
   });
 
   it("keeps an in-flight request unchanged while the identity state is edited", async () => {
-    useTestClock();
-    mockResolvedStreamOnce("进行中的回答");
+    useSynchronousAnimationFrame();
+    const capture = mockStreamOnce();
     const wrapper = await mountAndLoadModels(["identity-flight"]);
     await sendDraft(wrapper, "进行中身份");
     const firstPrompt = tauriMocks.sendInferenceStream.mock.calls[0][5];
@@ -460,8 +492,7 @@ describe("InferenceView", () => {
     expect(tauriMocks.sendInferenceStream.mock.calls[0][5]).toBe(expectedIdentityPrompt);
     expect(tauriMocks.sendInferenceStream).toHaveBeenCalledTimes(1);
 
-    await advanceUntilFinalStage();
-    await vi.advanceTimersByTimeAsync(500);
+    capture.resolveChat();
     await flushPromises();
     await nextTick();
 
@@ -473,8 +504,7 @@ describe("InferenceView", () => {
   it("retains identity state through KeepAlive and resets it after a process-like remount", async () => {
     const kept = mountKeepAliveHarness();
     await flushPromises();
-    const keptSwitch = kept.findComponent(Switch);
-    keptSwitch.vm.$emit("update:checked", false);
+    identitySwitch(kept).vm.$emit("update:checked", false);
     await nextTick();
     await kept.get("button.identity-label-trigger").trigger("click");
     await nextTick();
@@ -486,7 +516,7 @@ describe("InferenceView", () => {
     await nextTick();
     await flushPromises();
 
-    expect(kept.findComponent(Switch).props("checked")).toBe(false);
+    expect(identitySwitch(kept).props("checked")).toBe(false);
     expect(kept.find(".identity-editor-backdrop").exists()).toBe(true);
     expect((kept.get("textarea.identity-prompt-textarea").element as HTMLTextAreaElement).value).toBe("  页内保留身份  ");
     expect(tauriMocks.flushSettingsCache).not.toHaveBeenCalled();
@@ -494,7 +524,7 @@ describe("InferenceView", () => {
     kept.unmount();
     activeWrapper = undefined;
     const fresh = await mountAndLoadModels(["identity-fresh"]);
-    expect(fresh.findComponent(Switch).props("checked")).toBe(true);
+    expect(identitySwitch(fresh).props("checked")).toBe(true);
     expect(fresh.find(".identity-editor-backdrop").exists()).toBe(false);
     await fresh.get("button.identity-label-trigger").trigger("click");
     await nextTick();
@@ -503,7 +533,7 @@ describe("InferenceView", () => {
   });
 
   it("sends one untrimmed turn with default medium effort and renders both bubbles immediately", async () => {
-    useTestClock();
+    useSynchronousAnimationFrame();
     const capture = mockStreamOnce();
     const wrapper = await mountAndLoadModels(["capi-model"]);
 
@@ -512,7 +542,7 @@ describe("InferenceView", () => {
     await sendDraft(wrapper, "  保留首尾空白  ");
 
     expect(tauriMocks.sendInferenceStream).toHaveBeenCalledTimes(1);
-    const [requestId, port, modelId, apiKey, requestMessages, systemPrompt, effort, onDelta] =
+    const [requestId, port, modelId, apiKey, requestMessages, systemPrompt, effort, onEvent] =
       tauriMocks.sendInferenceStream.mock.calls[0];
     expect(requestId).toBe("assistant-2");
     expect(port).toBe(18080);
@@ -523,7 +553,7 @@ describe("InferenceView", () => {
     ]);
     expect(systemPrompt).toBe(expectedIdentityPrompt);
     expect(effort).toBe("medium");
-    expect(typeof onDelta).toBe("function");
+    expect(typeof onEvent).toBe("function");
 
     // 滑块调整只影响下一轮，不改已发出请求。
     wrapper.findComponent(Slider).vm.$emit("update:value", 3);
@@ -532,9 +562,9 @@ describe("InferenceView", () => {
 
     expect(composerValue(wrapper)).toBe("");
 
-    // 请求非终态时气泡保持正常淡绿色，主操作切换为停止而不是并行发送。
+    // 请求非终态时气泡保持正常淡绿色并显示解密中指示，主操作切换为停止而不是并行发送。
     expect(wrapper.find(".assistant-message .chat-bubble").classes()).toContain("assistant-bubble-pending");
-    expect(wrapper.findComponent(Button).props("disabled")).toBe(true);
+    expect(wrapper.get(".decrypting-indicator").text()).toBe("▶解密中");
     await setDraft(wrapper, "第二条");
     await wrapper.find("button.send-button").trigger("click");
     await flushPromises();
@@ -544,17 +574,17 @@ describe("InferenceView", () => {
     expect(wrapper.find(".assistant-message .assistant-bubble").exists()).toBe(true);
     expect(wrapper.find(".user-bubble").classes()).toContain("user-bubble");
     expect(wrapper.find(".assistant-message .chat-bubble").classes()).toContain("assistant-bubble-stopped");
-    expect(wrapper.findComponent(SecureFlow).exists()).toBe(false);
+    expect(wrapper.find(".decrypting-indicator").exists()).toBe(false);
     expect(wrapper.text()).toContain("已停止⚪响应不完整");
     expect(wrapper.find(".reasoning-block").exists()).toBe(false);
     expect(wrapper.find(".response-text").exists()).toBe(false);
 
-    capture.resolve();
+    capture.resolveChat();
     await flushPromises();
   });
 
   it("keeps user, in-flight, and complete bubbles on the same soft-green visual state", async () => {
-    useTestClock();
+    useSynchronousAnimationFrame();
     const capture = mockStreamOnce();
     const wrapper = await mountAndLoadModels(["capi-model"]);
 
@@ -563,11 +593,9 @@ describe("InferenceView", () => {
     expect(assistantBubble.classes()).toContain("assistant-bubble-pending");
     expect(assistantBubble.classes()).not.toContain("assistant-bubble-stopped");
     expect(assistantBubble.classes()).not.toContain("assistant-bubble-failed");
-    expect(wrapper.text()).toContain("安全链路");
+    expect(wrapper.text()).toContain("解密中");
 
-    capture.onDelta({ kind: "reasoning", text: "思考增量" });
-    await advanceUntilFinalStage();
-    await vi.advanceTimersByTimeAsync(500);
+    capture.emit({ kind: "reasoningDelta", text: "思考增量" });
     await flushPromises();
     await nextTick();
 
@@ -576,7 +604,7 @@ describe("InferenceView", () => {
     expect(assistantBubble.classes()).not.toContain("assistant-bubble-failed");
     expect(wrapper.text()).toContain("生成中");
 
-    capture.resolve();
+    capture.resolveChat();
     await flushPromises();
     await nextTick();
 
@@ -622,80 +650,81 @@ describe("InferenceView", () => {
     expect(wrapper.findComponent(Select).props("value")).toBe("third-model");
   });
 
-  it("buffers early deltas and waits for the final 500ms hold before revealing", async () => {
-    useTestClock();
+  it("shows ▶解密中 until the first delta replaces it and removes it at terminal state", async () => {
+    useSynchronousAnimationFrame();
     const capture = mockStreamOnce();
     const wrapper = await mountAndLoadModels(["capi-model"]);
     const transcript = wrapper.get(".chat-transcript");
     Object.defineProperty(transcript.element, "scrollHeight", { configurable: true, value: 987 });
     Object.defineProperty(transcript.element, "scrollTop", { configurable: true, writable: true, value: 0 });
 
-    await sendDraft(wrapper, "第一轮");
-
-    capture.onDelta({ kind: "reasoning", text: "先分析安全边界" });
-    capture.onDelta({ kind: "content", text: "这是开头" });
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(520);
-    await flushPromises();
-    await nextTick();
-
-    expect(wrapper.findComponent(SecureFlow).props("activeIndex")).toBe(1);
+    await sendDraft(wrapper, "解密中");
+    expect(wrapper.get(".decrypting-indicator").text()).toBe("▶解密中");
     expect(wrapper.find(".reasoning-block").exists()).toBe(false);
     expect(wrapper.find(".response-text").exists()).toBe(false);
+    expect(wrapper.find(".assistant-decrypting").exists()).toBe(true);
 
-    capture.resolve();
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(3 * 520 + 499);
-    await flushPromises();
-    await nextTick();
-
-    expect(wrapper.findComponent(SecureFlow).props("activeIndex")).toBe(4);
-    expect(wrapper.find(".reasoning-block").exists()).toBe(false);
-    expect(wrapper.find(".response-text").exists()).toBe(false);
-
-    await vi.advanceTimersByTimeAsync(1);
+    capture.emit({ kind: "reasoningDelta", text: "先分析安全边界" });
     await flushPromises();
     await nextTick();
 
-    expect(wrapper.findComponent(SecureFlow).exists()).toBe(false);
+    expect(wrapper.find(".decrypting-indicator").exists()).toBe(false);
+    expect(wrapper.find(".assistant-decrypting").exists()).toBe(false);
     expect(wrapper.find(".reasoning-text").text()).toBe("先分析安全边界");
+    expect(wrapper.find(".streaming-caret").exists()).toBe(true);
+    expect(wrapper.text()).toContain("生成中");
+
+    capture.emit({ kind: "contentDelta", text: "这是开头" });
+    await flushPromises();
+    await nextTick();
     expect(wrapper.find(".response-text").text()).toBe("这是开头");
+
+    capture.resolveChat();
+    await flushPromises();
+    await nextTick();
+
+    expect(wrapper.find(".decrypting-indicator").exists()).toBe(false);
+    expect(wrapper.find(".streaming-caret").exists()).toBe(false);
     expect(wrapper.find(".assistant-message .chat-bubble").classes()).toContain("assistant-bubble-complete");
     expect(wrapper.text()).toContain("200 OK");
     expect(wrapper.find("button.send-button").attributes("disabled")).toBeUndefined();
     expect(transcript.element.scrollTop).toBe(987);
+
+    const themeCss = readFileSync("src/assets/theme.css", "utf8");
+    const decryptCss = themeCss.match(/\n\.assistant-decrypting \{[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(decryptCss).toContain("min-height");
+    // 五步阶段动画的样式与节点已整体移除。
+    expect(themeCss).not.toContain(".secure-flow");
+    expect(themeCss).not.toContain(".stage-card");
+    expect(themeCss).not.toContain(".stage-dot");
+    expect(themeCss).not.toContain(".assistant-stage");
+    expect(wrapper.find(".assistant-stage").exists()).toBe(false);
   });
 
-  it("keeps the final stage waiting when no delta arrives", async () => {
-    useTestClock();
-    mockStreamOnce();
-    const wrapper = await mountAndLoadModels(["capi-model"]);
-    await sendDraft(wrapper, "等待增量");
+  it("shows ▶解密中 in agent mode too and removes it once output arrives", async () => {
+    useSynchronousAnimationFrame();
+    const capture = mockAgentRunOnce();
+    const wrapper = await mountAndLoadModels(["agent-decrypt"]);
+    await switchToAgentMode(wrapper);
+    await sendDraft(wrapper, "Agent 解密中");
 
-    await advanceAlmostThroughFinalHold();
-    await vi.advanceTimersByTimeAsync(1);
+    expect(wrapper.get(".decrypting-indicator").text()).toBe("▶解密中");
+    capture.emit({ kind: "turnStart", turn: 1 });
     await flushPromises();
     await nextTick();
+    expect(wrapper.get(".decrypting-indicator").text()).toBe("▶解密中");
 
-    expect(wrapper.findComponent(SecureFlow).exists()).toBe(true);
-    expect(wrapper.findComponent(SecureFlow).props("activeIndex")).toBe(4);
-    expect(wrapper.find(".reasoning-block").exists()).toBe(false);
-    expect(wrapper.find(".response-text").exists()).toBe(false);
-    expect(wrapper.text()).toContain("安全链路");
-    const stopButton = wrapper.get("button.send-button");
-    expect(stopButton.classes()).toContain("stop-button");
-    expect(stopButton.attributes("aria-label")).toBe("停止");
-    expect(stopButton.find(".stop-square-icon").exists()).toBe(true);
-    await stopButton.trigger("click");
+    capture.emit({ kind: "contentDelta", text: "Agent 输出" });
     await flushPromises();
-    nextTick();
-    expect(wrapper.text()).toContain("已停止⚪响应不完整");
-    expect(wrapper.findComponent(SecureFlow).exists()).toBe(false);
-    expect(tauriMocks.sendInferenceStream).toHaveBeenCalledTimes(1);
+    await nextTick();
+    expect(wrapper.find(".decrypting-indicator").exists()).toBe(false);
+    expect(wrapper.find(".response-text").text()).toBe("Agent 输出");
+    capture.resolveAgent({ stopped: false, messages: [] });
+    await flushPromises();
   });
 
-  it("appends post-reveal deltas in order and always scrolls the transcript", async () => {
-    useTestClock();
+  it("appends streaming deltas in order and always scrolls the transcript", async () => {
+    useSynchronousAnimationFrame();
     const capture = mockStreamOnce();
     const wrapper = await mountAndLoadModels(["capi-model"]);
     const transcript = wrapper.get(".chat-transcript");
@@ -711,17 +740,16 @@ describe("InferenceView", () => {
     });
 
     await sendDraft(wrapper, "流式输出");
-    capture.onDelta({ kind: "reasoning", text: "思考-1" });
-    await advanceUntilFinalStage();
-    await vi.advanceTimersByTimeAsync(500);
+    capture.emit({ kind: "reasoningDelta", text: "思考-1" });
     await flushPromises();
     await nextTick();
 
     expect(wrapper.find(".reasoning-text").text()).toBe("思考-1");
+    expect(wrapper.find(".response-text").exists()).toBe(false);
     expect(transcript.element.scrollTop).toBe(100);
 
     scrollHeight = 240;
-    capture.onDelta({ kind: "content", text: "回答-1" });
+    capture.emit({ kind: "contentDelta", text: "回答-1" });
     await flushPromises();
     await nextTick();
 
@@ -730,21 +758,21 @@ describe("InferenceView", () => {
     expect(transcript.element.scrollTop).toBe(240);
 
     scrollHeight = 360;
-    capture.onDelta({ kind: "content", text: "-2" });
+    capture.emit({ kind: "contentDelta", text: "-2" });
     await flushPromises();
     await nextTick();
 
     expect(wrapper.find(".response-text").text()).toBe("回答-1-2");
     expect(transcript.element.scrollTop).toBe(360);
 
-    capture.resolve();
+    capture.resolveChat();
     await flushPromises();
     await nextTick();
     expect(wrapper.text()).toContain("200 OK");
   });
 
   it("maps all four thinking levels and keeps an in-flight request unchanged", async () => {
-    useTestClock();
+    useSynchronousAnimationFrame();
     const wrapper = await mountAndLoadModels(["thinking-model"]);
     const efforts: string[] = [];
     const inputs = ["off", "low", "medium-default", "high"];
@@ -758,11 +786,6 @@ describe("InferenceView", () => {
       await sendDraft(wrapper, inputs[index]);
       const call = tauriMocks.sendInferenceStream.mock.calls[index];
       efforts.push(call[6]);
-
-      await advanceUntilFinalStage();
-      await vi.advanceTimersByTimeAsync(500);
-      await flushPromises();
-      await nextTick();
     }
 
     expect(efforts).toEqual(expected);
@@ -775,17 +798,13 @@ describe("InferenceView", () => {
   });
 
   it("builds later context from completed content only and serializes one request at a time", async () => {
-    useTestClock();
+    useSynchronousAnimationFrame();
     const firstCapture = mockStreamOnce();
     const wrapper = await mountAndLoadModels(["capi-model"]);
     await sendDraft(wrapper, "第一轮");
-    firstCapture.onDelta({ kind: "reasoning", text: "不进入上下文" });
-    firstCapture.onDelta({ kind: "content", text: "第一轮回答" });
-    firstCapture.resolve();
-    await flushPromises();
-
-    await advanceUntilFinalStage();
-    await vi.advanceTimersByTimeAsync(500);
+    firstCapture.emit({ kind: "reasoningDelta", text: "不进入上下文" });
+    firstCapture.emit({ kind: "contentDelta", text: "第一轮回答" });
+    firstCapture.resolveChat();
     await flushPromises();
     await nextTick();
     expect(wrapper.text()).toContain("200 OK");
@@ -807,18 +826,18 @@ describe("InferenceView", () => {
     await wrapper.find("button.send-button").trigger("click");
     await flushPromises();
     expect(tauriMocks.sendInferenceStream).toHaveBeenCalledTimes(2);
-    secondCapture.resolve();
+    secondCapture.resolveChat();
     await flushPromises();
   });
 
   it("shows a failed turn with partial text, redacted diagnostics, and excludes it from later context", async () => {
-    useTestClock();
+    useSynchronousAnimationFrame();
     const firstCapture = mockStreamOnce();
     const wrapper = await mountAndLoadModels(["capi-model"]);
     await sendDraft(wrapper, "失败轮");
 
-    firstCapture.onDelta({ kind: "reasoning", text: "部分思考" });
-    firstCapture.onDelta({ kind: "content", text: "部分回答" });
+    firstCapture.emit({ kind: "reasoningDelta", text: "部分思考" });
+    firstCapture.emit({ kind: "contentDelta", text: "部分回答" });
     firstCapture.reject("发送失败: 流中断\nAuthorization: Bearer <已隐藏>");
     await flushPromises();
     await nextTick();
@@ -839,103 +858,12 @@ describe("InferenceView", () => {
       { role: "user", content: "失败轮" },
       { role: "user", content: "下一轮" },
     ]);
-    secondCapture.resolve();
+    secondCapture.resolveChat();
     await flushPromises();
-  });
-
-  it("keeps history visible while reset cuts the next request context", async () => {
-    useTestClock();
-    const wrapper = await mountAndLoadModels(["reset-model"]);
-    await completeResolvedTurn(wrapper, "旧用户");
-
-    const resetButton = wrapper.get("button.reset-button");
-    expect(resetButton.text()).toBe("重置");
-    expect(resetButton.attributes("disabled")).toBeUndefined();
-
-    await setDraft(wrapper, "重置前草稿");
-    wrapper.findComponent(Slider).vm.$emit("update:value", 3);
-    await nextTick();
-    await wrapper.get("button.reset-button").trigger("click");
-    await nextTick();
-
-    expect(wrapper.get(".user-message .user-bubble").text()).toBe("旧用户");
-    expect(wrapper.get(".assistant-message .assistant-content").text()).toContain("回答");
-    expect(wrapper.get(".conversation-boundary").text()).toBe("新对话");
-    expect(composerValue(wrapper)).toBe("重置前草稿");
-    expect(wrapper.findComponent(Slider).props("value")).toBe(3);
-    expect(wrapper.findComponent(Button).props("disabled")).toBe(true);
-    expect(tauriMocks.stopInferenceStream).not.toHaveBeenCalled();
-
-    mockStreamOnce();
-    await sendDraft(wrapper, "新用户");
-    const [, , , , requestMessages, , effort] = tauriMocks.sendInferenceStream.mock.calls[1];
-    expect(requestMessages).toEqual([{ role: "user", content: "新用户" }]);
-    expect(effort).toBe("high");
-    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(1);
-    expect(wrapper.text()).toContain("旧用户");
-    expect(wrapper.text()).toContain("回答");
-  });
-
-  it("inserts another boundary only after a new conversation completes", async () => {
-    useTestClock();
-    const wrapper = await mountAndLoadModels(["multiple-reset-model"]);
-    await completeResolvedTurn(wrapper, "第一段");
-
-    await wrapper.get("button.reset-button").trigger("click");
-    await nextTick();
-    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(1);
-    const repeatReset = wrapper.get("button.reset-button");
-    expect(repeatReset.findComponent(Button).props("disabled")).toBe(true);
-
-    await repeatReset.trigger("click");
-    await nextTick();
-    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(1);
-
-    await completeResolvedTurn(wrapper, "第二段");
-    expect(wrapper.get("button.reset-button").attributes("disabled")).toBeUndefined();
-    await wrapper.get("button.reset-button").trigger("click");
-    await nextTick();
-
-    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(2);
-    expect(wrapper.findAll(".user-message")).toHaveLength(2);
-    expect(wrapper.findAll(".assistant-message")).toHaveLength(2);
-    expect(wrapper.findComponent(Button).props("disabled")).toBe(true);
-  });
-
-  it("retains reset history and boundary across KeepAlive page switches", async () => {
-    useTestClock();
-    const wrapper = mountKeepAliveHarness();
-    await flushPromises();
-    await completeResolvedTurn(wrapper, "切页前消息");
-
-    await wrapper.get("button.reset-button").trigger("click");
-    await nextTick();
-    await setDraft(wrapper, "保留草稿");
-    wrapper.findComponent(Slider).vm.$emit("update:value", 1);
-    await nextTick();
-
-    await wrapper.setProps({ show: false });
-    await nextTick();
-    await wrapper.setProps({ show: true });
-    await nextTick();
-    await flushPromises();
-
-    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(1);
-    expect(wrapper.get(".user-message .user-bubble").text()).toBe("切页前消息");
-    expect(composerValue(wrapper)).toBe("保留草稿");
-    expect(wrapper.findComponent(Slider).props("value")).toBe(1);
-    expect(wrapper.findComponent(Button).props("disabled")).toBe(true);
-    expect(tauriMocks.flushSettingsCache).not.toHaveBeenCalled();
-    expect(tauriMocks.saveConfig).not.toHaveBeenCalled();
-
-    mockResolvedStreamOnce("新对话回答");
-    await sendDraft(wrapper, "切页后新消息");
-    const [, , , , requestMessages] = tauriMocks.sendInferenceStream.mock.calls[1];
-    expect(requestMessages).toEqual([{ role: "user", content: "切页后新消息" }]);
   });
 
   it("enters terminal failure immediately when no delta arrives", async () => {
-    useTestClock();
+    useSynchronousAnimationFrame();
     const capture = mockStreamOnce();
     const wrapper = await mountAndLoadModels(["capi-model"]);
     await sendDraft(wrapper, "无输出失败");
@@ -945,6 +873,7 @@ describe("InferenceView", () => {
     await nextTick();
 
     expect(wrapper.find(".assistant-message .chat-bubble").classes()).toContain("assistant-bubble-failed");
+    expect(wrapper.find(".decrypting-indicator").exists()).toBe(false);
     expect(wrapper.find(".reasoning-block").exists()).toBe(false);
     expect(wrapper.find(".response-text").exists()).toBe(false);
     expect(wrapper.text()).toContain("请求失败");
@@ -952,16 +881,13 @@ describe("InferenceView", () => {
     expect(wrapper.find("button.send-button").attributes("disabled")).toBeUndefined();
   });
 
-
   it("keeps displayed text when the user stops after output is revealed", async () => {
-    useTestClock();
+    useSynchronousAnimationFrame();
     const capture = mockStreamOnce();
     const wrapper = await mountAndLoadModels(["capi-model"]);
     await sendDraft(wrapper, "流式中停止");
-    capture.onDelta({ kind: "reasoning", text: "已显示思考" });
-    capture.onDelta({ kind: "content", text: "已显示回答" });
-    await advanceUntilFinalStage();
-    await vi.advanceTimersByTimeAsync(500);
+    capture.emit({ kind: "reasoningDelta", text: "已显示思考" });
+    capture.emit({ kind: "contentDelta", text: "已显示回答" });
     await flushPromises();
     await nextTick();
 
@@ -977,9 +903,9 @@ describe("InferenceView", () => {
     expect(wrapper.find(".reasoning-text").text()).toBe("已显示思考");
     expect(wrapper.find(".response-text").text()).toBe("已显示回答");
 
-    capture.onDelta({ kind: "reasoning", text: "迟到思考" });
-    capture.onDelta({ kind: "content", text: "迟到回答" });
-    capture.resolve();
+    capture.emit({ kind: "reasoningDelta", text: "迟到思考" });
+    capture.emit({ kind: "contentDelta", text: "迟到回答" });
+    capture.resolveChat();
     await flushPromises();
     await nextTick();
 
@@ -997,38 +923,30 @@ describe("InferenceView", () => {
       { role: "user", content: "流式中停止" },
       { role: "user", content: "下一轮" },
     ]);
-    secondCapture.resolve();
+    secondCapture.resolveChat();
     await flushPromises();
   });
 
-  it("stops during stage animation without revealing buffered chunks and keeps a blank stopped bubble", async () => {
-    useTestClock();
+  it("stops while still decrypting and keeps a blank stopped bubble", async () => {
+    useSynchronousAnimationFrame();
     const capture = mockStreamOnce();
     const wrapper = await mountAndLoadModels(["capi-model"]);
-    await sendDraft(wrapper, "动画中停止");
+    await sendDraft(wrapper, "解密中停止");
 
-    capture.onDelta({ kind: "reasoning", text: "隐藏思考" });
-    capture.onDelta({ kind: "content", text: "隐藏回答" });
-    await vi.advanceTimersByTimeAsync(520);
-    await flushPromises();
-    await nextTick();
-
-    expect(wrapper.findComponent(SecureFlow).exists()).toBe(true);
+    expect(wrapper.get(".decrypting-indicator").text()).toBe("▶解密中");
     await wrapper.find("button.send-button").trigger("click");
     await flushPromises();
     await nextTick();
 
     const requestId = tauriMocks.sendInferenceStream.mock.calls[0][0];
     expect(tauriMocks.stopInferenceStream).toHaveBeenCalledWith(requestId);
-    expect(wrapper.findComponent(SecureFlow).exists()).toBe(false);
+    expect(wrapper.find(".decrypting-indicator").exists()).toBe(false);
     expect(wrapper.find(".reasoning-text").exists()).toBe(false);
     expect(wrapper.find(".response-text").exists()).toBe(false);
     expect(wrapper.text()).toContain("已停止⚪响应不完整");
-    expect(wrapper.text()).not.toContain("隐藏思考");
-    expect(wrapper.text()).not.toContain("隐藏回答");
 
-    capture.onDelta({ kind: "content", text: "迟到输出" });
-    capture.resolve();
+    capture.emit({ kind: "contentDelta", text: "迟到输出" });
+    capture.resolveChat();
     await flushPromises();
     await nextTick();
     expect(wrapper.text()).not.toContain("迟到输出");
@@ -1037,15 +955,15 @@ describe("InferenceView", () => {
     await sendDraft(wrapper, "停止后的下一轮");
     const [, , , , secondMessages] = tauriMocks.sendInferenceStream.mock.calls[1];
     expect(secondMessages).toEqual([
-      { role: "user", content: "动画中停止" },
+      { role: "user", content: "解密中停止" },
       { role: "user", content: "停止后的下一轮" },
     ]);
-    secondCapture.resolve();
+    secondCapture.resolveChat();
     await flushPromises();
   });
 
   it("does not stop automatically when navigating away and can stop after returning", async () => {
-    useTestClock();
+    useSynchronousAnimationFrame();
     mockStreamOnce();
     const wrapper = mountKeepAliveHarness();
     await flushPromises();
@@ -1069,16 +987,12 @@ describe("InferenceView", () => {
   });
 
   it("retains draft, slider, and in-flight stream through KeepAlive page switches", async () => {
-    useTestClock();
+    useSynchronousAnimationFrame();
     const capture = mockStreamOnce();
     const wrapper = mountKeepAliveHarness();
     await flushPromises();
 
     await sendDraft(wrapper, "离开页面期间继续");
-    await vi.advanceTimersByTimeAsync(520);
-    await flushPromises();
-    expect(wrapper.findComponent(SecureFlow).props("activeIndex")).toBe(1);
-
     wrapper.findComponent(Slider).vm.$emit("update:value", 3);
     await nextTick();
     await setDraft(wrapper, "保留的未发送草稿");
@@ -1087,14 +1001,10 @@ describe("InferenceView", () => {
     await nextTick();
     expect(wrapper.text()).toContain("other page");
 
-    capture.onDelta({ kind: "reasoning", text: "后台思考" });
-    capture.onDelta({ kind: "content", text: "后台回答" });
-    capture.resolve();
+    capture.emit({ kind: "reasoningDelta", text: "后台思考" });
+    capture.emit({ kind: "contentDelta", text: "后台回答" });
+    capture.resolveChat();
     await flushPromises();
-    await advanceUntilFinalStage();
-    await vi.advanceTimersByTimeAsync(500);
-    await flushPromises();
-    await nextTick();
 
     await wrapper.setProps({ show: true });
     await nextTick();
@@ -1110,20 +1020,303 @@ describe("InferenceView", () => {
   });
 
   it("returns to fresh in-memory state after a process-like remount", async () => {
-    useTestClock();
+    useSynchronousAnimationFrame();
     const capture = mockStreamOnce();
     const first = await mountAndLoadModels(["restart-model"]);
     await sendDraft(first, "旧进程消息");
-    capture.resolve();
+    capture.resolveChat();
     await flushPromises();
 
     first.unmount();
     activeWrapper = undefined;
+    // 模拟进程重启：模块级共享会话也应随之清空。
+    useInferenceConfig().newSession();
     const second = await mountAndLoadModels(["restart-model"]);
     expect(second.find(".user-message").exists()).toBe(false);
     expect(composerValue(second)).toBe("");
     expect(second.findComponent(Slider).props("value")).toBe(2);
     expect(second.text()).toContain("发送一条消息，开始多轮密态推理验证");
+  });
+
+  it("renders 新会话 left of the model dropdown and the run-mode switch at the old reset position", async () => {
+    const wrapper = await mountAndLoadModels(["layout-model"]);
+    const toolbar = wrapper.get(".chat-toolbar");
+    const children = Array.from(toolbar.element.children);
+    expect(children[0].classList.contains("new-session-button")).toBe(true);
+    expect(children[1].classList.contains("model-control")).toBe(true);
+    expect(toolbar.get("button.new-session-button").text()).toBe("新会话");
+    expect(toolbar.find(".reset-button").exists()).toBe(false);
+
+    // 输入框左侧原先的"重置"位置改为运行模式分段切换控件。
+    const composer = wrapper.get(".chat-composer");
+    expect(composer.find(".reset-button").exists()).toBe(false);
+    const mode = modeSwitch(wrapper);
+    expect(mode.props("checkedChildren")).toBe("Agent 模式");
+    expect(mode.props("unCheckedChildren")).toBe("对话模式");
+    expect(composer.find(".run-mode-control").exists()).toBe(true);
+
+    // 与设置页入口配置的本机端口切换控件同款：a-switch + checked/un-checked children。
+    const entryEditor = readFileSync("src/components/EntryEditor.vue", "utf8");
+    expect(entryEditor).toContain('checked-children="0.0.0.0"');
+    expect(entryEditor).toContain('un-checked-children="127.0.0.1"');
+    const viewSource = readFileSync("src/views/InferenceView.vue", "utf8");
+    expect(viewSource).toContain('checked-children="Agent 模式"');
+    expect(viewSource).toContain('un-checked-children="对话模式"');
+
+    const themeCss = readFileSync("src/assets/theme.css", "utf8");
+    const newSessionCss = themeCss.match(/\n\.new-session-button \{[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(newSessionCss).toContain("height: 32px");
+    expect(themeCss).not.toContain(".reset-button");
+    // `新对话` 分隔线仍是 `新会话` 的生效标记，保留低对比样式。
+    const boundaryCss = themeCss.match(/\n\.conversation-boundary \{[\s\S]*?\n\}/)?.[0] ?? "";
+    const boundaryLineCss = themeCss.match(
+      /\n\.conversation-boundary::before,\s*\.conversation-boundary::after \{[\s\S]*?\n\}/,
+    )?.[0] ?? "";
+    expect(boundaryCss).toContain("color: var(--text-tertiary)");
+    expect(boundaryLineCss).toContain("background: rgba(90, 103, 126, .18)");
+  });
+
+  it("inserts a 新对话 boundary on 新会话, cutting the request context but keeping history", async () => {
+    useSynchronousAnimationFrame();
+    const wrapper = await mountAndLoadModels(["new-session-model"]);
+    await completeChatTurn(wrapper, "旧用户", "旧回答");
+
+    const newSessionButton = wrapper.get("button.new-session-button");
+    expect(newSessionButton.text()).toBe("新会话");
+    expect(newSessionButton.attributes("disabled")).toBeUndefined();
+
+    await setDraft(wrapper, "保留的草稿");
+    wrapper.findComponent(Slider).vm.$emit("update:value", 3);
+    await nextTick();
+    await newSessionButton.trigger("click");
+    await nextTick();
+
+    // 既有聊天记录仍可见，末尾插入一条"新对话"分隔线。
+    expect(wrapper.get(".user-message .user-bubble").text()).toBe("旧用户");
+    expect(wrapper.get(".assistant-message .assistant-content").text()).toContain("旧回答");
+    const boundary = wrapper.get(".conversation-boundary");
+    expect(boundary.attributes("aria-label")).toBe("新对话分隔");
+    expect(boundary.get(".new-conversation-label").text()).toBe("新对话");
+    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(1);
+
+    // 只切请求上下文：共享会话被清空，聊天显示不受影响。
+    expect(useInferenceConfig().toRequestMessages()).toEqual([]);
+
+    // 调试参数与草稿保留。
+    expect(wrapper.findComponent(Select).props("value")).toBe("new-session-model");
+    expect(wrapper.findComponent(Slider).props("value")).toBe(3);
+    expect(composerValue(wrapper)).toBe("保留的草稿");
+
+    mockStreamOnce();
+    await sendDraft(wrapper, "新用户");
+    const [, , , , requestMessages, , effort] = tauriMocks.sendInferenceStream.mock.calls[1];
+    expect(requestMessages).toEqual([{ role: "user", content: "新用户" }]);
+    expect(effort).toBe("high");
+    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(1);
+    expect(wrapper.text()).toContain("旧用户");
+    expect(wrapper.text()).toContain("旧回答");
+  });
+
+  it("only inserts another boundary after a new conversation completes", async () => {
+    useSynchronousAnimationFrame();
+    const wrapper = await mountAndLoadModels(["multiple-boundary-model"]);
+    await completeChatTurn(wrapper, "第一段", "第一段回答");
+
+    await wrapper.get("button.new-session-button").trigger("click");
+    await nextTick();
+    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(1);
+    expect(wrapper.get("button.new-session-button").attributes("disabled")).toBeDefined();
+
+    await wrapper.get("button.new-session-button").trigger("click");
+    await nextTick();
+    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(1);
+
+    await completeChatTurn(wrapper, "第二段", "第二段回答");
+    expect(wrapper.get("button.new-session-button").attributes("disabled")).toBeUndefined();
+    await wrapper.get("button.new-session-button").trigger("click");
+    await nextTick();
+
+    expect(wrapper.findAll(".conversation-boundary")).toHaveLength(2);
+    expect(wrapper.findAll(".user-message")).toHaveLength(2);
+    expect(wrapper.findAll(".assistant-message")).toHaveLength(2);
+  });
+  it("disables 新会话 while a request is in flight", async () => {
+    useSynchronousAnimationFrame();
+    const capture = mockStreamOnce();
+    const wrapper = await mountAndLoadModels(["inflight-model"]);
+    await sendDraft(wrapper, "进行中");
+
+    const newSessionButton = wrapper.get("button.new-session-button");
+    expect(newSessionButton.attributes("disabled")).toBeDefined();
+    await newSessionButton.trigger("click");
+    await nextTick();
+    expect(useInferenceConfig().toRequestMessages()).toEqual([{ role: "user", content: "进行中" }]);
+
+    capture.resolveChat();
+    await flushPromises();
+    await nextTick();
+    expect(wrapper.get("button.new-session-button").attributes("disabled")).toBeUndefined();
+  });
+
+  it("switches run mode per request and keeps the shared context", async () => {
+    useSynchronousAnimationFrame();
+    const wrapper = await mountAndLoadModels(["mode-model"]);
+    await completeChatTurn(wrapper, "第一轮", "第一轮回答");
+
+    expect(modeSwitch(wrapper).props("checked")).toBe(false);
+    await switchToAgentMode(wrapper);
+    expect(useInferenceConfig().runMode.value).toBe("agent");
+    // 切换模式不清空上下文。
+    expect(useInferenceConfig().toRequestMessages()).toEqual([
+      { role: "user", content: "第一轮" },
+      { role: "assistant", content: "第一轮回答" },
+    ]);
+    expect(wrapper.find(".user-message").exists()).toBe(true);
+
+    const capture = mockAgentRunOnce();
+    await sendDraft(wrapper, "Agent 轮");
+    expect(tauriMocks.sendInferenceStream).toHaveBeenCalledTimes(1);
+    expect(tauriMocks.runAgentMessage).toHaveBeenCalledTimes(1);
+    const [, port, modelId, apiKey, messages, systemPrompt, effort] = tauriMocks.runAgentMessage.mock.calls[0];
+    expect(port).toBe(18080);
+    expect(modelId).toBe("mode-model");
+    expect(apiKey).toBe("test-key");
+    expect(messages).toEqual([
+      { role: "user", content: "第一轮" },
+      { role: "assistant", content: "第一轮回答" },
+      { role: "user", content: "Agent 轮" },
+    ]);
+    expect(systemPrompt).toBe(expectedIdentityPrompt);
+    expect(effort).toBe("medium");
+
+    capture.resolveAgent({ stopped: false, messages: [{ role: "assistant", content: "Agent 回答" }] });
+    await flushPromises();
+    await nextTick();
+    expect(useInferenceConfig().toRequestMessages()).toEqual([
+      { role: "user", content: "第一轮" },
+      { role: "assistant", content: "第一轮回答" },
+      { role: "user", content: "Agent 轮" },
+      { role: "assistant", content: "Agent 回答" },
+    ]);
+  });
+
+  it("renders an agent run as one assistant bubble with an inline tool timeline", async () => {
+    useSynchronousAnimationFrame();
+    const capture = mockAgentRunOnce();
+    const wrapper = await mountAndLoadModels(["agent-model"]);
+    await switchToAgentMode(wrapper);
+    await sendDraft(wrapper, "读文件");
+
+    expect(wrapper.findAll(".assistant-message")).toHaveLength(1);
+    capture.emit({ kind: "turnStart", turn: 1 });
+    capture.emit({ kind: "reasoningDelta", text: "先看看文件" });
+    capture.emit({ kind: "toolStart", id: "c1", name: "read", arguments: '{"path":"/tmp/a"}' });
+    await flushPromises();
+    await nextTick();
+
+    let step = wrapper.get(".tool-step");
+    expect(step.get(".tool-step-name").text()).toBe("read");
+    expect(step.get(".tool-step-args").text()).toContain('"path":"/tmp/a"');
+    expect(step.text()).toContain("进行中");
+    expect(step.classes()).toContain("tool-step-running");
+    expect(wrapper.get(".reasoning-text").text()).toBe("先看看文件");
+
+    capture.emit({ kind: "toolEnd", id: "c1", status: "ok", summary: "文件内容" });
+    await flushPromises();
+    await nextTick();
+    step = wrapper.get(".tool-step");
+    expect(step.text()).toContain("成功");
+    expect(step.get(".tool-step-summary").text()).toBe("文件内容");
+    expect(step.classes()).toContain("tool-step-ok");
+
+    capture.emit({ kind: "toolStart", id: "c2", name: "grep", arguments: '{"pattern":"x"}' });
+    capture.emit({ kind: "toolEnd", id: "c2", status: "error", summary: "无权限" });
+    capture.emit({ kind: "contentDelta", text: "最终回答" });
+    await flushPromises();
+    await nextTick();
+
+    expect(wrapper.findAll(".tool-step")).toHaveLength(2);
+    expect(wrapper.get(".tool-step-error").text()).toContain("失败");
+    expect(wrapper.get(".response-text").text()).toBe("最终回答");
+    // 整轮交互只在一个 assistant 气泡内。
+    expect(wrapper.findAll(".assistant-message")).toHaveLength(1);
+
+    capture.resolveAgent({
+      stopped: false,
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: '{"path":"/tmp/a"}' } }],
+        },
+        { role: "tool", content: "文件内容", tool_call_id: "c1" },
+        { role: "assistant", content: "最终回答" },
+      ],
+    });
+    await flushPromises();
+    await nextTick();
+    expect(wrapper.text()).toContain("200 OK");
+    expect(useInferenceConfig().toRequestMessages()).toEqual([
+      { role: "user", content: "读文件" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: '{"path":"/tmp/a"}' } }],
+      },
+      { role: "tool", content: "文件内容", tool_call_id: "c1" },
+      { role: "assistant", content: "最终回答" },
+    ]);
+  });
+
+  it("renders a round-limit notice inside the agent bubble", async () => {
+    useSynchronousAnimationFrame();
+    const capture = mockAgentRunOnce();
+    const wrapper = await mountAndLoadModels(["agent-budget"]);
+    await switchToAgentMode(wrapper);
+    await sendDraft(wrapper, "跑满轮数");
+
+    capture.emit({ kind: "contentDelta", text: "部分输出" });
+    capture.emit({ kind: "notice", message: "已达轮数上限（30）" });
+    await flushPromises();
+    await nextTick();
+
+    expect(wrapper.get(".tool-notice").text()).toContain("已达轮数上限");
+    expect(wrapper.get(".response-text").text()).toBe("部分输出");
+    expect(wrapper.findAll(".assistant-message")).toHaveLength(1);
+
+    capture.resolveAgent({ stopped: false, messages: [] });
+    await flushPromises();
+  });
+
+  it("marks a stopped agent run as cancelled and keeps the partial timeline", async () => {
+    useSynchronousAnimationFrame();
+    const capture = mockAgentRunOnce();
+    const wrapper = await mountAndLoadModels(["agent-stop"]);
+    await switchToAgentMode(wrapper);
+    await sendDraft(wrapper, "停止轮");
+
+    capture.emit({ kind: "toolStart", id: "c1", name: "read", arguments: "{}" });
+    await flushPromises();
+    await nextTick();
+    expect(wrapper.get(".tool-step").text()).toContain("进行中");
+
+    await wrapper.find("button.send-button").trigger("click");
+    await flushPromises();
+    await nextTick();
+    const requestId = tauriMocks.runAgentMessage.mock.calls[0][0];
+    expect(tauriMocks.stopInferenceStream).toHaveBeenCalledWith(requestId);
+
+    // 停止后后端迟到的 toolEnd(cancelled) 被终态过滤，步骤仍显示已取消。
+    capture.emit({ kind: "toolEnd", id: "c1", status: "cancelled", summary: "" });
+    capture.resolveAgent({ stopped: true, messages: [] });
+    await flushPromises();
+    await nextTick();
+
+    expect(wrapper.find(".assistant-message .chat-bubble").classes()).toContain("assistant-bubble-stopped");
+    expect(wrapper.text()).toContain("已停止⚪响应不完整");
+    expect(wrapper.get(".tool-step").text()).toContain("已取消");
+    // 被停止的运行不进入后续上下文，只有用户消息保留。
+    expect(useInferenceConfig().toRequestMessages()).toEqual([{ role: "user", content: "停止轮" }]);
   });
 
   it("renders compact request controls and an icon-only circular composer action", async () => {
@@ -1164,39 +1357,6 @@ describe("InferenceView", () => {
     expect(themeCss).toContain(".inference-shell .debug-workbench {\n  flex: 1;");
     expect(themeCss).toContain(".chat-shell {\n  height: 100%;\n  min-height: 500px;");
     expect(themeCss).not.toContain("clamp(500px, calc(100vh - 360px), 720px)");
-  });
-
-  it("renders the reset action and low-contrast conversation boundary styling", async () => {
-    useTestClock();
-    const wrapper = await mountAndLoadModels(["reset-style-model"]);
-    const resetButton = wrapper.get("button.reset-button");
-    expect(resetButton.text()).toBe("重置");
-    expect(resetButton.attributes("disabled")).toBeDefined();
-
-    await completeResolvedTurn(wrapper, "历史消息");
-    expect(wrapper.get("button.reset-button").attributes("disabled")).toBeUndefined();
-    await wrapper.get("button.reset-button").trigger("click");
-    await nextTick();
-
-    const boundary = wrapper.get(".conversation-boundary");
-    expect(boundary.attributes("aria-label")).toBe("新对话分隔");
-    expect(boundary.get(".new-conversation-label").text()).toBe("新对话");
-    expect(wrapper.get(".user-message .user-bubble").text()).toBe("历史消息");
-
-    const themeCss = readFileSync("src/assets/theme.css", "utf8");
-    const boundaryCss = themeCss.match(/\n\.conversation-boundary \{[\s\S]*?\n\}/)?.[0] ?? "";
-    const boundaryLineCss = themeCss.match(
-      /\n\.conversation-boundary::before,\s*\.conversation-boundary::after \{[\s\S]*?\n\}/,
-    )?.[0] ?? "";
-    const resetCss = themeCss.match(/\n\.reset-button \{[\s\S]*?\n\}/)?.[0] ?? "";
-    const composerCss = themeCss.match(/\n\.chat-composer \{[\s\S]*?\n\}/)?.[0] ?? "";
-
-    expect(boundaryCss).toContain("color: var(--text-tertiary)");
-    expect(boundaryLineCss).toContain("background: rgba(90, 103, 126, .18)");
-    expect(resetCss).toContain("align-self: flex-end");
-    expect(resetCss).toContain("height: var(--composer-control-size, 32px)");
-    expect(composerCss).toContain("border-top: 1px solid var(--split)");
-    expect(wrapper.get("button.reset-button").classes()).toContain("ant-btn-dangerous");
   });
 
   it("renders the Hermes Agent integration guide with a dynamic local endpoint", async () => {
