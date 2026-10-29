@@ -3,7 +3,7 @@ resolver = "2"
 members = ["tngui-core", "tngui-chat", "tngui-agent"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 
 [package]
