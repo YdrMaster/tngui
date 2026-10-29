@@ -1076,6 +1076,31 @@ describe("InferenceView", () => {
     expect(boundaryLineCss).toContain("background: rgba(90, 103, 126, .18)");
   });
 
+  it("keeps the run-mode switch centered with the send button and pinned when the input grows", async () => {
+    const wrapper = await mountAndLoadModels(["composer-layout"]);
+
+    const themeCss = readFileSync("src/assets/theme.css", "utf8");
+    // 输入栏整行贴底：文本域增高时按钮与模式切换都不会跟着上移。
+    const composerCss = themeCss.match(/\n\.chat-composer \{[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(composerCss).toContain("align-items: flex-end");
+
+    // 模式切换与发送按钮同为 32px 高、同样贴底，因此两者竖向居中对齐。
+    const runModeCss = themeCss.match(/\n\.run-mode-control \{[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(runModeCss).toContain("align-self: flex-end");
+    expect(runModeCss).toContain("height: var(--composer-control-size, 32px)");
+    expect(runModeCss).toContain("align-items: center");
+    const sendCss = themeCss.match(/\n\.send-button \{[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(sendCss).toContain("height: var(--composer-control-size, 32px)");
+
+    const composer = wrapper.get(".chat-composer");
+    expect(composer.find(".run-mode-control .ant-switch").exists()).toBe(true);
+    expect(composer.find("button.send-button").exists()).toBe(true);
+    // 模式切换在输入框左侧，发送按钮在右侧。
+    const children = Array.from(composer.element.children);
+    expect(children[0].classList.contains("run-mode-control")).toBe(true);
+    expect(children[children.length - 1].classList.contains("send-button")).toBe(true);
+  });
+
   it("inserts a 新对话 boundary on 新会话, cutting the request context but keeping history", async () => {
     useSynchronousAnimationFrame();
     const wrapper = await mountAndLoadModels(["new-session-model"]);

@@ -6,6 +6,7 @@
 - [x] 1.2 在 workspace 新增 `tngui-agent` 成员，依赖 `rpi-ai` / `rpi-agent` / `rpi-tools` / `rpi-harness`（统一 `0.11.0`）。验证：`cargo build -p tngui-agent` 通过，且 `cargo tree -p tngui-agent` 同时列出这四个 `rpi-*` 包。
 - [x] 1.3 令 `tngui-app` 依赖 `tngui-chat` 与 `tngui-agent`，并删除 `tngui-core` 中已迁出的 `inference` 传输模块。验证：`cargo build --workspace` 通过，且 `cargo tree -p tngui-core` 输出不含任何 `rpi-` 包。
 - [x] 1.4 在仓库文档（`README.md` 或 `docs/`）记录 `tngui-chat` / `tngui-agent` 的职责边界与"core 不依赖 rpi"的约束。验证：文档存在对应小节，且其中 crate 名与 workspace 实际成员一致。
+- [x] 1.5 把版本号随本变更推进到 `0.5.0`：workspace `version`、`Cargo.lock` 的四个本地包（`tngui-app` / `tngui-core` / `tngui-chat` / `tngui-agent`）、`frontend/package.json` 与 `frontend/package-lock.json` 全部一致（Tauri 应用版本取自 Cargo workspace 版本，`tauri.conf.json` 不单独声明）。验证：`grep` 全仓无本地包残留 `0.4.11`（第三方 crate 除外），且 `cargo metadata` / `npm pkg get version` 报告的版本均为 `0.5.0`。
 
 ## 2. 共用消息模型与统一事件
 

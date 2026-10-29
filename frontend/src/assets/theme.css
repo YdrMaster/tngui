@@ -435,6 +435,10 @@ button, input, textarea { font: inherit; }
 /* 运行模式分段切换：对齐设置页入口配置里本机端口的 127.0.0.1/0.0.0.0 切换控件。 */
 .run-mode-control {
   flex: 0 0 auto;
+  /* 与发送按钮同高并一起贴住输入栏底部：两者竖向居中对齐，
+     且输入框增高（1→8 行）时控件位置不动。 */
+  align-self: flex-end;
+  height: var(--composer-control-size, 32px);
   display: flex;
   align-items: center;
 }
